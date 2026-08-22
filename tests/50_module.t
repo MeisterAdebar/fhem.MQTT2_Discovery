@@ -163,6 +163,50 @@ subtest 'activate und deactivate erhalten fremde Clients' => sub {
 	is(attr_value('server', 'clientOrder'), 'CUSTOM MQTT2_DEVICE MQTT_GENERIC_BRIDGE', 'nur eigener Eintrag wird entfernt');
 };
 
+subtest 'passendes IODev-ignoreRegexp wird einmalig geloggt' => sub {
+	reset_env();
+	add_iodev('client', 'MQTT2_CLIENT');
+	$main::attr{client}{ignoreRegexp} = 'homeassistant/[^:"]+/config';
+	my ($client_hash, $client_error) = define_discovery('clientDiscovery', 'client');
+	is($client_error, undef, 'Client-Discovery wird mit gespeichertem Filter definiert');
+	like(reading_value('clientDiscovery', 'lastWarning'),
+		qr/IODev client blockiert Discovery-Topic homeassistant\/sensor\/example\/config/,
+		'Warnungsreading nennt IODev und blockiertes Beispieltopic');
+	my @client_warnings = grep {
+		$_->[2] =~ /ignoreRegexp am IODev client blockiert Discovery-Topic/
+	} @{ log_entries() };
+	is(scalar(@client_warnings), 1, 'Define schreibt genau eine Filterwarnung ins Log');
+	is($client_warnings[0][1], 2, 'Filterwarnung verwendet die sichtbare Logstufe 2');
+	like($client_warnings[0][2], qr/regexp=homeassistant\/\[\^:"\]\+\/config/,
+		'Logmeldung enthaelt die verursachende ignoreRegexp');
+
+	# INITIALIZED prueft gespeicherte Attribute erneut, darf dieselbe Warnung
+	# innerhalb desselben Laufs jedoch nicht vervielfachen.
+	main::MQTT2_DISCOVERY_Notify($client_hash, {
+		NAME => 'global', CHANGED => ['INITIALIZED'],
+	});
+	@client_warnings = grep {
+		$_->[2] =~ /ignoreRegexp am IODev client blockiert Discovery-Topic/
+	} @{ log_entries() };
+	is(scalar(@client_warnings), 1, 'INITIALIZED dupliziert dieselbe Logmeldung nicht');
+
+	reset_env();
+	add_iodev('server', 'MQTT2_SERVER');
+	my ($server_hash, $server_error) = define_discovery('serverDiscovery', 'server');
+	is($server_error, undef, 'Server-Discovery startet ohne Filterwarnung');
+	$main::attr{server}{ignoreRegexp} = 'tasmota/discovery/.+/sensors';
+	main::MQTT2_DISCOVERY_Notify($server_hash, {
+		NAME => 'global',
+		CHANGED => ['ATTR server ignoreRegexp tasmota/discovery/.+/sensors'],
+	});
+	my @server_warnings = grep {
+		$_->[2] =~ /ignoreRegexp am IODev server blockiert Discovery-Topic/
+	} @{ log_entries() };
+	is(scalar(@server_warnings), 1, 'spaetere IODev-Attributaenderung wird sofort geloggt');
+	like($server_warnings[0][2], qr{tasmota/discovery/001122AABBCC/sensors},
+		'Tasmota-sensors wird als konkret blockiertes Beispieltopic genannt');
+};
+
 subtest 'Rescan-Grenzen' => sub {
 	reset_env();
 	add_iodev('client', 'MQTT2_CLIENT');
@@ -406,6 +450,18 @@ subtest 'Registry roundtrippt als nicht ausfuehrbares JSON' => sub {
 	($record) = values %{ $restored_bytes->{devices} };
 	($mapping) = values %{ $record->{entities} };
 	is($mapping->{metadata}{unit}, "\x{b0}C", 'UTF-8-Bytefolge bleibt nach Neustart unveraendert');
+
+	# FHEMs Standardmodus bytestream schreibt Zeichen bis U+00FF als einzelne
+	# Bytes ins statefile. Auch dieser reale Neustartfall muss lesbar bleiben.
+	my $stored_bytestream = $stored;
+	utf8::downgrade($stored_bytestream, 1);
+	$hash->{READINGS}{'.registry'}{VAL} = $stored_bytestream;
+	delete $hash->{helper}{registry};
+	my $restored_bytestream = main::MQTT2_DISCOVERY_registry($hash);
+	($record) = values %{ $restored_bytestream->{devices} };
+	($mapping) = values %{ $record->{entities} };
+	is($mapping->{metadata}{unit}, "\x{b0}C",
+		'bytestream-Ein-Byte-Zeichen bleibt nach Neustart unveraendert');
 };
 
 subtest 'Registry wird beim Start erst nach dem statefile gecacht' => sub {

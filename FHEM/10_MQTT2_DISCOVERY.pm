@@ -22,7 +22,7 @@ use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
 use vars qw(%defs %attr %modules $readingFnAttributes);
 
-our $MQTT2_DISCOVERY_VERSION = '0.9.2';
+our $MQTT2_DISCOVERY_VERSION = '0.9.3';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
 
 # --- FHEM-Zugriffe und Logging ------------------------------------------------
@@ -175,6 +175,7 @@ sub MQTT2_DISCOVERY_Define($$) {
 	MQTT2_DISCOVERY_reading($hash, 'state', MQTT2_DISCOVERY_state($hash));
 	MQTT2_DISCOVERY_update_counts($hash);
 	MQTT2_DISCOVERY_log($hash, 2, "defined for $iodev->{TYPE} $io_name; version=$MQTT2_DISCOVERY_VERSION");
+	MQTT2_DISCOVERY_check_ignore_regexp($hash);
 	return undef;
 }
 
@@ -355,32 +356,48 @@ sub MQTT2_DISCOVERY_deactivate($) {
 	return undef;
 }
 
-# Warnt, wenn das IODev-ignoreRegexp typische Discovery-Topics ausfiltern wuerde.
+# Warnt einmalig, wenn das IODev-ignoreRegexp ein typisches Discovery-Topic
+# bereits vor dem Parser-Dispatch ausfiltern wuerde.
 sub MQTT2_DISCOVERY_check_ignore_regexp($) {
 	my ($hash) = @_;
+	my $io_name = $hash->{IODevName};
 	my $regexp = MQTT2_DISCOVERY_gateway($hash)->attr_value(
-		$hash->{IODevName}, 'ignoreRegexp', '',
+		$io_name, 'ignoreRegexp', '',
 	);
-	return if $regexp eq '';
+
+	# Ein entferntes oder nicht passendes Filter darf bei einer spaeter erneut
+	# passenden Konfiguration wieder genau eine neue Warnung ausloesen.
+	if ($regexp eq '') {
+		delete $hash->{helper}{ignore_regexp_warning};
+		return;
+	}
 
 	# Beispieltopics pruefen die haeufigen Discovery-Layouts, ohne reale
 	# Nachrichten oder Devices zu erzeugen.
 	for my $prefix (@{ MQTT2_DISCOVERY_prefixes($hash) }) {
-		my $matches = eval {
-			"$prefix/sensor/example/config:{}" =~ /$regexp/
-				|| "$prefix/001122AABBCC/sensors:{}" =~ /$regexp/
-		};
+		my @topics = (
+			"$prefix/sensor/example/config",
+			"$prefix/001122AABBCC/sensors",
+		);
 
-		# Ein Treffer auf typische Discovery-Topics erklaert ausbleibende Geraete
-		# fruehzeitig, bevor der Filter echte Broker-Nachrichten unbemerkt verwirft.
-		if ($matches) {
-			my $warning = 'ignoreRegexp blockiert moeglicherweise Discovery-Nachrichten';
+		for my $topic (@topics) {
+			my $matches = eval { "$topic:{}" =~ /$regexp/ };
+			next if !$matches;
+			my $signature = join("\0", $io_name, $regexp, $topic);
+
+			# Define, activate und Lifecycle-Notify koennen dieselbe Konfiguration
+			# pruefen; im Log soll sie trotzdem nur einmal pro Lauf erscheinen.
+			return if ($hash->{helper}{ignore_regexp_warning} || '') eq $signature;
+			$hash->{helper}{ignore_regexp_warning} = $signature;
+			my $warning = "ignoreRegexp am IODev $io_name blockiert Discovery-Topic $topic";
 			MQTT2_DISCOVERY_reading($hash, 'lastWarning', $warning);
-			MQTT2_DISCOVERY_log($hash, 2, "warning: $warning; prefix=$prefix");
+			MQTT2_DISCOVERY_log($hash, 2, "warning: $warning; regexp=$regexp");
 			return;
 		}
+
 	}
 
+	delete $hash->{helper}{ignore_regexp_warning};
 }
 
 # Spielt den lokalen MQTT2_SERVER-Retain-Cache als gemeinsamen Discovery-Batch erneut ein.
@@ -506,10 +523,21 @@ sub MQTT2_DISCOVERY_Notify($$) {
 	return undef if ($device->{NAME} || '') ne 'global';
 	my $events = deviceEvents($device, 1);
 	return undef if ref($events) ne 'ARRAY';
+	my $lifecycle = grep { $_ eq 'INITIALIZED' || $_ eq 'REREADCFG' } @$events;
+	my $io_name = $hash->{IODevName} || '';
+	my $ignore_regexp_changed = grep {
+		/^(?:ATTR|DELETEATTR)\s+\Q$io_name\E\s+ignoreRegexp(?:\s|$)/
+	} @$events;
+
+	# Beim Start sind IODev-Attribute und clientOrder vollstaendig geladen. Die
+	# erneute, deduplizierte Pruefung erfasst deshalb auch gespeicherte Filter.
+	# Globale Attributereignisse machen spaetere Aenderungen sofort sichtbar.
+	MQTT2_DISCOVERY_check_ignore_regexp($hash)
+		if $lifecycle || $ignore_regexp_changed;
 
 	# INITIALIZED folgt beim Start auf das statefile; REREADCFG wird unmittelbar
 	# vor der Rueckkehr in den Eventloop ausgeloest und darf denselben Start planen.
-	return undef if !grep { $_ eq 'INITIALIZED' || $_ eq 'REREADCFG' } @$events;
+	return undef if !$lifecycle;
 	my $queue = $hash->{helper}{queue};
 	return undef if ref($queue) ne 'HASH' || !$queue->{waiting_for_init};
 
@@ -919,9 +947,15 @@ sub MQTT2_DISCOVERY_registry($) {
 	my $stored = MQTT2_DISCOVERY_gateway($hash)->reading_value($hash->{NAME}, '.registry', '');
 	my $registry;
 	eval {
-		$registry = utf8::is_utf8($stored)
-			? JSON::PP->new->decode($stored)
-			: decode_json($stored);
+		# Unicode-Strings werden als Zeichen dekodiert. Bei ungeflaggten Strings
+		# zuerst UTF-8 versuchen und fuer FHEMs bytestream-Statefile auf die dort
+		# uebliche Ein-Byte-Zeichenkodierung zurueckfallen.
+		if (utf8::is_utf8($stored)) {
+			$registry = JSON::PP->new->decode($stored);
+		} else {
+			eval { $registry = decode_json($stored); 1 }
+				or $registry = JSON::PP->new->decode($stored);
+		}
 	} if $stored ne '';
 
 	# Ein fehlender oder strukturell veralteter Persistenzstand wird durch eine

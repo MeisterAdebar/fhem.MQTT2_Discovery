@@ -8,9 +8,10 @@ use strict;
 use warnings;
 use Test2::V0;
 use lib 'lib/FHEM', 'tests/lib';
-use FHEMTestEnv qw(reset_env add_iodev define_discovery reading_value);
+use FHEMTestEnv qw(reset_env add_iodev define_discovery receive_client_message
+	reading_value command_log);
 
-our @TIMERS;
+our (@TIMERS, $MQTT2_DISCOVERY_QUEUE_DELAY);
 
 # Liefert eine feste Zeitbasis fuer reproduzierbare Timertermine.
 sub main::gettimeofday { return 1_700_000_000 }
@@ -26,12 +27,6 @@ sub main::RemoveInternalTimer {
 	@TIMERS = grep { $_->[2] != $argument || $_->[1] ne $function } @TIMERS;
 	return;
 }
-# Liefert die am ausloesenden Device gespeicherten FHEM-Ereignisse.
-sub main::deviceEvents {
-	my ($device, undef) = @_;
-	return $device->{CHANGED};
-}
-
 my $loaded = do './FHEM/10_MQTT2_DISCOVERY.pm';
 die $@ if $@;
 die $! if !defined $loaded;
@@ -46,9 +41,10 @@ sub run_next_timer {
 
 # Erstellt fuer jeden Queue-Test eine frische Discovery- und IODev-Umgebung.
 sub setup {
+	my ($io_type) = @_;
 	@TIMERS = ();
 	reset_env();
-	my $io = add_iodev('mqtt', 'MQTT2_SERVER');
+	my $io = add_iodev('mqtt', $io_type || 'MQTT2_SERVER');
 	my ($hash, $error) = define_discovery('discovery', 'mqtt');
 	die $error if $error;
 	$main::attr{discovery}{deviceNamePrefix} = 'MQTT2_';
@@ -171,6 +167,132 @@ subtest 'retained Discovery wartet beim Neustart auf INITIALIZED' => sub {
 	run_next_timer() while @TIMERS;
 	is(reading_value('discovery', 'discoveredEntities'), 2,
 		'REREADCFG verarbeitet die zusaetzlich geparkte Entity');
+};
+
+subtest 'MQTT2_CLIENT verarbeitet Retained erst nach dem Neustart' => sub {
+	my ($running, $io) = setup('MQTT2_CLIENT');
+	is(main::MQTT2_DISCOVERY_Set($running, 'discovery', 'activate'), undef,
+		'Discovery wird in die Parserreihenfolge des Clients aufgenommen');
+	my $client_order = $main::attr{mqtt}{clientOrder};
+	my $device = '"dev":{"ids":["z2m_light"],"name":"WZ_LIGHTSTRIP_LICHT"}';
+	my @discoveries = (
+		[
+			'homeassistant/light/z2m_light/light/config',
+			'{"schema":"json","brightness":true,"brightness_scale":254,'
+				. '"stat_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT",'
+				. '"cmd_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT/set",'
+				. '"avty":[{"t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT/availability",'
+				. '"val_tpl":"{{ value_json.state }}"},{"t":"zigbee2mqtt/bridge/state",'
+				. '"val_tpl":"{{ value_json.state }}"}],"uniq_id":"z2m_light_light",'
+				. $device . '}',
+		],
+		[
+			'homeassistant/select/z2m_light/effect/config',
+			'{"stat_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT",'
+				. '"stat_val_tpl":"{{ value_json.effect }}",'
+				. '"cmd_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT/set/effect",'
+				. '"ops":["blink","breathe"],"uniq_id":"z2m_light_effect",'
+				. $device . '}',
+		],
+		[
+			'homeassistant/number/z2m_light/effect_speed/config',
+			'{"stat_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT",'
+				. '"stat_val_tpl":"{{ value_json.effect_speed }}",'
+				. '"cmd_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT/set/effect_speed",'
+				. '"min":0,"max":1,"step":0.01,"uniq_id":"z2m_light_effect_speed",'
+				. $device . '}',
+		],
+		[
+			'homeassistant/sensor/z2m_light/linkquality/config',
+			'{"stat_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT",'
+				. '"stat_val_tpl":"{{ value_json.linkquality }}",'
+				. '"uniq_id":"z2m_light_linkquality",' . $device . '}',
+		],
+	);
+
+	# Der laufende Client empfaengt einen Retained-Burst. Alle Entities eines
+	# Zieldevices werden erst nach dem vollstaendigen Burst gemeinsam geschrieben.
+	for my $discovery (@discoveries) {
+		is(receive_client_message('mqtt', 'z2m', @$discovery), ['MQTT2_DISCOVERY'],
+			'MQTT2_CLIENT reicht das Discovery-Topic an den Parser weiter');
+	}
+
+	run_next_timer() while @TIMERS;
+	my $target = 'MQTT2_WZ_LIGHTSTRIP_LICHT';
+	my $stored_registry = reading_value('discovery', '.registry');
+	my $reading_list = $main::attr{$target}{readingList};
+	my $set_list = $main::attr{$target}{setList};
+	my $device_topic = $main::attr{$target}{devicetopic};
+	my $cid = $main::defs{$target}{DEF};
+	ok($reading_list, 'erster Client-Lauf erzeugt die erwartete readingList');
+	is(scalar(split /\n/, $reading_list), 3,
+		'das reale WZ-Beispiel erzeugt drei eindeutige readingList-Zeilen');
+
+	# Beim Neustart sind Device, Attribute und statefile bereits vorhanden. Der
+	# MQTT2_CLIENT verbindet sich aber erst nach init_done und liefert dann die
+	# Retained-Nachrichten des Brokers.
+	@TIMERS = ();
+	reset_env();
+	my $restart_io = add_iodev('mqtt', 'MQTT2_CLIENT');
+	is(main::CommandAttr(undef, "mqtt clientOrder $client_order"), undef,
+		'gespeicherte Client-Reihenfolge wird beim Neustart wiederhergestellt');
+	is(main::CommandDefine(undef, "$target MQTT2_DEVICE $cid mqtt"), undef,
+		'vorhandenes Zieldevice wird aus der Konfiguration geladen');
+	$main::attr{$target}{readingList} = join("\n", ($reading_list) x 8);
+	is(scalar(split /\n/, $main::attr{$target}{readingList}), 24,
+		'der gemeldete Fehlerstand aus acht Kopien enthaelt 24 Zeilen');
+	$main::attr{$target}{setList} = $set_list;
+	$main::attr{$target}{devicetopic} = $device_topic;
+	$main::init_done = 0;
+	my ($restarted, $define_error) = define_discovery('discovery', 'mqtt');
+	is($define_error, undef, 'Discovery wird vor INITIALIZED definiert');
+	$main::attr{discovery}{deviceNamePrefix} = 'MQTT2_';
+	$restarted->{READINGS}{'.registry'} = {
+		VAL => $stored_registry, TIME => '2026-08-22 12:00:00',
+	};
+	$main::attr{mqtt}{ignoreRegexp} = 'homeassistant/[^:"]+/config';
+	$main::init_done = 1;
+	main::MQTT2_DISCOVERY_Notify($restarted, {
+		NAME => 'global', CHANGED => ['INITIALIZED'],
+	});
+	is(scalar(@TIMERS), 0,
+		'INITIALIZED startet ohne vorzeitig empfangene Client-Nachricht keine Queue');
+
+	# MQTT2_CLIENT verwirft passende Topics vor dem Dispatch. Dadurch kann die
+	# Discovery vorhandene Duplikate weder erzeugen noch korrigieren.
+	for my $discovery (@discoveries) {
+		is(receive_client_message('mqtt', 'z2m', @$discovery), [],
+			'ignoreRegexp filtert das Retained-Topic vor MQTT2_DISCOVERY');
+	}
+
+	is(scalar(@TIMERS), 0, 'gefilterte Retained-Nachrichten planen keinen Worker');
+	is($main::attr{$target}{readingList}, join("\n", ($reading_list) x 8),
+		'ohne Parser-Aufruf bleibt die vorhandene achtfache readingList unveraendert');
+
+	# Ohne Filter verarbeitet die Queue denselben Retained-Burst. Der Generator
+	# fuehrt alle Entities einmal zusammen und ersetzt den alten Besitzstand. Die
+	# testweise Wartezeit von fuenf Sekunden veraendert nur den Timertermin.
+	delete $main::attr{mqtt}{ignoreRegexp};
+	local $MQTT2_DISCOVERY_QUEUE_DELAY = 5;
+	my $commands_before_replay = scalar @{ command_log() };
+	for my $discovery (@discoveries) {
+		is(receive_client_message('mqtt', 'z2m', @$discovery), ['MQTT2_DISCOVERY'],
+			'Retained-Topic erreicht MQTT2_DISCOVERY nach Entfernen des Filters');
+	}
+
+	is(scalar(@TIMERS), 1, 'der komplette Retained-Burst plant genau einen Worker');
+	is($TIMERS[0][0], main::gettimeofday() + 5,
+		'die Queue beginnt testweise erst fuenf Sekunden nach dem ersten Topic');
+	run_next_timer() while @TIMERS;
+	is($main::attr{$target}{readingList}, $reading_list,
+		'die Verarbeitung reduziert acht alte Kopien auf genau einen Besitzstand');
+	is(scalar(split /\n/, $main::attr{$target}{readingList}), 3,
+		'der fertige Attributwert enthaelt wieder nur drei Zeilen');
+	my @replay_commands = @{ command_log() }[
+		$commands_before_replay .. $#{ command_log() }
+	];
+	is(scalar(grep { /^attr \Q$target\E readingList / } @replay_commands), 1,
+		'der gesamte Erzeugungsweg schreibt readingList genau einmal');
 };
 
 subtest 'regulaeres Autocreate vor dem Discovery-Worker wird uebernommen' => sub {

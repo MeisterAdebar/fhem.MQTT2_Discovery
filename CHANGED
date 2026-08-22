@@ -1,6 +1,16 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 0c1c5301ee55aa344e6a4d173e1cf43a6c40bf0f52d58b25914cfed708bd69a0
+# Msg-SHA256: c4adfe77a6f4d3448c10307c2ad4099be500b131bd6559dffb6364a568b5dc7f
+- bugfix: MQTT2_DISCOVERY: MQTT2_DISCOVERY-Neustart ohne readingList-Duplikate
+  - bytestream-Registry korrekt dekodieren
+  - Queue bis INITIALIZED beziehungsweise REREADCFG zurueckhalten
+  - vor blockierender ignoreRegexp am IODev warnen
+  - Neustart- und MQTT2_CLIENT-Regressionstests ergaenzen
+- change: MQTT2_DISCOVERY: MQTT2_DISCOVERY: Discovery-Queue erst nach
+  Initialisierung starten
+  - Queue bis INITIALIZED oder REREADCFG ereignisbasiert zurueckstellen
+  - readingList-Duplikate bei Neustarts verhindern
+  - Lifecycle- und Queue-Regressionstests ergaenzen
 - change: MQTT2_DISCOVERY: CHANGED automatisch aus Commit-Messages erzeugt
   - commit-msg-Hook fuer die Changelog-Erstellung ergaenzt
   - ASCII- und 80-Zeichen-Regeln von FHEM beruecksichtigt

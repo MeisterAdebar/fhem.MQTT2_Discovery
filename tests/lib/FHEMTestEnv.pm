@@ -11,7 +11,8 @@ use warnings;
 use Exporter qw(import);
 use JSON::PP qw(encode_json);
 
-our @EXPORT_OK = qw(reset_env add_iodev define_discovery dispatch_message attr_value reading_value command_log log_entries);
+our @EXPORT_OK = qw(reset_env add_iodev define_discovery dispatch_message
+	receive_client_message attr_value reading_value command_log log_entries);
 our @COMMAND_LOG;
 our @LOG_ENTRIES;
 
@@ -58,6 +59,7 @@ sub dispatch_message {
 	my $io = $main::defs{$io_name};
 	my @order = grep { $_ ne '' } split /:/, $io->{Clients};
 	my @seen;
+
 	for my $module (@order) {
 		next if !$main::modules{$module};
 		my $message = "autocreate=simple\0$cid\0$topic\0$payload";
@@ -70,6 +72,18 @@ sub dispatch_message {
 		}
 	}
 	return \@seen;
+}
+
+# Bildet den Empfangspfad von MQTT2_CLIENT bis zum geordneten Parser-Dispatch
+# nach. ignoreRegexp wird im IODev ausgewertet, bevor ein Client die Nachricht
+# sehen kann.
+sub receive_client_message {
+	my ($io_name, $cid, $topic, $payload) = @_;
+	my $io = $main::defs{$io_name};
+	die "$io_name ist kein MQTT2_CLIENT" if !$io || $io->{TYPE} ne 'MQTT2_CLIENT';
+	my $ignore_regexp = $main::attr{$io_name}{ignoreRegexp} // '';
+	return [] if $ignore_regexp ne '' && "$topic:$payload" =~ m/$ignore_regexp/s;
+	return dispatch_message($io_name, $cid, $topic, $payload);
 }
 
 # Liefert einen Attributwert direkt aus der simulierten FHEM-Datenstruktur.
@@ -95,6 +109,12 @@ sub AttrVal($$$) {
 sub ReadingsVal($$$) {
 	my ($device, $reading, $default) = @_;
 	return exists($defs{$device}{READINGS}{$reading}) ? $defs{$device}{READINGS}{$reading}{VAL} : $default;
+}
+
+# Liefert die am ausloesenden Device gespeicherten FHEM-Ereignisse.
+sub deviceEvents {
+	my ($device, undef) = @_;
+	return $device->{CHANGED};
 }
 
 # Aktualisiert ein simuliertes Reading mit einem festen reproduzierbaren Zeitstempel.
