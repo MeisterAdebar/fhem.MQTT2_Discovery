@@ -22,7 +22,7 @@ use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
 use vars qw(%defs %attr %modules $readingFnAttributes);
 
-our $MQTT2_DISCOVERY_VERSION = '0.9.1';
+our $MQTT2_DISCOVERY_VERSION = '0.9.2';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
 
 # --- FHEM-Zugriffe und Logging ------------------------------------------------
@@ -110,6 +110,7 @@ sub MQTT2_DISCOVERY_Initialize($) {
 	$hash->{SetFn} = 'MQTT2_DISCOVERY_Set';
 	$hash->{AttrFn} = 'MQTT2_DISCOVERY_Attr';
 	$hash->{ParseFn} = 'MQTT2_DISCOVERY_Parse';
+	$hash->{NotifyFn} = 'MQTT2_DISCOVERY_Notify';
 	# Kontextbezogene FHEMWEB-Hilfe fuer Set und Attr aktivieren. Die
 	# zugehoerigen Commandref-Anker stehen in der eingebetteten HTML-Dokumentation.
 	$hash->{FW_deviceOverview} = 1;
@@ -168,6 +169,7 @@ sub MQTT2_DISCOVERY_Define($$) {
 	$hash->{IODev} = $iodev;
 	$hash->{IODevName} = $io_name;
 	$hash->{DEF} = $io_name;
+	$hash->{NOTIFYDEV} = 'global';
 	$modules{MQTT2_DISCOVERY}{defptr}{$io_name} = $hash;
 	MQTT2_DISCOVERY_registry($hash);
 	MQTT2_DISCOVERY_reading($hash, 'state', MQTT2_DISCOVERY_state($hash));
@@ -481,6 +483,40 @@ sub MQTT2_DISCOVERY_Parse($$) {
 
 # --- Asynchrone Verarbeitung -------------------------------------------------
 
+# Plant genau einen Queue-Worker; weitere Nachrichten werden bis zu dessen Lauf
+# nur im bereits vorhandenen Queue-Zustand zusammengefuehrt.
+sub MQTT2_DISCOVERY_schedule_queue($) {
+	my ($hash) = @_;
+	my $queue = $hash->{helper}{queue};
+	return if ref($queue) ne 'HASH' || $queue->{scheduled};
+
+	delete $queue->{waiting_for_init};
+	$queue->{scheduled} = 1;
+	MQTT2_DISCOVERY_gateway($hash)->schedule(
+		$MQTT2_DISCOVERY_QUEUE_DELAY, $hash, 'MQTT2_DISCOVERY_process_queue',
+	);
+	return;
+}
+
+# Startet vor INITIALIZED gesammelte Discovery-Arbeit nach dem globalen
+# Lebenszyklusereignis genau einmal.
+sub MQTT2_DISCOVERY_Notify($$) {
+	my ($hash, $device) = @_;
+	return undef if ref($device) ne 'HASH';
+	return undef if ($device->{NAME} || '') ne 'global';
+	my $events = deviceEvents($device, 1);
+	return undef if ref($events) ne 'ARRAY';
+
+	# INITIALIZED folgt beim Start auf das statefile; REREADCFG wird unmittelbar
+	# vor der Rueckkehr in den Eventloop ausgeloest und darf denselben Start planen.
+	return undef if !grep { $_ eq 'INITIALIZED' || $_ eq 'REREADCFG' } @$events;
+	my $queue = $hash->{helper}{queue};
+	return undef if ref($queue) ne 'HASH' || !$queue->{waiting_for_init};
+
+	MQTT2_DISCOVERY_schedule_queue($hash);
+	return undef;
+}
+
 # Koalesziert Config-Nachrichten pro Topic und plant genau einen kurzen Queue-Timer.
 sub MQTT2_DISCOVERY_enqueue($$$$) {
 	my ($hash, $cid, $topic, $payload) = @_;
@@ -492,10 +528,14 @@ sub MQTT2_DISCOVERY_enqueue($$$$) {
 	$queue->{messages}{$topic} = [$cid, $topic, $payload];
 	return if $queue->{scheduled};
 
-	$queue->{scheduled} = 1;
-	MQTT2_DISCOVERY_gateway($hash)->schedule(
-		$MQTT2_DISCOVERY_QUEUE_DELAY, $hash, 'MQTT2_DISCOVERY_process_queue',
-	);
+	# Vor dem Einlesen des statefile bleibt die Arbeit ausschliesslich gespeichert;
+	# global:INITIALIZED beziehungsweise global:REREADCFG startet sie spaeter.
+	if (defined($main::init_done) && !$main::init_done) {
+		$queue->{waiting_for_init} = 1;
+		return;
+	}
+
+	MQTT2_DISCOVERY_schedule_queue($hash);
 	return;
 }
 
@@ -510,6 +550,14 @@ sub MQTT2_DISCOVERY_process_queue($) {
 	if (!$defs{ $hash->{NAME} } || $defs{ $hash->{NAME} } != $hash
 			|| MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'disable', 0)) {
 		MQTT2_DISCOVERY_clear_queue($hash);
+		return;
+	}
+
+	# Der Worker darf selbst bei einem unerwartet fruehen Timerlauf keine Daten
+	# verarbeiten. Das naechste Lifecycle-Ereignis startet die geparkte Queue.
+	if (defined($main::init_done) && !$main::init_done) {
+		$queue->{scheduled} = 0;
+		$queue->{waiting_for_init} = 1;
 		return;
 	}
 

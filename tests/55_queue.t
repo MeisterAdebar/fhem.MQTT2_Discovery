@@ -26,6 +26,11 @@ sub main::RemoveInternalTimer {
 	@TIMERS = grep { $_->[2] != $argument || $_->[1] ne $function } @TIMERS;
 	return;
 }
+# Liefert die am ausloesenden Device gespeicherten FHEM-Ereignisse.
+sub main::deviceEvents {
+	my ($device, undef) = @_;
+	return $device->{CHANGED};
+}
 
 my $loaded = do './FHEM/10_MQTT2_DISCOVERY.pm';
 die $@ if $@;
@@ -82,6 +87,90 @@ subtest 'Parse legt Arbeit ab und konsumiert Discovery sofort' => sub {
 		'fertige readingList setzt FHEMs fnd vor dem Autocreate-Zweig');
 	is(reading_value('discovery', 'discoveredEntities'), 1, 'Zaehler ist nach Batch-Abschluss aktuell');
 	is(scalar(@TIMERS), 0, 'leere Queue plant keinen weiteren Timer');
+};
+
+subtest 'retained Discovery wartet beim Neustart auf INITIALIZED' => sub {
+	my ($running, $io) = setup();
+	my $topic = 'homeassistant/sensor/node/temperature/config';
+	my $payload = '{"stat_t":"node/data","val_tpl":"{{ value_json.temperature }}",'
+		. '"uniq_id":"node_temperature","dev":{"ids":["node"],"name":"Node"}}';
+
+	# Der erste Lauf erzeugt den Besitzstand, den FHEM beim Neustart erst aus dem
+	# statefile wiederherstellt.
+	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	run_next_timer() while @TIMERS;
+	my $target = 'MQTT2_Node';
+	my $stored_registry = reading_value('discovery', '.registry');
+	my $reading_list = $main::attr{$target}{readingList};
+	my $set_list = $main::attr{$target}{setList};
+	my $device_topic = $main::attr{$target}{devicetopic};
+	my $cid = $main::defs{$target}{DEF};
+
+	# Beim Neustart sind Definitionen und Attribute bereits vorhanden, die
+	# persistierte Registry fehlt jedoch bis zum Einlesen des statefile.
+	@TIMERS = ();
+	reset_env();
+	my $restart_io = add_iodev('mqtt', 'MQTT2_SERVER');
+	is(main::CommandDefine(undef, "$target MQTT2_DEVICE $cid mqtt"), undef,
+		'vorhandenes Zieldevice wird aus der Konfiguration geladen');
+	$main::attr{$target}{readingList} = $reading_list;
+	$main::attr{$target}{setList} = $set_list if defined $set_list;
+	$main::attr{$target}{devicetopic} = $device_topic if defined $device_topic;
+	$main::init_done = 0;
+	my ($restarted, $define_error) = define_discovery('discovery', 'mqtt');
+	is($define_error, undef, 'Discovery wird vor INITIALIZED definiert');
+	$main::attr{discovery}{deviceNamePrefix} = 'MQTT2_';
+
+	main::MQTT2_DISCOVERY_Parse($restart_io, mqtt_message($topic, $payload));
+	is(scalar(@TIMERS), 0, 'vor INITIALIZED wird kein Polling-Timer eingeplant');
+	ok($restarted->{helper}{queue}{waiting_for_init},
+		'retained Discovery bleibt bis zum Lifecycle-Ereignis geparkt');
+	main::MQTT2_DISCOVERY_process_queue($restarted);
+	is($main::attr{$target}{readingList}, $reading_list,
+		'defensiver Direktlauf vor INITIALIZED veraendert die readingList nicht');
+	ok(!exists($restarted->{helper}{registry}),
+		'leerer Vor-statefile-Stand wird weiterhin nicht gecacht');
+	is(scalar(@TIMERS), 0, 'defensiver Direktlauf startet ebenfalls kein Polling');
+
+	# Nach INITIALIZED muss dieselbe Nachricht gegen den restaurierten Besitzstand
+	# idempotent verarbeitet werden.
+	$restarted->{READINGS}{'.registry'} = {
+		VAL => $stored_registry, TIME => '2026-08-22 12:00:00',
+	};
+	$main::init_done = 1;
+	main::MQTT2_DISCOVERY_Notify($restarted, {
+		NAME => 'global', CHANGED => ['INITIALIZED'],
+	});
+	is(scalar(@TIMERS), 1, 'INITIALIZED startet die geparkte Queue genau einmal');
+	main::MQTT2_DISCOVERY_Notify($restarted, {
+		NAME => 'global', CHANGED => ['INITIALIZED'],
+	});
+	is(scalar(@TIMERS), 1, 'wiederholtes INITIALIZED erzeugt keinen zweiten Timer');
+	is($TIMERS[0][3], 0, 'Lifecycle-Timer blockiert den FHEM-Start nicht');
+	run_next_timer() while @TIMERS;
+	is($main::attr{$target}{readingList}, $reading_list,
+		'retained Discovery dupliziert nach INITIALIZED keine eigene Zeile');
+	is(scalar(() = $main::attr{$target}{readingList} =~ /json2nameValue/g), 1,
+		'komplexe JSON-readingList-Zeile bleibt genau einmal vorhanden');
+
+	# REREADCFG wird von FHEM noch vor init_done=1 ausgeloest. Der geplante Timer
+	# laeuft erst nach der Rueckkehr in den Eventloop und verarbeitet dann sicher.
+	my $humidity_topic = 'homeassistant/sensor/node/humidity/config';
+	my $humidity_payload = '{"stat_t":"node/data","val_tpl":"{{ value_json.humidity }}",'
+		. '"uniq_id":"node_humidity","dev":{"ids":["node"],"name":"Node"}}';
+	$main::init_done = 0;
+	main::MQTT2_DISCOVERY_Parse(
+		$restart_io, mqtt_message($humidity_topic, $humidity_payload),
+	);
+	is(scalar(@TIMERS), 0, 'auch vor REREADCFG bleibt neue Arbeit ohne Polling geparkt');
+	main::MQTT2_DISCOVERY_Notify($restarted, {
+		NAME => 'global', CHANGED => ['REREADCFG'],
+	});
+	is(scalar(@TIMERS), 1, 'REREADCFG plant die geparkte Queue fuer den Eventloop');
+	$main::init_done = 1;
+	run_next_timer() while @TIMERS;
+	is(reading_value('discovery', 'discoveredEntities'), 2,
+		'REREADCFG verarbeitet die zusaetzlich geparkte Entity');
 };
 
 subtest 'regulaeres Autocreate vor dem Discovery-Worker wird uebernommen' => sub {

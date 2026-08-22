@@ -160,6 +160,8 @@ sub can_schedule {
 sub schedule {
 	my ($self, $delay, $hash, $function) = @_;
 	my $callback = $self->_callback(schedule => sub {
+		# waitIfInitNotDone muss 0 bleiben: Der Wert 1 blockiert FHEM waehrend
+		# der Initialisierung. Das Zurueckstellen uebernimmt der Lifecycle der Queue.
 		return main::InternalTimer(main::gettimeofday() + $_[0], $_[2], $_[1], 0);
 	});
 	return $callback->($delay, $hash, $function);

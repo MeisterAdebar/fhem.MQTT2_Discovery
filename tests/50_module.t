@@ -20,6 +20,7 @@ subtest 'Initialize und Define' => sub {
 	is($module->{DefFn}, 'MQTT2_DISCOVERY_Define', 'DefFn registriert');
 	ok(!exists $module->{GetFn}, 'kein GetFn registriert');
 	is($module->{ParseFn}, 'MQTT2_DISCOVERY_Parse', 'ParseFn registriert');
+	is($module->{NotifyFn}, 'MQTT2_DISCOVERY_Notify', 'NotifyFn registriert');
 	is($module->{FW_deviceOverview}, 1, 'kontextbezogene FHEMWEB-Hilfe ist aktiviert');
 	like($module->{Match}, qr/config/, 'globales Match erfasst Config-Topics');
 	like($module->{Match}, qr/sensors/, 'globales Match erfasst native Tasmota-Sensor-Topics');
@@ -35,6 +36,7 @@ subtest 'Initialize und Define' => sub {
 	add_iodev('server', 'MQTT2_SERVER');
 	my ($first, $first_error) = define_discovery('discovery', 'server');
 	is($first_error, undef, 'Server-Discovery wird definiert');
+	is($first->{NOTIFYDEV}, 'global', 'Lifecycle-Notify ist auf global begrenzt');
 	is(main::MQTT2_DISCOVERY_prefixes($first), ['homeassistant', 'tasmota/discovery'],
 		'Home Assistant und Tasmota Discovery sind standardmaessig aktiv');
 	is($main::modules{MQTT2_DISCOVERY}{defptr}{server}, $first, 'Registry enthaelt IODev-Zuordnung');
