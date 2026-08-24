@@ -22,7 +22,9 @@ my %KIND = map { $_ => 1 } qw(
 
 my %INTERNAL = map { $_ => 1 } qw(
 	operation prefix format component node_id object_id discovery_topic entity_key
-	component_key unique_id name device raw_metadata device_topic supplemental_signals
+	component_key unique_id name preferred_entity_name device raw_metadata device_topic supplemental_signals
+	availability availability_topic availability_template availability_mode
+	payload_available payload_not_available
 );
 
 # Die Tabellen beschreiben, welche Discovery-Felder ein logisches Lese- oder
@@ -198,6 +200,40 @@ sub from_entity {
 	my $operation = $source->{operation} || 'upsert';
 	my %configuration = map { ($_ => $source->{$_}) }
 		grep { !$INTERNAL{$_} } keys %$source;
+	my @availability;
+	my $payload_available = exists($source->{payload_available})
+		? $source->{payload_available} : 'online';
+	my $payload_not_available = exists($source->{payload_not_available})
+		? $source->{payload_not_available} : 'offline';
+
+	# Einzelne Availability-Topics und Listen werden auf dieselbe kanonische
+	# Quellenstruktur mit expliziten Vergleichswerten normalisiert.
+	if (defined($source->{availability_topic}) && !ref($source->{availability_topic})) {
+		push @availability, {
+			topic => $source->{availability_topic},
+			(defined($source->{availability_template})
+				? (value_template => $source->{availability_template}) : ()),
+			payload_available => $payload_available,
+			payload_not_available => $payload_not_available,
+		};
+	}
+
+	if (ref($source->{availability}) eq 'ARRAY') {
+
+		for my $entry (@{ $source->{availability} }) {
+			if (ref($entry) eq 'HASH') {
+				my %copy = %$entry;
+				$copy{payload_available} = $payload_available
+					if !exists($copy{payload_available});
+				$copy{payload_not_available} = $payload_not_available
+					if !exists($copy{payload_not_available});
+				push @availability, \%copy;
+			} else {
+				push @availability, $entry;
+			}
+		}
+
+	}
 
 	my $layout = $source->{format} || 'entity';
 	my $component = $source->{component};
@@ -224,21 +260,18 @@ sub from_entity {
 			node_id       => $source->{node_id},
 			unique_id     => $source->{unique_id},
 			name          => $source->{name},
+			logical_name  => $source->{preferred_entity_name},
 			category      => $source->{entity_category},
 			configuration => \%configuration,
 		},
 		signals => $signals,
 		commands => $commands,
 		capabilities => _capabilities($component, $signals, $commands, \%configuration),
-		availability => [],
+		availability => \@availability,
+		availability_mode => @availability
+			? ($source->{availability_mode} // 'latest') : undef,
 		extensions => {},
 	};
-
-	push @{ $model->{availability} }, { topic => $configuration{availability_topic} }
-		if defined($configuration{availability_topic}) && !ref($configuration{availability_topic});
-	push @{ $model->{availability} }, map { ref($_) eq 'HASH' ? { %$_ } : $_ }
-		@{ $configuration{availability} }
-			if ref($configuration{availability}) eq 'ARRAY';
 
 	$model->{extensions}{device_topic} = $source->{device_topic}
 		if defined($source->{device_topic}) && !ref($source->{device_topic});
@@ -286,6 +319,8 @@ sub validate {
 	return 'Nicht unterstuetzte kanonische Geraeteklasse'
 		if !defined($model->{entity}{kind}) || !$KIND{$model->{entity}{kind}};
 	return 'Kanonische Konfiguration fehlt' if ref($model->{entity}{configuration}) ne 'HASH';
+	return 'Ungueltiger kanonischer Entity-Name'
+		if defined($model->{entity}{logical_name}) && ref($model->{entity}{logical_name});
 	return 'Kanonische Signals-Liste fehlt' if ref($model->{signals}) ne 'ARRAY';
 	return 'Kanonische Commands-Liste fehlt' if ref($model->{commands}) ne 'ARRAY';
 	return 'Kanonische Capabilities fehlen' if ref($model->{capabilities}) ne 'HASH';
@@ -293,6 +328,21 @@ sub validate {
 	for my $collection (qw(signals commands availability)) {
 		return "Ungueltiger Eintrag in $collection"
 			if grep { ref($_) ne 'HASH' } @{ $model->{$collection} || [] };
+	}
+	return 'Ungueltiger Availability-Modus'
+		if defined($model->{availability_mode})
+			&& $model->{availability_mode} !~ /^(?:all|any|latest)$/;
+
+	for my $availability (@{ $model->{availability} || [] }) {
+		return 'Ungueltige Availability-Quelle'
+			if !defined($availability->{topic}) || ref($availability->{topic})
+				|| $availability->{topic} eq '';
+
+		for my $key (qw(value_template payload_available payload_not_available)) {
+			return "Ungueltiger Availability-Wert $key"
+				if exists($availability->{$key}) && ref($availability->{$key});
+		}
+
 	}
 
 	for my $collection (qw(signals commands)) {
@@ -370,6 +420,11 @@ sub to_entity {
 	my %configuration = %{ $entity->{configuration} || {} };
 	_project_bindings(\%configuration, $model->{signals}, \@SIGNAL_BINDINGS);
 	_project_bindings(\%configuration, $model->{commands}, \@COMMAND_BINDINGS);
+	$configuration{availability} = [
+		map { +{ %$_ } } @{ $model->{availability} || [] }
+	] if @{ $model->{availability} || [] };
+	$configuration{availability_mode} = $model->{availability_mode}
+		if defined($model->{availability_mode});
 
 	# Der Mapper verarbeitet aus Kompatibilitaetsgruenden weiterhin die flache
 	# Entity-Darstellung. Diese Projektion ist die einzige Rueckuebersetzung.
@@ -384,6 +439,7 @@ sub to_entity {
 		component_key   => $entity->{component_key},
 		unique_id       => $entity->{unique_id},
 		name            => $entity->{name},
+		preferred_entity_name => $entity->{logical_name},
 		discovery_topic => $source->{topic},
 		entity_key      => $source->{key},
 		device          => ref($model->{device}) eq 'HASH' ? { %{ $model->{device} } } : {},

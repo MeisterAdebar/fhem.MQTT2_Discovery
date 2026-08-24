@@ -7,6 +7,7 @@
 use strict;
 use warnings;
 use Test2::V0;
+use JSON::PP qw(decode_json);
 use lib 'lib/FHEM', 'tests/lib';
 use FHEMTestEnv qw(reset_env add_iodev define_discovery receive_client_message
 	reading_value command_log);
@@ -167,6 +168,98 @@ subtest 'retained Discovery wartet beim Neustart auf INITIALIZED' => sub {
 	run_next_timer() while @TIMERS;
 	is(reading_value('discovery', 'discoveredEntities'), 2,
 		'REREADCFG verarbeitet die zusaetzlich geparkte Entity');
+};
+
+subtest 'fehlendes Registry-Ziel wird nach Neustart neu aufgebaut' => sub {
+	my ($running, $io) = setup();
+	my @discoveries = (
+		[
+			'homeassistant/sensor/node/temperature/config',
+			'{"stat_t":"node/data","val_tpl":"{{ value_json.temperature }}",'
+				. '"uniq_id":"node_temperature","dev":{"ids":["node"],"name":"Node"}}',
+		],
+		[
+			'homeassistant/sensor/node/humidity/config',
+			'{"stat_t":"node/data","val_tpl":"{{ value_json.humidity }}",'
+				. '"uniq_id":"node_humidity","dev":{"ids":["node"],"name":"Node"}}',
+		],
+	);
+	my $target = 'MQTT2_Node';
+	is(main::CommandDefine(undef, "$target MQTT2_DEVICE client mqtt"), undef,
+		'Ausgangszustand besitzt ein vorhandenes, spaeter uebernommenes Zieldevice');
+
+	# Die erste Verarbeitung erzeugt einen Registry-Eintrag fuer das bereits
+	# vorhandene Device, ohne dessen manuelle Herkunft zu veraendern.
+	for my $discovery (@discoveries) {
+		main::MQTT2_DISCOVERY_Parse($io, mqtt_message(@$discovery));
+	}
+	run_next_timer() while @TIMERS;
+	my $stored_registry = reading_value('discovery', '.registry');
+	my ($stored_record) = values %{ decode_json($stored_registry)->{devices} };
+	is($stored_record->{created}, 0, 'uebernommenes Device ist nicht als eigenerzeugt markiert');
+
+	# Die neue Konfiguration enthaelt das Zieldevice nicht mehr, waehrend das
+	# statefile weiterhin den bisherigen Discovery-Besitzstand wiederherstellt.
+	@TIMERS = ();
+	reset_env();
+	my $restart_io = add_iodev('mqtt', 'MQTT2_SERVER');
+	$main::init_done = 0;
+	my ($restarted, $define_error) = define_discovery('discovery', 'mqtt');
+	is($define_error, undef, 'Discovery wird aus der reduzierten Konfiguration geladen');
+	$main::attr{discovery}{deviceNamePrefix} = 'MQTT2_';
+	$restarted->{READINGS}{'.registry'} = {
+		VAL => $stored_registry, TIME => '2026-08-22 12:00:00',
+	};
+	$main::init_done = 1;
+
+	for my $discovery (@discoveries) {
+		main::MQTT2_DISCOVERY_Parse($restart_io, mqtt_message(@$discovery));
+	}
+	run_next_timer() while @TIMERS;
+
+	ok($main::defs{$target}, 'fehlendes Zieldevice wird aus der Retained Discovery neu angelegt');
+	like($main::attr{$target}{readingList}, qr/json2nameValue/,
+		'neu aufgebautes Device erhaelt die gemeinsame JSON-Auswertung');
+	is(scalar(grep { /^define \Q$target\E MQTT2_DEVICE / } @{ command_log() }), 1,
+		'der gesamte Burst legt das fehlende Ziel genau einmal neu an');
+	is(reading_value('discovery', 'discoveredEntities'), 2,
+		'bereinigte Registry enthaelt wieder beide Entities');
+	my ($repaired_record) = values %{ decode_json(reading_value('discovery', '.registry'))->{devices} };
+	my $entity_keys = join("\n", sort keys %{ $repaired_record->{entities} });
+	like($entity_keys, qr{/temperature/config},
+		'neu aufgebaute Registry enthaelt die erste Entity');
+	like($entity_keys, qr{/humidity/config},
+		'neu aufgebaute Registry enthaelt die zweite Entity desselben Bursts');
+	is($repaired_record->{created}, 1,
+		'neu angelegtes Ersatzdevice ist anschliessend als eigenerzeugt markiert');
+};
+
+subtest 'fehlendes Registry-Ziel respektiert autoCreate und bleibt wiederholbar' => sub {
+	my ($hash, $io) = setup();
+	my $topic = 'homeassistant/sensor/node/temperature/config';
+	my $payload = '{"stat_t":"node/data","val_tpl":"{{ value_json.temperature }}",'
+		. '"uniq_id":"node_temperature","dev":{"ids":["node"],"name":"Node"}}';
+	my $target = 'MQTT2_Node';
+
+	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	run_next_timer() while @TIMERS;
+	my $stored_registry = reading_value('discovery', '.registry');
+	is(main::CommandDelete(undef, $target), undef, 'verwaltetes Zieldevice wird manuell geloescht');
+	$main::attr{discovery}{autoCreate} = 0;
+
+	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	run_next_timer() while @TIMERS;
+	ok(!$main::defs{$target}, 'autoCreate=0 legt das fehlende Ziel nicht erneut an');
+	like(reading_value('discovery', 'lastError'), qr/autoCreate ist deaktiviert/,
+		'fehlende Neuanlage wird mit der bestehenden autoCreate-Meldung erklaert');
+	is(reading_value('discovery', '.registry'), $stored_registry,
+		'fehlgeschlagener Versuch behaelt den bisherigen Registry-Stand fuer einen Retry');
+
+	$main::attr{discovery}{autoCreate} = 1;
+	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	run_next_timer() while @TIMERS;
+	ok($main::defs{$target}, 'spaeter aktiviertes autoCreate baut dasselbe Ziel erfolgreich neu auf');
+	is(reading_value('discovery', 'lastError'), 'none', 'erfolgreicher Retry bereinigt den Topic-Fehler');
 };
 
 subtest 'MQTT2_CLIENT verarbeitet Retained erst nach dem Neustart' => sub {

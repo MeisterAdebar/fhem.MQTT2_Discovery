@@ -13,6 +13,133 @@ use Scalar::Util qw(looks_like_number);
 use MQTT2_Discovery::Helper qw(trim);
 
 
+# Beschreibt das bewusst unterstuetzte HA/Jinja-Subset an einer zentralen Stelle.
+# source_path kennzeichnet Filter, deren fachlicher Hauptwert weiterhin aus dem
+# Eingangspfad stammt; value_identity gilt nur fuer unveraenderte Durchleitungen.
+my %FILTERS = (
+	# Textfilter veraendern ausschliesslich die Darstellung des gelesenen Werts.
+	# Der JSON-Pfad bleibt deshalb fuer die fachliche Namensableitung erhalten.
+	lower => {
+		min_args => 0, max_args => 0, source_path => 1, value_identity => 0,
+		evaluate => sub {
+			my ($exists, $value) = @_;
+
+			# Ein fehlender Quellpfad unterdrueckt wie in HA das gesamte Ergebnis;
+			# ein vorhandener Nullwert wird dagegen als leerer Text weiterbehandelt.
+			return (0, undef) if !$exists;
+			$value = '' if !defined($value);
+			return (1, lc "$value");
+		},
+	},
+	upper => {
+		min_args => 0, max_args => 0, source_path => 1, value_identity => 0,
+		evaluate => sub {
+			my ($exists, $value) = @_;
+
+			# upper besitzt dieselbe Existenzsemantik wie lower und unterscheidet
+			# sich ausschliesslich in der eigentlichen Zeichenumwandlung.
+			return (0, undef) if !$exists;
+			$value = '' if !defined($value);
+			return (1, uc "$value");
+		},
+	},
+	trim => {
+		min_args => 0, max_args => 0, source_path => 1, value_identity => 0,
+		evaluate => sub {
+			my ($exists, $value) = @_;
+
+			# trim entfernt nur umgebenden Leerraum; insbesondere darf dadurch der
+			# zugrunde liegende JSON-Name nicht verloren gehen.
+			return (0, undef) if !$exists;
+			$value = '' if !defined($value);
+			return (1, trim("$value"));
+		},
+	},
+
+	# Numerische Konverter behalten den fachlichen Quellpfad. Ihr optionales
+	# Argument ist der von HA definierte Rueckfallwert bei ungueltiger Eingabe.
+	int => {
+		min_args => 0, max_args => 1, source_path => 1, value_identity => 0,
+		evaluate => sub {
+			my ($exists, $value, $argument_exists, $argument) = @_;
+			return (0, undef) if !$exists;
+			$value = '' if !defined($value);
+
+			# Ohne expliziten Fallback bleibt eine nicht numerische Eingabe ein
+			# Auswertungsfehler und erzeugt kein irrefuehrendes Reading-Update.
+			return ($argument_exists ? (1, $argument) : (0, undef))
+				if !looks_like_number($value);
+			return (1, int($value));
+		},
+	},
+	float => {
+		min_args => 0, max_args => 1, source_path => 1, value_identity => 0,
+		evaluate => sub {
+			my ($exists, $value, $argument_exists, $argument) = @_;
+			return (0, undef) if !$exists;
+			$value = '' if !defined($value);
+
+			# float verwendet denselben HA-Fallbackvertrag wie int, erhaelt aber
+			# vorhandene Nachkommastellen im numerischen Ergebnis.
+			return ($argument_exists ? (1, $argument) : (0, undef))
+				if !looks_like_number($value);
+			return (1, 0 + $value);
+		},
+	},
+
+	# round ist weiterhin pfaderhaltend, aber nicht wertidentisch. Die optionale
+	# Genauigkeit beeinflusst nur die Ausgabe und niemals den Readingnamen.
+	round => {
+		min_args => 0, max_args => 1, source_path => 1, value_identity => 0,
+		evaluate => sub {
+			my ($exists, $value, $argument_exists, $argument) = @_;
+			return (0, undef) if !$exists;
+			$value = '' if !defined($value);
+			return (0, undef) if !looks_like_number($value);
+			my $digits = $argument_exists ? int($argument) : 0;
+			my $factor = 10 ** $digits;
+
+			# Die explizite Berechnung vermeidet abhaengige Locale-Formatierung und
+			# bildet positive wie negative Werte mit derselben Genauigkeit ab.
+			my $rounded = int($value * $factor + ($value < 0 ? -0.5 : 0.5)) / $factor;
+			return (1, $rounded);
+		},
+	},
+
+	# default kann statt des Eingangspfads sein Argument liefern. Daher darf
+	# dieser Filter weder als eindeutige Pfadquelle noch als Identitaet gelten.
+	default => {
+		min_args => 1, max_args => 1, source_path => 0, value_identity => 0,
+		evaluate => sub {
+			my ($exists, $value, $argument_exists, $argument) = @_;
+			return ($exists && defined($value) ? (1, $value) : ($argument_exists, $argument));
+		},
+	},
+
+	# JSON-Serialisierung veraendert den Wert vollstaendig, laesst dessen
+	# fachliche Herkunft aus demselben JSON-Pfad aber weiterhin erkennen.
+	tojson => {
+		min_args => 0, max_args => 0, source_path => 1, value_identity => 0,
+		evaluate => sub {
+			my ($exists, $value) = @_;
+			return (0, undef) if !$exists;
+			$value = '' if !defined($value);
+			return (1, encode_json($value));
+		},
+	},
+
+	# is_defined ist der einzige registrierte Filter, der einen vorhandenen Wert
+	# bytegleich durchreicht und deshalb auch die direkte JSON-Auswertung erlaubt.
+	is_defined => {
+		min_args => 0, max_args => 0, source_path => 1, value_identity => 1,
+		evaluate => sub {
+			my ($exists, $value) = @_;
+			return ($exists, $value);
+		},
+	},
+);
+
+
 # Die Template-Engine akzeptiert absichtlich nur ein kleines Jinja-Subset.
 # Sie erzeugt einen eigenen Syntaxbaum und fuehrt niemals Discovery-Text aus.
 sub _fail {
@@ -135,8 +262,17 @@ sub _parse_expression {
 	for my $filter (@parts) {
 		return if $filter !~ /^([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$/s;
 		my ($name, $argument) = ($1, $2);
-		return if $name !~ /^(?:lower|upper|trim|int|float|round|default|tojson|is_defined)$/;
-		return if $name eq 'is_defined' && defined($argument) && trim($argument) ne '';
+		my $definition = $FILTERS{$name};
+
+		# Nur zentral registrierte HA/Jinja-Filter duerfen Teil des sicheren AST
+		# werden; unbekannte Namen werden nicht erst bei der Auswertung entdeckt.
+		return if !$definition;
+		my $argument_count = defined($argument) && trim($argument) ne '' ? 1 : 0;
+
+		# Die Arity stammt aus derselben Definition wie Auswertung und Metadaten,
+		# damit Erweiterungen nicht an mehreren Stellen auseinanderlaufen koennen.
+		return if $argument_count < $definition->{min_args}
+			|| $argument_count > $definition->{max_args};
 		my $argument_ast;
 
 		# Optionale Filterargumente durchlaufen denselben sicheren Parser wie der
@@ -253,36 +389,12 @@ sub _evaluate_ast {
 		my ($argument_exists, $argument) = $ast->{argument}
 			? _evaluate_ast($ast->{argument}, $context) : (0, undef);
 		my $name = $ast->{name};
+		my $definition = $FILTERS{$name};
+		return (0, undef) if !$definition || ref($definition->{evaluate}) ne 'CODE';
 
-		# default ist der einzige Filter, der einen fehlenden Eingang absichtlich
-		# durch sein Argument ersetzen darf.
-		if ($name eq 'default') {
-			return ($exists && defined($value) ? (1, $value) : ($argument_exists, $argument));
-		}
-
-		# Home Assistants is_defined-Filter reicht vorhandene Werte unveraendert
-		# weiter und unterdrueckt Updates, deren Quellpfad im Payload fehlt.
-		if ($name eq 'is_defined') {
-			return ($exists, $value);
-		}
-		return (0, undef) if !$exists;
-		$value = '' if !defined $value;
-		return (1, lc "$value") if $name eq 'lower';
-		return (1, uc "$value") if $name eq 'upper';
-		return (1, trim("$value")) if $name eq 'trim';
-		return (0, undef) if ($name eq 'int' || $name eq 'float' || $name eq 'round') && !looks_like_number($value);
-		return (1, int($value)) if $name eq 'int';
-		return (1, 0 + $value) if $name eq 'float';
-
-		# round verwendet eine explizite Dezimalstellenzahl und vermeidet damit
-		# abhaengige Locale- oder Formatierungsfunktionen.
-		if ($name eq 'round') {
-			my $digits = $argument_exists ? int($argument) : 0;
-			my $factor = 10 ** $digits;
-			my $rounded = int($value * $factor + ($value < 0 ? -0.5 : 0.5)) / $factor;
-			return (1, $rounded);
-		}
-		return (1, encode_json($value)) if $name eq 'tojson';
+		# Jede Filtersemantik wird ausschliesslich ueber ihre zentrale Definition
+		# ausgefuehrt; neue Filter benoetigen dadurch keinen zweiten Dispatch-Zweig.
+		return $definition->{evaluate}->($exists, $value, $argument_exists, $argument);
 	}
 	return (0, undef);
 }
@@ -307,18 +419,25 @@ sub render {
 	return { ok => 1, value => ref($result) ? encode_json($result) : "$result" };
 }
 
-# Extrahiert den direkten JSON-Pfad eines bereits sicher kompilierten Templates.
-sub simple_json_key {
-	my ($template, $compiled) = @_;
+# Extrahiert einen JSON-Pfad nach Massgabe einer zentralen Filtereigenschaft.
+sub _json_key_with_filter_property {
+	my ($template, $compiled, $property) = @_;
+
+	# Nur ein erfolgreich kompiliertes Template besitzt einen vertrauenswuerdigen
+	# AST; rohe oder strukturfremde Eingaben liefern bewusst keinen Namen.
 	return undef if !defined($template) || ref($compiled) ne 'HASH';
 	my $ast = $compiled->{ast};
 
-	# is_defined veraendert vorhandene Werte nicht und darf deshalb fuer die
-	# Erkennung eines direkten JSON-Pfads transparent uebersprungen werden.
-	while (ref($ast) eq 'HASH' && ($ast->{type} || '') eq 'filter'
-			&& ($ast->{name} || '') eq 'is_defined' && !$ast->{argument}) {
+	# Nur Filter mit der angeforderten Eigenschaft duerfen bis zum eigentlichen
+	# Datenpfad durchlaufen werden; Argumente bleiben Teil der Werttransformation.
+	while (ref($ast) eq 'HASH' && ($ast->{type} || '') eq 'filter') {
+		my $definition = $FILTERS{ $ast->{name} || '' };
+		return undef if !$definition || !$definition->{$property};
 		$ast = $ast->{input};
 	}
+
+	# Nach dem Entfernen geeigneter Filter muss exakt ein nichtleerer value_json-
+	# Pfad verbleiben; Bedingungen oder Literale besitzen keinen eindeutigen Key.
 	return undef if ref($ast) ne 'HASH' || ($ast->{type} || '') ne 'path'
 		|| ($ast->{root} || '') ne 'value_json' || ref($ast->{path}) ne 'ARRAY'
 		|| !@{ $ast->{path} };
@@ -338,6 +457,16 @@ sub simple_json_key {
 	}
 
 	return join('_', @parts);
+}
+
+# Liefert den fachlichen JSON-Hauptpfad auch hinter wertveraendernden Filtern.
+sub source_json_key {
+	return _json_key_with_filter_property($_[0], $_[1], 'source_path');
+}
+
+# Liefert nur JSON-Pfade, die ohne Werttransformation direkt gerendert werden duerfen.
+sub simple_json_key {
+	return _json_key_with_filter_property($_[0], $_[1], 'value_identity');
 }
 
 1;

@@ -69,6 +69,9 @@ sub _logical_reading_path {
 	my $fallback = _reading_name($entity);
 	my $extensions = ref($entity->{_canonical_extensions}) eq 'HASH'
 		? $entity->{_canonical_extensions} : {};
+	my $entity_name = defined($entity->{preferred_entity_name})
+			&& !ref($entity->{preferred_entity_name})
+		? safe_name($entity->{preferred_entity_name}, $fallback) : undef;
 	my $json_name = defined($entity->{preferred_reading_name})
 			&& !ref($entity->{preferred_reading_name})
 		? safe_name($entity->{preferred_reading_name}, $fallback)
@@ -81,6 +84,18 @@ sub _logical_reading_path {
 	if (($entity->{_canonical_layout} || '') eq 'device'
 			&& defined($entity->{component_key}) && !ref($entity->{component_key})) {
 		my $key = safe_name($entity->{component_key}, $fallback);
+
+		# Ein vom Adapter nach dem Quellprotokoll bestimmter Entity-Name ist das
+		# sichtbare Blatt; der Komponentenschluessel bleibt Kollisionsreserve.
+		if (defined($entity_name) && $entity_name ne '') {
+			my $namespace = $key eq $entity_name
+				? $component : $key =~ /_\Q$entity_name\E\z/
+					? substr($key, 0, length($key) - length($entity_name) - 1)
+					: undef;
+			return [safe_name($namespace, $component), $entity_name]
+				if defined($namespace);
+			return [$component, $key, $entity_name];
+		}
 
 		# Wenn Komponentenschluessel und JSON-Blatt zusammenpassen, bleibt ihr
 		# Plattformanteil nur als Namensraum erhalten und nicht im Reading selbst.
@@ -101,6 +116,16 @@ sub _logical_reading_path {
 		return [$component, safe_name($leaf, $fallback)];
 	}
 
+	# Auch klassische Entity-Discovery behaelt technische IDs nur als Reserve,
+	# wenn der Adapter einen ausdruecklichen logischen Entity-Namen geliefert hat.
+	if (defined($entity_name) && $entity_name ne '') {
+		return [$component, $entity_name] if $fallback eq $entity_name;
+		if ($fallback =~ /\A(.+)_\Q$entity_name\E\z/) {
+			return [$component, safe_name($1, $component), $entity_name];
+		}
+		return [$component, $fallback, $entity_name];
+	}
+
 	# Auch klassische Entity-Discovery darf den fachlichen JSON-Blattnamen
 	# verwenden. Entity- und Komponentenname bleiben Reserven fuer Kollisionen.
 	if (defined($json_name) && $json_name ne '') {
@@ -114,14 +139,6 @@ sub _logical_reading_path {
 # Loest Reading- und Set-Namenskollisionen ueber einen ganzen Device-Satz auf.
 sub resolve_mapping_names {
 	return MQTT2_Discovery::Mapper::NameResolver::resolve(@_);
-}
-
-# Nutzt das letzte Topicsegment als Fallbacknamen fuer einfache skalare Zustaende.
-sub _topic_leaf_reading_name {
-	my ($topic, $fallback) = @_;
-	return $fallback if !defined($topic) || ref($topic) || $topic eq '';
-	return safe_name($1, $fallback) if $topic =~ m{/([^/]+)$};
-	return safe_name($topic, $fallback);
 }
 
 # Bestimmt den Readingnamen bevorzugt aus dem JSON-Pfad des State-Bindings.
@@ -183,6 +200,43 @@ sub _reading {
 	}
 	$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 	return $entry;
+}
+
+# Erzeugt eine rollenbasierte Availability-Quelle mit stabilem internem Reading.
+sub _availability_source {
+	my ($source) = @_;
+	return undef if ref($source) ne 'HASH';
+	my $topic = $source->{topic};
+	return { error => 'Availability-Topic fehlt' }
+		if !defined($topic) || ref($topic) || $topic eq '';
+	my $template = $source->{value_template};
+	my $available = exists($source->{payload_available})
+		? $source->{payload_available} : 'online';
+	my $unavailable = exists($source->{payload_not_available})
+		? $source->{payload_not_available} : 'offline';
+	return { error => 'Availability-Werte muessen Skalare sein' }
+		if ref($template) || ref($available) || ref($unavailable);
+
+	# Templates werden vor dem Rendern validiert, damit untrusted Discovery-Text
+	# nicht erst im laufenden MQTT-Empfang als Fehler sichtbar wird.
+	if (defined($template) && $template ne '') {
+		my $compiled = MQTT2_Discovery::Template::compile($template);
+		return { error => $compiled->{error} } if !$compiled->{ok};
+	}
+	my $signature = JSON::PP->new->canonical(1)->encode({
+		topic => $topic,
+		(defined($template) ? (template => $template) : ()),
+		available => "$available",
+		unavailable => "$unavailable",
+	});
+	return {
+		kind => 'availability', role => 'availability', name => 'availability',
+		reserved_reading => 1,
+		topic => $topic, template => $template,
+		payload_available => "$available",
+		payload_not_available => "$unavailable",
+		source_reading => '.availability_' . stable_suffix($signature, 8),
+	};
 }
 
 # Erzeugt einen direkten oder templatebasierten MQTT-Publish-Set-Eintrag.
@@ -285,6 +339,14 @@ sub _add_entry {
 		return;
 	}
 	push @$list, $entry;
+}
+
+# Verknuepft einen Set-Eintrag mit demselben logischen Namen wie sein Reading.
+sub _linked_set {
+	my ($entry, $semantic_name) = @_;
+	return $entry if ref($entry) ne 'HASH' || $entry->{error};
+	$entry->{semantic_name} = $semantic_name;
+	return $entry;
 }
 
 # Ergaenzt zusaetzliche Parser-Signale um passende Readings oder Sets.
@@ -427,7 +489,8 @@ sub _map_canonical_entity {
 				undef, $entity->{command_codec}), 'switch');
 		push @set_state, $command_set_name;
 	} elsif ($component eq 'button') {
-		_add_entry(\@sets, \@warnings, _button($reading_name, $entity->{command_topic}, $entity->{payload_press} // 'PRESS'), 'button');
+		_add_entry(\@sets, \@warnings,
+			_button($command_set_name, $entity->{command_topic}, $entity->{payload_press} // 'PRESS'), 'button');
 	} elsif ($component eq 'number') {
 		my ($min, $max, $step) = map { $entity->{$_} } qw(min max step);
 
@@ -455,7 +518,10 @@ sub _map_canonical_entity {
 				'select');
 		}
 	} elsif ($component eq 'climate') {
+		my %climate_name;
 
+		# Alle lesbaren Climate-Capabilities leiten ihren sichtbaren Namen einheitlich
+		# aus dem State-Topic ab und merken ihn fuer den gekoppelten Setter vor.
 		for my $spec (
 			['action', 'action_topic', 'action_template'],
 			['current_temperature', 'current_temperature_topic', 'current_temperature_template'],
@@ -472,11 +538,20 @@ sub _map_canonical_entity {
 		) {
 			my ($suffix, $topic_key, $template_key) = @$spec;
 			my $semantic_name = "${reading_name}_$suffix";
-			_add_entry(\@readings, \@warnings,
-				_reading($entity->{$topic_key},
-					defined($entity->{$template_key}) ? $entity->{$template_key} : $entity->{value_template},
-					_state_path_reading_name($entity->{$topic_key}, $semantic_name),
-					undef, undef, undef, $semantic_name),
+			my $visible_name = _state_path_reading_name(
+				$entity->{$topic_key}, $semantic_name,
+			);
+			my $reading_entry = _reading($entity->{$topic_key},
+				defined($entity->{$template_key}) ? $entity->{$template_key} : $entity->{value_template},
+				$visible_name, undef, undef, undef, $semantic_name);
+
+			# Nur ein tatsaechlich erzeugtes Reading darf den Namen seines gekoppelten
+			# Setters vorgeben; command-only Capabilities behalten den kurzen Fallback.
+			if (ref($reading_entry) eq 'HASH' && !$reading_entry->{error}) {
+				$climate_name{$suffix} = $visible_name;
+			}
+
+			_add_entry(\@readings, \@warnings, $reading_entry,
 				"climate $suffix state");
 		}
 
@@ -490,15 +565,21 @@ sub _map_canonical_entity {
 			push @warnings, 'climate: ungueltige min_temp/max_temp/temp_step-Kombination';
 		} else {
 
+			# Die drei Temperaturbefehle verwenden denselben Namen wie ihr jeweiliges Reading.
 			for my $spec (
 				['target_temperature', 'temperature_command_topic', 'temperature_command_template'],
 				['target_temperature_high', 'temperature_high_command_topic', 'temperature_high_command_template'],
 				['target_temperature_low', 'temperature_low_command_topic', 'temperature_low_command_template'],
 			) {
 				my ($suffix, $topic_key, $template_key) = @$spec;
+				my $semantic_name = "${reading_name}_$suffix";
+				my $set_name = $climate_name{$suffix} // safe_name($suffix, 'set');
 				_add_entry(\@sets, \@warnings,
-					_publish(capability_set_name($entity, $reading_name, $suffix), "slider,$min_temp,$temp_step,$max_temp",
-						$entity->{$topic_key}, $entity->{$template_key}),
+					_linked_set(
+						_publish($set_name, "slider,$min_temp,$temp_step,$max_temp",
+							$entity->{$topic_key}, $entity->{$template_key}),
+						$semantic_name,
+					),
 					"climate $suffix command");
 			}
 
@@ -512,12 +593,18 @@ sub _map_canonical_entity {
 		if ($min_humidity >= $max_humidity) {
 			push @warnings, 'climate: ungueltige min_humidity/max_humidity-Kombination';
 		} else {
+			my $semantic_name = "${reading_name}_target_humidity";
+			my $set_name = $climate_name{target_humidity} // 'target_humidity';
 			_add_entry(\@sets, \@warnings,
-				_publish(capability_set_name($entity, $reading_name, 'target_humidity'), "slider,$min_humidity,1,$max_humidity",
-					$entity->{target_humidity_command_topic}, $entity->{target_humidity_command_template}),
+				_linked_set(
+					_publish($set_name, "slider,$min_humidity,1,$max_humidity",
+						$entity->{target_humidity_command_topic}, $entity->{target_humidity_command_template}),
+					$semantic_name,
+				),
 				'climate target_humidity command');
 		}
 
+		# Aufzaehlungs-Capabilities koppeln Reading- und Set-Namen auf dieselbe Weise.
 		for my $spec (
 			['mode', 'modes', 'mode_command_topic', 'mode_command_template'],
 			['fan_mode', 'fan_modes', 'fan_mode_command_topic', 'fan_mode_command_template'],
@@ -528,6 +615,8 @@ sub _map_canonical_entity {
 			my ($suffix, $values_key, $topic_key, $template_key) = @$spec;
 			next if !defined($entity->{$topic_key});
 			my ($tokens, $mapping) = choice_values($entity->{$values_key});
+			my $semantic_name = "${reading_name}_$suffix";
+			my $set_name = $climate_name{$suffix} // safe_name($suffix, 'set');
 
 			# Ein vorhandenes Command-Topic ohne Auswahlwerte ist nicht sicher
 			# bedienbar, weil der Mapper keine erlaubten Payloads erfinden darf.
@@ -536,8 +625,11 @@ sub _map_canonical_entity {
 				next;
 			}
 			_add_entry(\@sets, \@warnings,
-				_choice(capability_set_name($entity, $reading_name, $suffix), join(',', @$tokens), $entity->{$topic_key}, $mapping,
-					$entity->{$template_key}),
+				_linked_set(
+					_choice($set_name, join(',', @$tokens), $entity->{$topic_key}, $mapping,
+						$entity->{$template_key}),
+					$semantic_name,
+				),
 				"climate $suffix command");
 		}
 
@@ -547,9 +639,14 @@ sub _map_canonical_entity {
 			my %mapping = (
 				on => ($entity->{payload_on} // 'ON'), off => ($entity->{payload_off} // 'OFF'),
 			);
+			my $semantic_name = "${reading_name}_power";
+			my $set_name = $climate_name{power} // 'power';
 			_add_entry(\@sets, \@warnings,
-				_choice(capability_set_name($entity, $reading_name, 'power'), 'on,off', $entity->{power_command_topic}, \%mapping,
-					$entity->{power_command_template}),
+				_linked_set(
+					_choice($set_name, 'on,off', $entity->{power_command_topic}, \%mapping,
+						$entity->{power_command_template}),
+					$semantic_name,
+				),
 				'climate power command');
 		}
 	} elsif ($component eq 'text') {
@@ -665,22 +762,35 @@ sub _map_canonical_entity {
 		_add_entry(\@sets, \@warnings, _choice($actual_reading_name // $reading_name, 'lock,unlock', $entity->{command_topic}, \%mapping), 'lock');
 	}
 
-	my @availability;
+	my @availability_entries;
 
-	# Availability bleibt eine eigene Rolle, damit sie spaeter weder Device-Topic
-	# noch semantische Hauptwerte beeinflusst.
-	push @availability, { topic => $entity->{availability_topic} } if $entity->{availability_topic};
-	push @availability, @{ $entity->{availability} } if ref($entity->{availability}) eq 'ARRAY';
-	my %availability_names;
+	# Availability bleibt eine eigene Rolle, damit sie weder Device-Topic noch
+	# fachliche State-Readings oder semantische Hauptwerte beeinflusst.
+	for my $source (@{ $entity->{availability} || [] }) {
+		my $entry = _availability_source($source);
+		if ($entry && $entry->{error}) {
+			push @warnings, 'availability: ' . $entry->{error};
+			next;
+		}
+		push @availability_entries, $entry if $entry;
+	}
 
-	for my $availability (@availability) {
-		next if ref($availability) ne 'HASH' || !$availability->{topic};
-		my $base_name = _topic_leaf_reading_name($availability->{topic}, 'status');
-		my $name_index = ++$availability_names{$base_name};
-		my $name = $name_index == 1 ? $base_name : "${base_name}_$name_index";
-		my $entry = _reading($availability->{topic}, $availability->{value_template}, $name);
-		$entry->{role} = 'availability' if $entry && !$entry->{error};
-		_add_entry(\@readings, \@warnings, $entry, 'availability');
+	if (@availability_entries) {
+		my @sources = sort stable_unique(map { $_->{source_reading} }
+			@availability_entries);
+		my $mode = $entity->{availability_mode} || 'latest';
+		my $policy_signature = join("\0", $mode, @sources);
+		my $policy = {
+			reading => '.availability_policy_' . stable_suffix($policy_signature, 8),
+			mode => $mode,
+			sources => \@sources,
+		};
+
+		for my $entry (@availability_entries) {
+			$entry->{policy} = $policy;
+			_add_entry(\@readings, \@warnings, $entry, 'availability');
+		}
+
 	}
 
 	# retain veraendert die gerenderte Topic-Syntax; aktivierte Entities muessen

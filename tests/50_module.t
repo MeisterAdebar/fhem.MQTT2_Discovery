@@ -36,7 +36,8 @@ subtest 'Initialize und Define' => sub {
 	add_iodev('server', 'MQTT2_SERVER');
 	my ($first, $first_error) = define_discovery('discovery', 'server');
 	is($first_error, undef, 'Server-Discovery wird definiert');
-	is($first->{NOTIFYDEV}, 'global', 'Lifecycle-Notify ist auf global begrenzt');
+	is($first->{NOTIFYDEV}, 'global,server',
+		'Notify ist auf Lebenszyklus und gebundenes IODev begrenzt');
 	is(main::MQTT2_DISCOVERY_prefixes($first), ['homeassistant', 'tasmota/discovery'],
 		'Home Assistant und Tasmota Discovery sind standardmaessig aktiv');
 	is($main::modules{MQTT2_DISCOVERY}{defptr}{server}, $first, 'Registry enthaelt IODev-Zuordnung');
@@ -464,6 +465,208 @@ subtest 'Registry roundtrippt als nicht ausfuehrbares JSON' => sub {
 		'bytestream-Ein-Byte-Zeichen bleibt nach Neustart unveraendert');
 };
 
+subtest 'IODev-Verbindung ueberlagert alle verwalteten Availability-Zustaende' => sub {
+	reset_env();
+	my $client = add_iodev('client', 'MQTT2_CLIENT');
+	my ($hash, $error) = define_discovery('discovery', 'client');
+	is($error, undef, 'Discovery startet an einer geoeffneten Brokerverbindung');
+	my $plain = '{"stat_t":"plain/state","uniq_id":"plain_state",'
+		. '"dev":{"ids":["plain"],"name":"Plain"}}';
+	my $guarded = '{"stat_t":"guarded/state","avty_t":"guarded/availability",'
+		. '"uniq_id":"guarded_state","dev":{"ids":["guarded"],'
+		. '"name":"Guarded"}}';
+	is(main::MQTT2_DISCOVERY_process(
+		$hash, 'client', 'homeassistant/sensor/plain/state/config', $plain,
+	), 'consumed', 'Device ohne eigene Availability wird angelegt');
+	is(main::MQTT2_DISCOVERY_process(
+		$hash, 'client', 'homeassistant/sensor/guarded/state/config', $guarded,
+	), 'consumed', 'Device mit eigener Availability wird angelegt');
+	is(reading_value('Plain', '.availability_io'), 'online',
+		'Brokerzugang wird intern am verwalteten Device gespeichert');
+	is(reading_value('Plain', 'availability'), 'online',
+		'Device ohne eigene Regel folgt der offenen Brokerverbindung');
+	is(reading_value('Guarded', 'availability'), 'unknown',
+		'Device mit noch unbekannter eigener Regel bleibt unknown');
+	my $registry = main::MQTT2_DISCOVERY_registry($hash);
+	my ($guarded_record) = grep { $_->{name} eq 'Guarded' }
+		values %{ $registry->{devices} };
+	my $policies = main::MQTT2_DISCOVERY_availability_policies($guarded_record);
+	is(scalar(@$policies), 1, 'eigene Availability-Regel ist in der Registry auffindbar');
+	$main::defs{Guarded}{READINGS}{ $policies->[0] } = { VAL => 'online' };
+	main::MQTT2_DISCOVERY_sync_target_availability($hash, $guarded_record, 1);
+	is(reading_value('Guarded', 'availability'), 'online',
+		'eigene Online-Regel und Brokerzugang ergeben gemeinsam online');
+
+	$main::defs{Unmanaged} = {
+		NAME => 'Unmanaged', TYPE => 'MQTT2_DEVICE', IODev => $client,
+		READINGS => { availability => { VAL => 'online' } },
+	};
+	$client->{STATE} = 'disconnected';
+	$client->{READINGS}{state}{VAL} = 'disconnected';
+	$client->{CHANGED} = ['state: disconnected'];
+	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	is(reading_value('Plain', 'availability'), 'offline',
+		'Verbindungsverlust setzt ein Device ohne eigene Regel offline');
+	is(reading_value('Guarded', 'availability'), 'offline',
+		'Verbindungsverlust ueberlagert auch eine eigene Online-Regel');
+	is(reading_value('Unmanaged', 'availability'), 'online',
+		'nicht von dieser Discovery verwaltete Devices bleiben unveraendert');
+
+	$client->{STATE} = 'opened';
+	$client->{READINGS}{state}{VAL} = 'opened';
+	$client->{CHANGED} = ['state: opened'];
+	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	is(reading_value('Plain', 'availability'), 'online',
+		'Reconnect setzt ein Device ohne eigene Regel wieder online');
+	is(reading_value('Guarded', 'availability'), 'online',
+		'Reconnect wertet den erhaltenen eigenen Zustand erneut aus');
+
+	$main::defs{Guarded}{READINGS}{ $policies->[0] }{VAL} = 'offline';
+	main::MQTT2_DISCOVERY_sync_target_availability($hash, $guarded_record, 1);
+	$client->{STATE} = 'disconnected';
+	$client->{READINGS}{state}{VAL} = 'disconnected';
+	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	$client->{STATE} = 'opened';
+	$client->{READINGS}{state}{VAL} = 'opened';
+	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	is(reading_value('Guarded', 'availability'), 'offline',
+		'Reconnect ersetzt einen erhaltenen eigenen Offline-Zustand nicht');
+
+	$main::attr{client}{disable} = 1;
+	main::MQTT2_DISCOVERY_Notify($hash, {
+		NAME => 'global', CHANGED => ['ATTR client disable 1'],
+	});
+	is(reading_value('Plain', 'availability'), 'offline',
+		'ein globales disable-Attributereignis aktualisiert den IO-Zustand ebenfalls');
+};
+
+subtest 'Availability-Topics erhalten deduplizierte Retained-Timer' => sub {
+	reset_env();
+	my $client = add_iodev('client', 'MQTT2_CLIENT');
+	my ($hash, $error) = define_discovery('discovery', 'client');
+	is($error, undef, 'Discovery startet am verbundenen MQTT2_CLIENT');
+	my (@scheduled, @refreshes);
+	$hash->{helper}{gateway} = MQTT2_Discovery::FHEMGateway->new(
+		schedule => sub {
+			push @scheduled, [@_];
+			return;
+		},
+		refresh_retained_topic => sub {
+			push @refreshes, [@_];
+			return undef;
+		},
+	);
+	my $payload = '{"stat_t":"node/state","avty":['
+		. '{"t":"zigbee2mqtt/node/availability"},'
+		. '{"t":"zigbee2mqtt/bridge/state"}],'
+		. '"avty_mode":"all","uniq_id":"node_state",'
+		. '"dev":{"ids":["node"],"name":"Node"}}';
+	is(main::MQTT2_DISCOVERY_process(
+		$hash, 'client', 'homeassistant/sensor/node/state/config', $payload,
+	), 'consumed', 'Device mit zwei Availability-Topics wird fertig angewendet');
+	is(reading_value('Node', 'availability'), 'unknown',
+		'vor dem ersten Availability-Payload ist der sichtbare Zustand unknown');
+	is([map { $_->[0] } @scheduled], [60, 60],
+		'pro neuem Topic wird genau ein Timer mit 60 Sekunden Verzoegerung angelegt');
+	is([map { $_->[2] } @scheduled], [
+		'MQTT2_DISCOVERY_refresh_availability_topic',
+		'MQTT2_DISCOVERY_refresh_availability_topic',
+	], 'beide Timer verwenden den gezielten Availability-Callback');
+	my ($record) = values %{ main::MQTT2_DISCOVERY_registry($hash)->{devices} };
+	is($record->{availability_topics}, [
+		'zigbee2mqtt/bridge/state', 'zigbee2mqtt/node/availability',
+	], 'angewendete Topics werden fuer spaetere Discovery-Wiederholungen gespeichert');
+
+	# Dieselbe Retained-Discovery darf waehrend der laufenden Timer keinen zweiten
+	# Satz Abrufe erzeugen.
+	is(main::MQTT2_DISCOVERY_process(
+		$hash, 'client', 'homeassistant/sensor/node/state/config', $payload,
+	), 'consumed', 'identische Discovery wird erneut verarbeitet');
+	is(scalar(@scheduled), 2, 'identische Topics erzeugen keine weiteren Timer');
+
+	# Ein zu frueh laufender Topic-Timer wartet auf den Abschluss des Queue-Batches.
+	$hash->{helper}{queue} = { order => [], messages => {}, scheduled => 1 };
+	my $first = $scheduled[0];
+	{
+		no strict 'refs';
+		&{ "main::$first->[2]" }($first->[1]);
+	}
+	is(scalar(@refreshes), 0, 'laufende Queue verhindert den Brokerabruf');
+	is($scheduled[-1][0], 10, 'derselbe Topic-Timer wird kurz zurueckgestellt');
+	my $retry = $scheduled[-1];
+	delete $hash->{helper}{queue};
+	$client->{STATE} = 'disconnected';
+	$client->{READINGS}{state}{VAL} = 'disconnected';
+	{
+		no strict 'refs';
+		&{ "main::$retry->[2]" }($retry->[1]);
+	}
+	is(scalar(@scheduled), 3, 'getrennter Client erzeugt kein Polling');
+	ok($retry->[1]{waiting_for_io}, 'Topic-Timer wartet ereignisbasiert auf den Client');
+
+	# Erst das opened-Ereignis setzt den geparkten Abruf fort.
+	$client->{STATE} = 'opened';
+	$client->{READINGS}{state}{VAL} = 'opened';
+	$client->{CHANGED} = ['state: opened'];
+	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	is($scheduled[-1][0], 10, 'Reconnect plant den geparkten Abruf einmal neu');
+	my $resumed = $scheduled[-1];
+	{
+		no strict 'refs';
+		&{ "main::$resumed->[2]" }($resumed->[1]);
+	}
+	is($refreshes[0][1], 'zigbee2mqtt/bridge/state',
+		'nach Queue und Reconnect wird genau das erste Topic angefordert');
+	my $second = $scheduled[1];
+	{
+		no strict 'refs';
+		&{ "main::$second->[2]" }($second->[1]);
+	}
+	is([map { $_->[1] } @refreshes], [
+		'zigbee2mqtt/bridge/state', 'zigbee2mqtt/node/availability',
+	], 'jeder Topic-Timer fordert nur sein eigenes Retained-Topic an');
+	ok(!exists($hash->{helper}{availability_refreshes}),
+		'erfolgreiche Abrufe entfernen den vollstaendigen Timerzustand');
+};
+
+subtest 'geloeschtes IODev stoppt Arbeit und setzt Registry-Ziele offline' => sub {
+	for my $case (
+		['client', 'MQTT2_CLIENT', 'ClientTarget'],
+		['server', 'MQTT2_SERVER', 'ServerTarget'],
+	) {
+		my ($io_name, $io_type, $target_name) = @$case;
+		reset_env();
+		add_iodev($io_name, $io_type);
+		my ($hash, $error) = define_discovery('discovery', $io_name);
+		is($error, undef, "$io_type wird fuer den Loeschtest definiert");
+		my $payload = '{"stat_t":"node/state","uniq_id":"node_state",'
+			. '"dev":{"ids":["node"],"name":"' . $target_name . '"}}';
+		is(main::MQTT2_DISCOVERY_process(
+			$hash, 'cid', 'homeassistant/sensor/node/state/config', $payload,
+		), 'consumed', "$io_type erzeugt ein verwaltetes Ziel");
+		is(reading_value($target_name, 'availability'), 'online',
+			"Ziel am $io_type ist vor dem Loeschen online");
+		$hash->{helper}{queue} = {
+			order => ['pending'], messages => { pending => [] }, scheduled => 1,
+		};
+		delete $main::defs{$io_name};
+		delete $main::attr{$io_name};
+		main::MQTT2_DISCOVERY_Notify($hash, {
+			NAME => 'global', CHANGED => ["DELETED $io_name"],
+		});
+		is(reading_value($target_name, '.availability_io'), 'offline',
+			"geloeschter $io_type wird als fehlender IO-Zugang gespeichert");
+		is(reading_value($target_name, 'availability'), 'offline',
+			"geloeschter $io_type setzt sein verwaltetes Ziel offline");
+		is(reading_value('discovery', 'state'), 'inactive',
+			"Discovery am geloeschten $io_type wird inactive");
+		ok(!exists($hash->{helper}{queue}),
+			"ausstehende Arbeit des geloeschten $io_type wird verworfen");
+		is(main::MQTT2_DISCOVERY_iodev_available($hash), 0,
+			"verbliebene Perl-Referenz des $io_type gilt nicht als verfuegbar");
+	}
+};
+
 subtest 'Registry wird beim Start erst nach dem statefile gecacht' => sub {
 	reset_env();
 	add_iodev('server');
@@ -501,6 +704,41 @@ subtest 'Registry wird beim Start erst nach dem statefile gecacht' => sub {
 	my $registry = main::MQTT2_DISCOVERY_registry($restarted);
 	my ($record) = values %{ $registry->{devices} };
 	ok($record->{created}, 'urspruenglicher Besitzstatus bleibt aus dem statefile erhalten');
+};
+
+subtest 'INITIALIZED synchronisiert restaurierte Ziele mit dem IODev' => sub {
+	reset_env();
+	add_iodev('client', 'MQTT2_CLIENT');
+	my ($running) = define_discovery('discovery', 'client');
+	my $payload = '{"stat_t":"node/state","uniq_id":"node_state",'
+		. '"dev":{"ids":["node"],"name":"Node"}}';
+	is(main::MQTT2_DISCOVERY_process(
+		$running, 'client', 'homeassistant/sensor/node/state/config', $payload,
+	), 'consumed', 'Ausgangsregistry fuer einen Neustart wird erzeugt');
+	my $stored_registry = reading_value('discovery', '.registry');
+	my $cid = $main::defs{Node}{DEF};
+
+	# Das statefile folgt beim FHEM-Start auf die Definitionen. INITIALIZED muss
+	# deshalb erst den restaurierten Registry-Stand laden und danach synchronisieren.
+	reset_env();
+	my $client = add_iodev('client', 'MQTT2_CLIENT');
+	$client->{STATE} = 'disconnected';
+	$client->{READINGS}{state}{VAL} = 'disconnected';
+	main::CommandDefine(undef, "Node MQTT2_DEVICE $cid client");
+	$main::init_done = 0;
+	my ($restarted, $error) = define_discovery('discovery', 'client');
+	is($error, undef, 'Discovery wird vor dem statefile erneut definiert');
+	$restarted->{READINGS}{'.registry'} = {
+		VAL => $stored_registry, TIME => '2026-08-23 12:00:00',
+	};
+	$main::init_done = 1;
+	main::MQTT2_DISCOVERY_Notify($restarted, {
+		NAME => 'global', CHANGED => ['INITIALIZED'],
+	});
+	is(reading_value('Node', '.availability_io'), 'offline',
+		'INITIALIZED beruecksichtigt die getrennte Client-Verbindung');
+	is(reading_value('Node', 'availability'), 'offline',
+		'restauriertes verwaltetes Device wird beim Start offline gesetzt');
 };
 
 subtest 'Registry-Klonfehler wird kontrolliert behandelt' => sub {

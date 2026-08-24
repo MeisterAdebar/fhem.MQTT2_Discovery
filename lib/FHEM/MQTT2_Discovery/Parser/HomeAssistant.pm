@@ -42,6 +42,7 @@ my %ABBREVIATION = (
 	curr_hum_tpl    => 'current_humidity_template',
 	curr_temp_t     => 'current_temperature_topic',
 	curr_temp_tpl   => 'current_temperature_template',
+	def_ent_id      => 'default_entity_id',
 	dev             => 'device',
 	dev_cla         => 'device_class',
 	ent_cat         => 'entity_category',
@@ -82,6 +83,7 @@ my %ABBREVIATION = (
 	pl_off          => 'payload_off',
 	pl_on           => 'payload_on',
 	pl_open         => 'payload_open',
+	pl_prs          => 'payload_press',
 	pl_stop         => 'payload_stop',
 	pl_unlk         => 'payload_unlock',
 	pow_cmd_t       => 'power_command_topic',
@@ -109,6 +111,8 @@ my %ABBREVIATION = (
 	ret             => 'retain',
 	schema          => 'schema',
 	stat_cla        => 'state_class',
+	stat_off        => 'state_off',
+	stat_on         => 'state_on',
 	stat_t          => 'state_topic',
 	stat_tpl        => 'state_template',
 	stat_val_tpl    => 'state_value_template',
@@ -258,13 +262,13 @@ sub _expand_topics {
 	}
 }
 
-# Erkennt einen sicheren direkten JSON-Pfad als bevorzugten FHEM-Readingnamen.
+# Erkennt den fachlichen JSON-Hauptpfad auch hinter sicheren Wertfiltern.
 sub _preferred_json_name {
 	my ($template) = @_;
 	return undef if !defined($template) || ref($template) || $template eq '';
 	my $compiled = MQTT2_Discovery::Template::compile($template);
 	return undef if !$compiled->{ok};
-	my $name = MQTT2_Discovery::Template::simple_json_key($template, $compiled);
+	my $name = MQTT2_Discovery::Template::source_json_key($template, $compiled);
 	return defined($name) && $name ne '' ? safe_name($name, 'state') : undef;
 }
 
@@ -289,12 +293,25 @@ sub _supports_brightness {
 	return 0;
 }
 
-# Leitet innerhalb des HA-Adapters einen fachlichen Set-Namen aus dem Topic ab.
-sub _command_name {
-	my ($topic) = @_;
-	return undef if !defined($topic) || ref($topic);
-	return safe_name($1, 'set') if $topic =~ m{/(?:cmd|command|set)/([^/]+)$};
-	return undef;
+# Bildet die von HA verwendete Namensprioritaet auf einen stabilen Rohwert ab.
+sub _preferred_entity_name {
+	my ($config, $component) = @_;
+	return undef if $component ne 'button';
+
+	# Ein ausdruecklich gesetzter Name hat bei HA Vorrang. JSON-null bedeutet
+	# bewusst "kein Entity-Name" und darf deshalb keinen Fallback aktivieren.
+	if (exists($config->{name})) {
+		return $config->{name}
+			if defined($config->{name}) && !ref($config->{name}) && $config->{name} ne '';
+		return undef;
+	}
+
+	# HA benennt namenlose Buttons mit vorhandener Device-Class nach dieser
+	# Klasse; ohne Device-Class gilt der offizielle MQTT-Button-Standardname.
+	return $config->{device_class}
+		if defined($config->{device_class}) && !ref($config->{device_class})
+			&& $config->{device_class} ne '';
+	return 'MQTT Button';
 }
 
 # Uebersetzt HA-Schemaangaben in formatunabhaengige Signal- und Command-Metadaten.
@@ -310,8 +327,6 @@ sub _normalise_bindings {
 	my $preferred_name = _preferred_json_name($$value_template_ref);
 	$config->{preferred_reading_name} = $preferred_name if defined($preferred_name);
 	$config->{state_reading_name} = $preferred_name if defined($preferred_name);
-	$config->{command_set_name} = _command_name($config->{command_topic})
-		if !defined($config->{command_set_name});
 
 	return if !$json_light;
 	$config->{command_set_name} = $preferred_name || 'state';
@@ -353,6 +368,9 @@ sub _entity {
 		error     => "Nicht unterstuetzte Komponente: $component",
 		topic     => $args{topic},
 	} if !$SUPPORTED{$component};
+	my $preferred_entity_name = _preferred_entity_name($config, $component);
+	$config->{preferred_entity_name} = $preferred_entity_name
+		if defined($preferred_entity_name);
 
 	my $object_id = $config->{object_id};
 	$object_id = $args{object_id} if !defined($object_id) || ref($object_id);
@@ -384,16 +402,26 @@ sub _entity {
 		command_template => $config->{command_template},
 		availability    => $config->{availability},
 		availability_topic => $config->{availability_topic},
+		availability_template => $config->{availability_template},
+		availability_mode => $config->{availability_mode},
 		device_topic    => $config->{'~'},
 		device          => $config->{device} || {},
 		raw_metadata    => $config,
 	);
+
+	# Home Assistant verknuepft mehrere Availability-Quellen ohne explizite
+	# Angabe nach dem zuletzt empfangenen Zustand.
+	$entity{availability_mode} = 'latest'
+		if (defined($entity{availability_topic})
+				|| ref($entity{availability}) eq 'ARRAY')
+			&& !defined($entity{availability_mode});
 	for my $key (qw(
 		min max step options optimistic unit_of_measurement device_class state_class entity_category schema
+		default_entity_id preferred_entity_name
 		brightness effect color_temp color_mode white supported_color_modes
 		preferred_reading_name state_reading_name command_set_name command_codec
 		brightness_reading_name brightness_set_name brightness_command_codec
-		payload_on payload_off payload_available payload_not_available payload_home
+		payload_on payload_off state_on state_off payload_available payload_not_available payload_home
 		payload_not_home payload_open payload_close payload_stop payload_lock
 		payload_unlock payload_press brightness_command_topic brightness_state_topic
 		brightness_value_template brightness_scale color_temp_command_topic

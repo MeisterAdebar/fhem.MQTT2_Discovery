@@ -5,6 +5,7 @@ package MQTT2_Discovery::FHEMGateway;
 
 use strict;
 use warnings;
+use Encode ();
 
 
 # Das Gateway kapselt alle Zugriffe auf globale FHEM-Funktionen. Tests koennen
@@ -174,6 +175,60 @@ sub cancel_timer {
 	return $callback->($hash, $function) if ref($callback) eq 'CODE';
 	return undef if !defined(&main::RemoveInternalTimer);
 	return main::RemoveInternalTimer($hash, $function);
+}
+
+# Codiert MQTTs variable Remaining-Length-Darstellung ohne weitere Bibliothek.
+sub _mqtt_remaining_length {
+	my ($length) = @_;
+	my @bytes;
+
+	do {
+		my $byte = $length % 128;
+		$length = int($length / 128);
+		$byte |= 0x80 if $length;
+		push @bytes, $byte;
+	} while ($length);
+
+	return pack('C*', @bytes);
+}
+
+# Abonniert am laufenden MQTT2_CLIENT exakt ein Topic, damit dessen Retained-Wert
+# zugestellt wird. Das zusaetzliche Abonnement endet beim naechsten Reconnect.
+sub refresh_retained_topic {
+	my ($self, $iodev, $topic) = @_;
+	my $callback = $self->{callbacks}{refresh_retained_topic};
+	return $callback->($iodev, $topic) if ref($callback) eq 'CODE';
+	return 'IODev fehlt' if ref($iodev) ne 'HASH';
+	return 'Retained-Abruf wird nur fuer MQTT2_CLIENT unterstuetzt'
+		if ($iodev->{TYPE} || '') ne 'MQTT2_CLIENT';
+	return 'MQTT2_CLIENT ist nicht vollstaendig verbunden'
+		if ($iodev->{STATE} || '') ne 'opened' || $iodev->{connecting}
+			|| !defined($iodev->{FD});
+	return 'Availability-Topic ist leer oder enthaelt ungueltige Zeichen'
+		if !defined($topic) || ref($topic) || $topic eq ''
+			|| $topic =~ /[\x00+#]/;
+	return 'MQTT2_CLIENT stellt die benoetigte Sendefunktion nicht bereit'
+		if !defined(&main::MQTT2_CLIENT_send);
+	my $wire_topic = Encode::encode('UTF-8', $topic);
+	return 'Availability-Topic ist fuer MQTT zu lang' if length($wire_topic) > 65_535;
+
+	# Eine eigene fortlaufende Paket-ID vermeidet Kollisionen zwischen mehreren
+	# gleichzeitig geplanten Availability-Abrufen derselben Client-Verbindung.
+	my $packet_id = 1 + (($iodev->{'.mqtt2_discovery_packet_id'}
+		// $iodev->{FD} // 0) % 65_535);
+	$iodev->{'.mqtt2_discovery_packet_id'} = $packet_id;
+	my $payload = pack('n', $packet_id)
+		. pack('n', length($wire_topic)) . $wire_topic . pack('C', 0);
+	my $packet = pack('C', 0x82) . _mqtt_remaining_length(length($payload)) . $payload;
+	my $ok = eval {
+		# doSend=1 stellt sicher, dass der gezielte SUBSCRIBE nicht von einem alten
+		# Verbindungsaufbauzustand verworfen wird; die Vorpruefung schliesst ihn aus.
+		main::MQTT2_CLIENT_send($iodev, $packet, 0, 1);
+		1;
+	};
+	return 'MQTT2_CLIENT konnte das Availability-Topic nicht abonnieren: '
+		. ($@ || 'unbekannter Fehler') if !$ok;
+	return undef;
 }
 
 # Ruft die aktuelle semantische Device-Beschreibung optional ueber Semantic ab.

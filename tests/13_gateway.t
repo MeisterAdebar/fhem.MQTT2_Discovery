@@ -62,4 +62,31 @@ is(\@integrations, [
 	['end', 'NeuesDevice'],
 ], 'optionales Fertig-Signal ist injizierbar');
 
+{
+	my @packets;
+	my $client = {
+		NAME => 'mqtt', TYPE => 'MQTT2_CLIENT', STATE => 'opened', FD => 7,
+	};
+	no warnings qw(once redefine);
+	local *main::MQTT2_CLIENT_send = sub {
+		my ($iodev, $packet, $immediate, $do_send) = @_;
+		push @packets, [$iodev, $packet, $immediate, $do_send];
+		return;
+	};
+	is($gateway->refresh_retained_topic($client, 'zigbee2mqtt/node/availability'), undef,
+		'gezielter Retained-Abruf wird als MQTT-SUBSCRIBE gesendet');
+	is(scalar(@packets), 1, 'genau ein MQTT-Paket wird erzeugt');
+	my $packet = $packets[0][1];
+	is(ord(substr($packet, 0, 1)), 0x82, 'Paket besitzt den SUBSCRIBE-Fixed-Header');
+	my $payload = substr($packet, 2);
+	my $topic_length = unpack('n', substr($payload, 2, 2));
+	is(substr($payload, 4, $topic_length), 'zigbee2mqtt/node/availability',
+		'das Paket abonniert ausschliesslich das angeforderte Topic');
+	is(ord(substr($payload, 4 + $topic_length, 1)), 0,
+		'SUBSCRIBE fordert QoS 0 an');
+	is($packets[0][3], 1, 'vollstaendig verbundener Client sendet das Paket unmittelbar frei');
+	like($gateway->refresh_retained_topic($client, 'invalid/#'), qr/ungueltige Zeichen/,
+		'MQTT-Wildcards werden nicht als exaktes Availability-Topic akzeptiert');
+}
+
 done_testing;

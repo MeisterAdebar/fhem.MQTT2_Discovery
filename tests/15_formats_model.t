@@ -51,7 +51,7 @@ subtest 'grobe Formaterkennung trennt Discovery von State' => sub {
 subtest 'Home Assistant normalisiert in Modellversion 1' => sub {
 	my $result = consume(
 		'homeassistant/switch/node/power/config',
-		'{"stat_t":"node/state/power","cmd_t":"node/command/power","pl_on":"1","pl_off":"0","dev":{"ids":["node"],"name":"Node"}}',
+		'{"stat_t":"node/state/power","cmd_t":"node/command/power","pl_on":"1","pl_off":"0","stat_on":"enabled","stat_off":"disabled","dev":{"ids":["node"],"name":"Node"}}',
 	);
 	is([$result->{status}, $result->{adapter}], ['ok', 'homeassistant'], 'HA-Adapter wurde ausgewaehlt');
 	my $event = $result->{events}[0];
@@ -61,9 +61,59 @@ subtest 'Home Assistant normalisiert in Modellversion 1' => sub {
 	is($event->{commands}[0]{topic}, 'node/command/power', 'Command-Kanal ist separat beschrieben');
 	is([$event->{capabilities}{power}{read}, $event->{capabilities}{power}{write}],
 		['state', 'command'], 'Capability verbindet Signal und Command ausdruecklich');
+	is([$event->{entity}{configuration}{state_on}, $event->{entity}{configuration}{state_off}],
+		['enabled', 'disabled'],
+		'getrennte Switch-Zustandswerte passieren die kanonische Modellgrenze');
 	is(MQTT2_Discovery::Model::validate($event), undef, 'kanonisches Modell ist gueltig');
 	my $mapping = MQTT2_Discovery::Mapper::map_model(model => $event, io_name => 'mqtt');
 	ok($mapping->{ok}, 'allgemeiner Mapper verarbeitet das Modell ohne Formatparser');
+};
+
+subtest 'Availability passiert die kanonische Modellgrenze als eigene Rolle' => sub {
+	my $result = consume(
+		'homeassistant/light/node/light/config',
+		'{"schema":"json","stat_t":"node/state","cmd_t":"node/set","avty":[{"t":"node/availability","val_tpl":"{{ value_json.state }}"},{"t":"controller/health","val_tpl":"{{ value_json.status }}"}],"avty_mode":"all","pl_avail":"up","pl_not_avail":"down","dev":{"ids":["node"],"name":"Node"}}',
+	);
+	my $event = $result->{events}[0];
+	is($event->{availability_mode}, 'all',
+		'der HA-Modus ist eine ausdrueckliche kanonische Verknuepfungsregel');
+	is($event->{availability}, [
+		{
+			topic => 'node/availability', value_template => '{{ value_json.state }}',
+			payload_available => 'up', payload_not_available => 'down',
+		},
+		{
+			topic => 'controller/health', value_template => '{{ value_json.status }}',
+			payload_available => 'up', payload_not_available => 'down',
+		},
+	], 'jede Availability-Quelle enthaelt Topic, Template und Vergleichsvertrag');
+	ok(!exists($event->{entity}{configuration}{availability}),
+		'Availability wird nicht als normale Komponenten-Konfiguration dupliziert');
+	my ($legacy, $error) = MQTT2_Discovery::Model::to_entity($event);
+	is($error, undef, 'kanonische Availability laesst sich fuer den Mapper projizieren');
+	is([$legacy->{availability_mode}, $legacy->{availability}],
+		['all', $event->{availability}], 'Mapper-Projektion erhaelt Quellen und Modus unveraendert');
+
+	my $invalid = { %$event, availability_mode => 'xor' };
+	is(MQTT2_Discovery::Model::validate($invalid), 'Ungueltiger Availability-Modus',
+		'nicht definierte Verknuepfungsarten werden an der Modellgrenze abgewiesen');
+};
+
+subtest 'HA-Entity-Name passiert die kanonische Modellgrenze' => sub {
+	my $result = consume(
+		'homeassistant/button/node/node_identify/config',
+		'{"command_topic":"node/set/not_the_name","default_entity_id":"button.node_identify","device_class":"identify","payload_press":"identify","device":{"identifiers":["node"],"name":"Node"}}',
+	);
+	my $event = $result->{events}[0];
+	is($event->{entity}{logical_name}, 'identify',
+		'der HA-Adapter liefert den nach HA-Regeln bestimmten logischen Entity-Namen');
+	is($event->{entity}{configuration}{default_entity_id}, 'button.node_identify',
+		'default_entity_id bleibt getrennt als HA-Konfiguration erhalten');
+	ok(!exists($event->{commands}[0]{name}),
+		'das Command-Binding erfindet keinen Namen aus seinem Topic');
+	my $mapping = MQTT2_Discovery::Mapper::map_model(model => $event, io_name => 'mqtt');
+	is($mapping->{set_lines}[0]{line}, 'identify:noArg node/set/not_the_name identify',
+		'der protokollneutrale Mapper verwendet nur den kanonischen logischen Namen');
 };
 
 subtest 'HA-JSON-Light endet als allgemeiner Codecvertrag am Modell' => sub {

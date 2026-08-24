@@ -49,6 +49,7 @@ Jedes Event ist ein Hash mit diesen Pflichtfeldern:
     id            => 'temperature',
     kind          => 'sensor',
     name          => 'Temperature',
+    logical_name  => 'temperature',
     category      => undef,
     configuration => { ... },
   },
@@ -56,7 +57,15 @@ Jedes Event ist ein Hash mit diesen Pflichtfeldern:
   signals      => [ ... ],
   commands     => [ ... ],
   capabilities => { ... },
-  availability => [ ... ],
+  availability => [
+    {
+      topic                 => 'node/availability',
+      value_template        => '{{ value_json.state }}',
+      payload_available     => 'online',
+      payload_not_available => 'offline',
+    },
+  ],
+  availability_mode => 'latest',
   extensions   => {},
 }
 ```
@@ -65,6 +74,46 @@ Jedes Event ist ein Hash mit diesen Pflichtfeldern:
 geraetespezifische Semantik erraten. `entity.configuration` enthaelt nur bereits
 normalisierte, ausgeschriebene Domainfelder; Rohabkuerzungen eines
 Discovery-Protokolls gehoeren nicht in diese Ebene.
+
+`entity.name` bewahrt den ausdruecklichen Anzeigenamen des Quellprotokolls.
+`entity.logical_name` ist dagegen ein optionaler, bereits vom Formatadapter nach
+den Regeln dieses Protokolls bestimmter maschinenlesbarer Name. Beispielsweise
+verwendet Home Assistant fuer einen namenlosen MQTT-Button dessen `device_class`
+als Namen. Der gemeinsame Mapper wertet dafuer weder MQTT-Topics noch
+Home-Assistant-Felder aus, sondern nutzt nur diesen kanonischen Wert.
+
+## Availability
+
+Availability ist eine eigene Rolle und kein normales State-Signal. Der
+Formatadapter normalisiert jede Quelle auf Topic, optionales Template und ihre
+beiden Vergleichspayloads. `availability_mode` beschreibt mit `all`, `any` oder
+`latest`, wie mehrere Quellen zu dem sichtbaren Zustand `availability`
+verknuepft werden.
+
+Der gemeinsame Mapper leitet daraus keine Namen aus Topicsegmenten ab. Die
+einzelnen Quellzustaende und die Verknuepfungsregeln liegen in verborgenen
+FHEM-Readings; sichtbar ist nur das berechnete Reading `availability`. Ein
+Adapter darf ein Protokollsignal zusaetzlich als normales Reading beschreiben,
+wenn dessen bestehende Oberflaeche erhalten bleiben soll. Tasmota nutzt dies
+beispielsweise fuer das weiterhin sichtbare Reading `LWT`.
+
+Der Verbindungszustand des am `MQTT2_DISCOVERY` gebundenen IODev bildet eine
+zusaetzliche, protokollunabhaengige Bedingung. Bei getrennter Brokerverbindung
+werden alle von dieser Instanz verwalteten Devices `offline`. Nach dem Reconnect
+werden die erhaltenen Quell- und Regelzustaende erneut ausgewertet; ein Device
+ohne eigene Availability-Quellen folgt direkt dem IODev-Zustand. Damit bildet
+die Laufzeit dieselbe uebergeordnete Brokerbedingung wie Home Assistant ab. Ein
+aus FHEM geloeschtes IODev gilt unabhaengig von einer noch vorhandenen
+Perl-Referenz als offline; ausstehende Discovery-Arbeit wird dabei verworfen.
+
+Technische Rollen duerfen ihren sichtbaren Readingnamen als reserviert
+markieren. Kollidiert ein normales, explizit beschriebenes Signal damit,
+qualifiziert der deviceweite Namensresolver dessen logischen Entity-Pfad. Frei
+entpackte JSON-Felder erhalten stattdessen einen Namen wie
+`state_availability`. Diese Regel wertet weder Topicpfade noch Hersteller oder
+Discovery-Formate aus und beruecksichtigt auch ein vorhandenes FHEM-`jsonMap`.
+Da jedes verwaltete Device diese IO-Bedingung besitzt, ist `availability` auch
+ohne protokolleigene Availability-Quelle reserviert.
 
 ## Signals und Commands
 

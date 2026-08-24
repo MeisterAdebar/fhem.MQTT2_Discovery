@@ -7,12 +7,16 @@
 use strict;
 use warnings;
 use Test2::V0;
+use JSON::PP ();
 use lib 'lib/FHEM', 'tests/lib';
 use FHEMTestEnv qw(reset_env add_iodev define_discovery dispatch_message attr_value reading_value command_log);
 
 my $loaded = do './FHEM/10_MQTT2_DISCOVERY.pm';
 die $@ if $@;
 die $! if !defined $loaded;
+
+my $availability_json_map =
+	q{MQTT2_DISCOVERY_runtimeJSONMap($NAME, {"availability" => "state_availability"})};
 
 # Setzt eine vollstaendig isolierte FHEM-Testumgebung mit Discovery-Device auf.
 sub setup {
@@ -128,13 +132,15 @@ subtest 'native Tasmota-Discovery fuehrt config und sensors zusammen' => sub {
 		'Relay-Status ist enthalten');
 	my ($result_line) = grep { /^stat\/workshop_plug\/RESULT:/ }
 		split /\n/, attr_value('MQTT2_Workshop_Plug', 'readingList');
-	is($result_line, q{stat/workshop_plug/RESULT:.* { json2nameValue($EVENT,'',$JSONMAP) }},
+	is($result_line, q!stat/workshop_plug/RESULT:.* { json2nameValue($EVENT,'',!
+		. $availability_json_map . q!) }!,
 		'Tasmota-RESULT verwendet ebenfalls die kurze JSON-Auswertung');
 	like(attr_value('MQTT2_Workshop_Plug', 'readingList'), qr{tele/workshop_plug/SENSOR},
 		'Telemetriesensoren sind enthalten');
 	my ($sensor_line) = grep { /^tele\/workshop_plug\/SENSOR:/ }
 		split /\n/, attr_value('MQTT2_Workshop_Plug', 'readingList');
-	is($sensor_line, q{tele/workshop_plug/SENSOR:.* { json2nameValue($EVENT,'',$JSONMAP) }},
+	is($sensor_line, q!tele/workshop_plug/SENSOR:.* { json2nameValue($EVENT,'',!
+		. $availability_json_map . q!) }!,
 		'Tasmota-SENSOR verwendet dieselbe kurze JSON-Auswertung wie MQTT2-Autocreate');
 	is(scalar(() = attr_value('MQTT2_Workshop_Plug', 'readingList') =~ /tele\/workshop_plug\/SENSOR/g), 1,
 		'alle Tasmota-Telemetriewerte teilen sich eine JSON-Auswertung');
@@ -163,7 +169,8 @@ subtest 'native Tasmota-Klassen werden bis readingList und setList abgebildet' =
 	like($set_list, qr{shutter_tilt:slider,0,1,90\s+cmnd/all_classes/ShutterTilt1}, 'Shutter-Tilt wird schreibbar');
 
 	my ($result_line) = grep { m{^stat/all_classes/RESULT:} } split /\n/, $reading_list;
-	is($result_line, q{stat/all_classes/RESULT:.* { json2nameValue($EVENT,'',$JSONMAP) }},
+	is($result_line, q!stat/all_classes/RESULT:.* { json2nameValue($EVENT,'',!
+		. $availability_json_map . q!) }!,
 		'alle JSON-Zustaende aus RESULT teilen sich die Autocreate-Auswertung');
 	is(scalar(() = $reading_list =~ m{stat/all_classes/RESULT}g), 1,
 		'RESULT wird trotz vieler Tasmota-Komponenten nur einmal ausgewertet');
@@ -220,18 +227,27 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 	my $reading_list = attr_value('MQTT2_SchwimmbadEntfeuchter', 'readingList');
 	my @expected = (
 		q{tele/tasmota_CF9A44/LWT:.* LWT},
-		q{tele/tasmota_CF9A44/STATE:.* { json2nameValue($EVENT,'',$JSONMAP) }},
-		q{tele/tasmota_CF9A44/SENSOR:.* { json2nameValue($EVENT,'',$JSONMAP) }},
-		q{tele/tasmota_CF9A44/INFO(?:1|2|3):.* { $EVENT =~ m,^..Info(?:1|2|3)..(.+).$, ?  json2nameValue($1,'',$JSONMAP) : json2nameValue($EVENT,'',$JSONMAP) }},
-		q{tele/tasmota_CF9A44/UPTIME:.* { json2nameValue($EVENT,'',$JSONMAP) }},
+		q!tele/tasmota_CF9A44/STATE:.* { json2nameValue($EVENT,'',!
+			. $availability_json_map . q!) }!,
+		q!tele/tasmota_CF9A44/SENSOR:.* { json2nameValue($EVENT,'',!
+			. $availability_json_map . q!) }!,
+		q!tele/tasmota_CF9A44/INFO(?:1|2|3):.* { $EVENT =~ m,^..Info(?:1|2|3)..(.+).$, ?  json2nameValue($1,'',!
+			. $availability_json_map . q!) : json2nameValue($EVENT,'',!
+			. $availability_json_map . q!) }!,
+		q!tele/tasmota_CF9A44/UPTIME:.* { json2nameValue($EVENT,'',!
+			. $availability_json_map . q!) }!,
 		q{stat/tasmota_CF9A44/POWER1:.* POWER1},
 		q{stat/tasmota_CF9A44/POWER2:.* POWER2},
-		q{stat/tasmota_CF9A44/RESULT:.* { json2nameValue($EVENT,'',$JSONMAP) }},
+		q!stat/tasmota_CF9A44/RESULT:.* { json2nameValue($EVENT,'',!
+			. $availability_json_map . q!) }!,
 	);
 	for my $line (@expected) {
 		is(scalar(grep { $_ eq $line } split /\n/, $reading_list), 1,
 			"readingList enthaelt genau einmal: $line");
 	}
+	like($reading_list,
+		qr{^tele/tasmota_CF9A44/LWT:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability}m,
+		'Tasmota-LWT speist zusaetzlich die allgemeine Availability-Auswertung');
 	my $set_list = attr_value('MQTT2_SchwimmbadEntfeuchter', 'setList');
 	like($set_list, qr{^POWER1:ON,OFF\s+cmnd/tasmota_CF9A44/POWER1$}m,
 		'erster Set-Befehl entspricht exakt POWER1');
@@ -329,6 +345,36 @@ subtest 'lesbare Standard-setList mit devicetopic' => sub {
 		'triviale Setter benoetigen keinen Runtime-Wrapper');
 };
 
+subtest 'HA-Button folgt der Entity-Namensbildung von Home Assistant' => sub {
+	setup();
+	my $base = 'zigbee2mqtt/SCHALTER_WAND_SZ';
+	my $device = '"dev":{"ids":["schalter_wand_sz"],"name":"SCHALTER_WAND_SZ"}';
+	dispatch_message('mqtt', 'z2m',
+		'homeassistant/button/schalter_wand_sz/schalter_wand_sz_identify/config',
+		qq({"cmd_t":"$base/set/identify","default_entity_id":"button.schalter_wand_sz_identify","dev_cla":"identify","object_id":"schalter_wand_sz_identify","payload_press":"identify",$device}));
+
+	is(attr_value('MQTT2_SCHALTER_WAND_SZ', 'devicetopic'), $base,
+		'Button-Command ergibt den gemeinsamen Geraetestamm');
+	like(attr_value('MQTT2_SCHALTER_WAND_SZ', 'setList'),
+		qr/^identify:noArg \$DEVICETOPIC\/set\/identify identify$/m,
+		'namenloser Button verwendet wie HA seine Device-Class als kurzen Namen');
+	is($main::defs{MQTT2_SCHALTER_WAND_SZ}{SEMANTIC_METADATA}{entities}[0]
+		{capabilities}{press}{write}, 'identify',
+		'SemanticUI verwendet denselben Button-Namen');
+
+	dispatch_message('mqtt', 'z2m',
+		'homeassistant/button/schalter_wand_sz/second_identify/config',
+		qq({"cmd_t":"$base/second/arbitrary","dev_cla":"identify","payload_press":"identify",$device}));
+	my @set_names = map { /^([^: ]+)/ ? $1 : () }
+		split /\r?\n/, attr_value('MQTT2_SCHALTER_WAND_SZ', 'setList');
+	my %set_names = map { $_ => 1 } @set_names;
+	is(scalar(@set_names), 2, 'beide gleichnamigen Button-Commands bleiben erhalten');
+	is(scalar(keys %set_names), 2, 'der allgemeine Resolver macht beide Set-Namen eindeutig');
+	is([sort map { $_->{capabilities}{press}{write} }
+			@{ $main::defs{MQTT2_SCHALTER_WAND_SZ}{SEMANTIC_METADATA}{entities} }],
+		[sort @set_names], 'SemanticUI verwendet die final aufgeloesten Set-Namen');
+};
+
 subtest 'HomeButtons Number-Defaults und Device-Automation' => sub {
 	setup();
 	my $base = 'homebuttons/homebuttons423828';
@@ -365,8 +411,8 @@ subtest 'externes Availability-Topic verhindert PAC-devicetopic nicht' => sub {
 	is(attr_value('MQTT2_pac_1b844c', 'devicetopic'), $base,
 		'gemeinsame PAC-Topicbasis wird als devicetopic gesetzt');
 	my $reading_list = attr_value('MQTT2_pac_1b844c', 'readingList');
-	like($reading_list, qr/^pac\/status:\.\* status$/m,
-		'externes Availability-Topic bleibt vollstaendig und verwendet seinen Topic-Namen');
+	like($reading_list, qr/^pac\/status:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability/m,
+		'externes Availability-Topic bleibt vollstaendig in der HA-Verfuegbarkeitsauswertung');
 	like($reading_list, qr/^\$DEVICETOPIC\/sensor\/pac_outside_temperature\/state:\.\*/m,
 		'PAC-State-Topic verwendet DEVICETOPIC ohne CID-Praefix');
 	like(attr_value('MQTT2_pac_1b844c', 'setList'),
@@ -403,11 +449,11 @@ subtest 'ESPHome-PAC behaelt bestehende Setter und ergaenzt Climate vollstaendig
 			'mild_dry:ON,OFF $DEVICETOPIC/command/mild_dry',
 			'mode:off,auto,cool,heat,fan_only,dry $DEVICETOPIC/command/mode',
 			'power:on,off $DEVICETOPIC/command/power',
-			'preset_mode:Normal,Powerful,Quiet $DEVICETOPIC/command/preset',
+			'preset:Normal,Powerful,Quiet $DEVICETOPIC/command/preset',
 			'swing_mode:off,both,vertical,horizontal $DEVICETOPIC/command/swing_mode',
 			'target_temperature:slider,16,0.5,30 $DEVICETOPIC/command/target_temperature',
 			'vertical_swing_mode:swing,auto,up,up_center,center,down_center,down $DEVICETOPIC/command/vertical_swing_mode'),
-		'alle PAC-Setter verwenden kurze geraetelokale Command-Namen');
+		'alle PAC-Setter verwenden dieselben kurzen Namen wie ihre Readings');
 	my $reading_list = attr_value($name, 'readingList');
 	like($reading_list, qr/^\$DEVICETOPIC\/state\/current_temperature:\.\* current_temperature$/m,
 		'Climate-Isttemperatur wird als Reading angelegt');
@@ -496,7 +542,7 @@ subtest 'HA-JSON-Entities erhalten kurze Namen und tiefstes gemeinsames Deviceto
 	my @discoveries = (
 		[
 			'homeassistant/light/z2m_light/light/config',
-			'{"schema":"json","brightness":true,"brightness_scale":254,"stat_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT","cmd_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT/set","avty":[{"t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT/availability","val_tpl":"{{ value_json.state }}"},{"t":"zigbee2mqtt/bridge/state","val_tpl":"{{ value_json.state }}"}],"uniq_id":"z2m_light_light",' . $device . '}',
+			'{"schema":"json","brightness":true,"brightness_scale":254,"stat_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT","cmd_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT/set","avty":[{"t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT/availability","val_tpl":"{{ value_json.state }}"},{"t":"zigbee2mqtt/bridge/state","val_tpl":"{{ value_json.state }}"}],"avty_mode":"all","uniq_id":"z2m_light_light",' . $device . '}',
 		],
 		[
 			'homeassistant/select/z2m_light/effect/config',
@@ -521,12 +567,17 @@ subtest 'HA-JSON-Entities erhalten kurze Namen und tiefstes gemeinsames Deviceto
 	is(attr_value($name, 'devicetopic'), 'zigbee2mqtt/WZ_LIGHTSTRIP_LICHT',
 		'das tiefste gemeinsame segmentgenaue Nutzdaten-Prefix wird verwendet');
 	my $reading_list = attr_value($name, 'readingList');
-	like($reading_list, qr/^\$DEVICETOPIC:\.\* \{ json2nameValue\(\$EVENT\) \}$/m,
-		'gemeinsames State-JSON erzeugt kurze fachliche Readings');
-	like($reading_list, qr/^\$DEVICETOPIC\/availability:/m,
-		'geraeteeigene Availability bleibt relativ zum Devicetopic');
-	like($reading_list, qr/^zigbee2mqtt\/bridge\/state:/m,
-		'externe Bridge-Availability bleibt ein absolutes Topic');
+	like($reading_list,
+		qr/^\$DEVICETOPIC:\.\* \{ json2nameValue\(\$EVENT, '', \{'availability' => 'state_availability'\}, '\^\(\?:brightness\|effect\|effect_speed\|linkquality\|state\)\$'\) \}$/m,
+		'gemeinsames State-JSON trennt freie Nutzdaten von der technischen Availability');
+	like($reading_list,
+		qr/^\$DEVICETOPIC\/availability:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability/m,
+		'geraeteeigene Availability bleibt relativ und speist die HA-Auswertung');
+	like($reading_list,
+		qr/^zigbee2mqtt\/bridge\/state:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability/m,
+		'externe Bridge-Availability bleibt absolut und speist dieselbe Auswertung');
+	unlike($reading_list, qr/^zigbee2mqtt\/bridge\/state:\.\* state$/m,
+		'Bridge-State ueberschreibt kein fachliches state-Reading');
 	unlike($reading_list, qr/WZ_LIGHTSTRIP_LICHT_(?:brightness|effect|effect_speed|linkquality)/i,
 		'eindeutige JSON-Fachnamen werden nicht mit dem Geraetenamen qualifiziert');
 
@@ -537,6 +588,59 @@ subtest 'HA-JSON-Entities erhalten kurze Namen und tiefstes gemeinsames Deviceto
 		'JSON-Light-Brightness verwendet den deklarierten Wertebereich');
 	like($set_list, qr/^effect:blink,breathe \$DEVICETOPIC\/set\/effect$/m,
 		'separate HA-Commands verwenden kurze Namen und korrekt relative Topics');
+};
+
+subtest 'Zigbee2MQTT-Bridge verwendet JSON-Pfade hinter lower als kurze Namen' => sub {
+	setup();
+	my $device = '"device":{"identifiers":["zigbee2mqtt_bridge"],"name":"Zigbee2MQTT Bridge"}';
+	my @discoveries = (
+		[
+			'homeassistant/select/zigbee2mqtt_bridge/zigbee2mqtt_bridge_log_level/config',
+			qq({"name":"Log level","unique_id":"zigbee2mqtt_bridge_log_level","state_topic":"zigbee2mqtt/bridge/info","value_template":"{{ value_json.log_level | lower }}","command_topic":"zigbee2mqtt/bridge/request/options","options":["error","warning","info","debug"],$device}),
+		],
+		[
+			'homeassistant/switch/zigbee2mqtt_bridge/zigbee2mqtt_bridge_permit_join/config',
+			qq({"name":"Permit join","unique_id":"zigbee2mqtt_bridge_permit_join","state_topic":"zigbee2mqtt/bridge/info","value_template":"{{ value_json.permit_join | lower }}","command_topic":"zigbee2mqtt/bridge/request/permit_join","payload_on":"{\\"time\\": 254}","payload_off":"{\\"time\\": 0}","state_on":"true","state_off":"false",$device}),
+		],
+		[
+			'homeassistant/sensor/zigbee2mqtt_bridge/zigbee2mqtt_bridge_version/config',
+			qq({"name":"Version","unique_id":"zigbee2mqtt_bridge_version","state_topic":"zigbee2mqtt/bridge/info","value_template":"{{ value_json.version }}",$device}),
+		],
+	);
+
+	# Alle Entities muessen vor der gemeinsamen Namensaufloesung im selben
+	# Device registriert sein und dabei ihre wertveraendernden Templates behalten.
+	for my $discovery (@discoveries) {
+		is(dispatch_message('mqtt', 'zigbee2mqtt', @$discovery), ['MQTT2_DISCOVERY'],
+			'Zigbee2MQTT-Bridge-Discovery wird konsumiert');
+	}
+
+	my $name = 'MQTT2_Zigbee2MQTT_Bridge';
+	my $reading_list = attr_value($name, 'readingList');
+	like($reading_list,
+		qr/runtimeReading\("\{\{ value_json\.log_level \| lower \}\}", \$EVENT, ['"]log_level['"]\)/,
+		'log_level bleibt trotz lower der kurze Readingname');
+	like($reading_list,
+		qr/runtimeReading\("\{\{ value_json\.permit_join \| lower \}\}", \$EVENT, ['"]permit_join['"]\)/,
+		'permit_join bleibt trotz lower der kurze Readingname');
+	like($reading_list,
+		qr/^\$DEVICETOPIC\/info:\.\* \{ json2nameValue\(\$EVENT, '', \{'availability' => 'state_availability'\}, '\^\(\?:version\)\$'\) \}$/m,
+		'das einfache Bridge-Info-Reading filtert den umfangreichen Payload auf version');
+	my $set_list = attr_value($name, 'setList');
+	like($set_list, qr/^log_level:error,warning,info,debug /m,
+		'Select-Setter verwendet log_level ohne technischen Device-Prefix');
+	like($set_list, qr/^permit_join:on,off /m,
+		'Switch-Setter verwendet permit_join ohne technischen Device-Prefix');
+	my ($permit_join) = grep { ($_->{id} // '') eq 'permit_join' }
+		@{ $main::defs{$name}{SEMANTIC_METADATA}{entities} };
+	is($permit_join->{capabilities}{power}, {
+		read => 'permit_join', write => 'permit_join', kind => 'boolean',
+		options => ['on', 'off'], activeValue => 'on', inactiveValue => 'off',
+		valueMap => { read => { true => 'on', false => 'off' } },
+	}, 'SemanticUI zeigt on/off statt der JSON-Befehlspayloads');
+	unlike($reading_list . "\n" . $set_list,
+		qr/zigbee2mqtt_bridge_(?:log_level|permit_join)/,
+		'weder Reading noch Setter faellt auf die technische Object-ID zurueck');
 };
 
 subtest 'kollidierende Device-Discovery-Namen werden symmetrisch qualifiziert' => sub {
@@ -569,17 +673,19 @@ JSON
 	my $set_list = attr_value('MQTT2_Person1_iPhone', 'setList');
 	like($reading_list, qr/^\$DEVICETOPIC\/state:\.\* \{ json2nameValue/m,
 		'gemeinsames FindMy-State-JSON wird in readingList aufgenommen');
-	like($reading_list, qr/json2nameValue\(\$EVENT\)/,
-		'reine Eins-zu-eins-Namen verwenden die kuerzeste JSON-Auswertung');
+	like($reading_list,
+		qr/json2nameValue\(\$EVENT, '', \{'availability' => 'state_availability'\}, '\^\(\?:battery\|locationOld\|name\)\$'\)/,
+		'freie JSON-Namen schuetzen das deviceweite Availability-Reading');
 	unlike($reading_list, qr/'(?:battery|locationOld|name)'\s*=>/,
 		'identische JSON- und Reading-Namen werden nicht wiederholt');
-	unlike($reading_list, qr/\^\(\?:battery\|locationOld\|name\)/,
-		'FindMy-State filtert zusaetzliche Payload-Felder nicht aus');
+	like($reading_list, qr/\^\(\?:battery\|locationOld\|name\)/,
+		'FindMy-State filtert zusaetzliche Payload-Felder aus');
 	unlike($reading_list, qr/runtimeReading/, 'einfache FindMy-Templates benoetigen keinen Runtime-Fallback');
-	like($set_list, qr/^locate:noArg \$DEVICETOPIC\/locate 1$/m, 'Locate-Setter verwendet den kurzen Namen');
+	like($set_list, qr/^Locate:noArg \$DEVICETOPIC\/locate 1$/m,
+		'Locate-Setter verwendet den ausdruecklichen HA-Namen');
 	like($set_list, qr/^message \$DEVICETOPIC\/message$/m, 'Message-Setter verwendet den kurzen Namen');
 	is([sort map { $_->{id} } @{ $main::defs{MQTT2_Person1_iPhone}{SEMANTIC_METADATA}{entities} }],
-		[qw(battery locate message)],
+		[qw(Locate battery message)],
 		'SemanticUI enthaelt nur Setter und den explizit klassifizierten Battery-Sensor');
 	is(reading_value('discovery', 'lastError'), 'none', 'FindMy-Discovery wird fehlerfrei verarbeitet');
 };
@@ -706,6 +812,109 @@ subtest 'Runtime-Template und Command-Payload' => sub {
 	is(main::MQTT2_DISCOVERY_runtimeJSONChoice(
 			'x', 'state', { on => 'ON' }, 'state invalid'), undef,
 		'JSON-Choice lehnt einen nicht deklarierten Auswahlwert ab');
+	my $json_map = main::MQTT2_DISCOVERY_runtimeJSONMap(
+		{ state => 'availability', battery => 'battery' },
+		{ availability => 'state_availability' },
+	);
+	is($json_map, {
+		state => 'state_availability', availability => 'state_availability',
+		battery => 'battery',
+	}, 'reservierte Namen werden in vorhandenen jsonMap-Zielen und rohen JSON-Feldern getrennt');
+	$main::defs{JSONMapRuntime} = {
+		NAME => 'JSONMapRuntime', JSONMAP => { state => 'availability' },
+	};
+	is(main::MQTT2_DISCOVERY_runtimeJSONMap(
+			'JSONMapRuntime', { availability => 'state_availability' }), {
+		state => 'state_availability', availability => 'state_availability',
+	}, 'der Runtime-Wrapper liest jsonMap ueber den von MQTT2_DEVICE bereitgestellten Devicenamen');
+};
+
+subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
+	setup();
+	my $device = 'AvailabilityRuntime';
+	$main::defs{$device} = {
+		NAME => $device, TYPE => 'MQTT2_DEVICE', READINGS => {},
+	};
+	my $apply = sub {
+		my ($updates) = @_;
+
+		for my $reading (keys %{ $updates || {} }) {
+			$main::defs{$device}{READINGS}{$reading} = { VAL => $updates->{$reading} };
+		}
+
+	};
+	my $source_device = '.availability_device';
+	my $source_bridge = '.availability_bridge';
+	my $policy_all = '.availability_policy_all';
+	my $policy = {
+		reading => $policy_all, mode => 'all',
+		sources => [$source_device, $source_bridge],
+	};
+	my $configuration = sub {
+		my ($reading) = @_;
+		return JSON::PP->new->canonical(1)->encode({
+			sources => [{
+				reading => $reading, template => '{{ value_json.state }}',
+				available => 'online', unavailable => 'offline',
+			}],
+			policies => [$policy],
+		});
+	};
+
+	my $device_online = main::MQTT2_DISCOVERY_runtimeAvailability(
+		$device, '{"state":"online"}', $configuration->($source_device));
+	is($device_online, {
+		$source_device => 'online', $policy_all => 'unknown', availability => 'unknown',
+	}, 'all bleibt unknown, solange die zweite Quelle noch unbekannt ist');
+	$apply->($device_online);
+	my $bridge_online = main::MQTT2_DISCOVERY_runtimeAvailability(
+		$device, '{"state":"online"}', $configuration->($source_bridge));
+	is($bridge_online, {
+		$source_bridge => 'online', $policy_all => 'online', availability => 'online',
+	}, 'all wird erst bei zwei verfuegbaren Quellen online');
+	$apply->($bridge_online);
+	my $bridge_offline = main::MQTT2_DISCOVERY_runtimeAvailability(
+		$device, '{"state":"offline"}', $configuration->($source_bridge));
+	is($bridge_offline->{availability}, 'offline',
+		'all wird bei einer ausgefallenen Quelle wieder offline');
+	$main::defs{$device}{READINGS}{'.availability_io'} = { VAL => 'offline' };
+	my $broker_guard = main::MQTT2_DISCOVERY_runtimeAvailability(
+		$device, '{"state":"online"}', $configuration->($source_bridge));
+	is($broker_guard->{ $source_bridge }, 'online',
+		'Quellzustand wird trotz getrennter Brokerverbindung weiter ausgewertet');
+	is($broker_guard->{availability}, 'offline',
+		'getrennte Brokerverbindung verhindert ein sichtbares Online-Ergebnis');
+	delete $main::defs{$device}{READINGS}{'.availability_io'};
+
+	my $any_configuration = JSON::PP->new->canonical(1)->encode({
+		sources => [{
+			reading => '.availability_any_a', available => 'up', unavailable => 'down',
+		}],
+		policies => [{
+			reading => '.availability_policy_any', mode => 'any',
+			sources => ['.availability_any_a', '.availability_any_b'],
+		}],
+	});
+	my $any = main::MQTT2_DISCOVERY_runtimeAvailability($device, 'up', $any_configuration);
+	is($any->{availability}, 'online',
+		'any wird bereits durch eine einzelne verfuegbare Quelle online');
+
+	my $latest_configuration = JSON::PP->new->canonical(1)->encode({
+		sources => [{
+			reading => '.availability_latest', available => 'up', unavailable => 'down',
+		}],
+		policies => [{
+			reading => '.availability_policy_latest', mode => 'latest',
+			sources => ['.availability_latest', '.availability_other'],
+		}],
+	});
+	my $latest = main::MQTT2_DISCOVERY_runtimeAvailability(
+		$device, 'down', $latest_configuration);
+	is($latest->{availability}, 'offline',
+		'latest uebernimmt den Zustand der zuletzt empfangenen Quelle');
+	is(main::MQTT2_DISCOVERY_runtimeAvailability(
+			$device, 'unbekannt', $latest_configuration), {},
+		'nicht deklarierte Payloads veraendern keine Availability-Readings');
 };
 
 subtest 'OpenMQTTGateway-typische HA-Discovery' => sub {

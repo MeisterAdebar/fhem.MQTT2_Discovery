@@ -26,15 +26,49 @@ sub _single_set_name {
 	return @names == 1 ? $names[0] : $fallback;
 }
 
+# Liest die tatsaechlich von MQTT2_DEVICE angebotenen Auswahlwerte aus der Set-Zeile.
+sub _set_choice_values {
+	my ($entries, $name) = @_;
+	return undef if !defined($name) || $name eq '';
+	my @matches = grep {
+		ref($_) eq 'HASH' && defined($_->{name}) && $_->{name} eq $name
+	} @{ $entries || [] };
+	return undef if @matches != 1 || !defined($matches[0]{line});
+	my ($spec) = $matches[0]{line} =~ /^\Q$name\E:([^\s]+)(?:\s|$)/;
+	return undef if !defined($spec) || $spec eq '';
+	my @values = split /,/, $spec, -1;
+	return undef if @values != 2 || grep { $_ eq '' } @values;
+	return \@values;
+}
+
 # Ermittelt alle Readings, die ein einzelner Mapping-Eintrag erzeugen kann.
 sub _entry_read_names {
 	my ($entries) = @_;
 	my %names;
 
-	for my $entry (grep { ref($_) eq 'HASH' } @{ $entries || [] }) {
+	for my $entry (grep {
+		ref($_) eq 'HASH' && ($_->{role} // '') ne 'availability'
+	} @{ $entries || [] }) {
 		my $semantic_name = $entry->{semantic_name} // $entry->{name} // '';
 		next if $semantic_name eq '' || !defined($entry->{name}) || $entry->{name} eq '';
 		$names{$semantic_name} //= $entry->{name};
+	}
+
+	return %names;
+}
+
+# Ordnet logische Capability-Namen den tatsaechlich erzeugten Set-Namen zu.
+sub _entry_set_names {
+	my ($entries) = @_;
+	my %names;
+
+	# Gekoppelte Setter werden ueber ihren logischen Capability-Namen gefunden;
+	# ungekoppelte Eintraege bleiben unter ihrem sichtbaren Set-Namen erreichbar.
+	for my $entry (grep { ref($_) eq 'HASH' } @{ $entries || [] }) {
+		my $name = $entry->{name};
+		next if !defined($name) || ref($name) || $name eq '';
+		my $semantic_name = $entry->{semantic_name} // $name;
+		$names{$semantic_name} //= $name;
 	}
 
 	return %names;
@@ -71,17 +105,30 @@ sub _semantic_display_name {
 	return $fallback;
 }
 
-# Baut eine einheitliche Ein/Aus-Capability aus den vorhandenen Befehlswerten.
+# Baut eine einheitliche Ein/Aus-Capability aus FHEM-Set- und MQTT-Zustandswerten.
 sub _power_capability {
 	my (%args) = @_;
 	my %capability = (kind => 'boolean');
 	$capability{read} = $args{read} if defined $args{read};
 	$capability{write} = $args{write} if defined $args{write};
-	my $on = $args{payload_on} // 'ON';
-	my $off = $args{payload_off} // 'OFF';
-	$capability{options} = [$on, $off];
-	$capability{activeValue} = $on;
-	$capability{inactiveValue} = $off;
+	my ($active, $inactive) = ref($args{options}) eq 'ARRAY' && @{ $args{options} } == 2
+		? @{ $args{options} } : qw(on off);
+	$capability{options} = [$active, $inactive];
+	$capability{activeValue} = $active;
+	$capability{inactiveValue} = $inactive;
+	my $state_on = defined($args{state_on}) ? $args{state_on} : ($args{payload_on} // 'ON');
+	my $state_off = defined($args{state_off}) ? $args{state_off} : ($args{payload_off} // 'OFF');
+
+	# Nur zwei unterschiedliche skalare Readingwerte ergeben eine eindeutige
+	# Abbildung auf die vom FHEM-Setter angebotenen Werte on und off.
+	if (defined($args{read}) && defined($state_on) && !ref($state_on)
+			&& defined($state_off) && !ref($state_off) && "$state_on" ne "$state_off"
+			&& ("$state_on" ne "$active" || "$state_off" ne "$inactive")) {
+		$capability{valueMap}{read} = {
+			"$state_on" => $active,
+			"$state_off" => $inactive,
+		};
+	}
 	return \%capability;
 }
 
@@ -212,6 +259,7 @@ sub _semantic_entity {
 	my ($entity, $reading_name, $readings, $sets) = @_;
 	my %read_name = _entry_read_names($readings);
 	my %has_set = _entry_names($sets);
+	my %set_name = _entry_set_names($sets);
 	my $component = $entity->{component} || '';
 	return undef if $component eq 'device_automation';
 
@@ -274,10 +322,13 @@ sub _semantic_entity {
 		$capabilities->{power} = _power_capability(
 			read => $read_name{$reading_name},
 			write => $has_set{$set_name} ? $set_name : undef,
+			options => _set_choice_values($sets, $set_name),
+			state_on => $entity->{state_on}, state_off => $entity->{state_off},
 			payload_on => $entity->{payload_on}, payload_off => $entity->{payload_off},
 		) if defined($read_name{$reading_name}) || $has_set{$set_name};
 	} elsif ($component eq 'button') {
-		$capabilities->{press} = { write => $reading_name, argument => 0 } if $has_set{$reading_name};
+		my $set_name = _single_set_name($sets, $reading_name);
+		$capabilities->{press} = { write => $set_name, argument => 0 } if $has_set{$set_name};
 	} elsif ($component eq 'number') {
 		my %value;
 		$value{read} = $read_name{$reading_name} if defined($read_name{$reading_name});
@@ -322,7 +373,8 @@ sub _semantic_entity {
 		) {
 			my ($capability, $suffix, $min_key, $max_key, $step_key) = @$spec;
 			my $read_name = "${reading_name}_$suffix";
-			my $set_name = capability_set_name($entity, $reading_name, $suffix);
+			my $set_name = $set_name{$read_name}
+				// capability_set_name($entity, $reading_name, $suffix);
 			my %value;
 			$value{read} = $read_name{$read_name} if defined($read_name{$read_name});
 			$value{write} = $set_name if $has_set{$set_name};
@@ -335,7 +387,8 @@ sub _semantic_entity {
 		}
 
 		my $target_humidity = "${reading_name}_target_humidity";
-		my $target_humidity_set = capability_set_name($entity, $reading_name, 'target_humidity');
+		my $target_humidity_set = $set_name{$target_humidity}
+			// capability_set_name($entity, $reading_name, 'target_humidity');
 
 		# Ziel-Luftfeuchte wird angelegt, sobald mindestens eine Lese- oder
 		# Schreibrichtung existiert; rein fehlende Discovery-Felder erzeugen nichts.
@@ -358,7 +411,8 @@ sub _semantic_entity {
 		) {
 			my ($capability, $suffix, $values_key) = @$spec;
 			my $read_name = "${reading_name}_$suffix";
-			my $set_name = capability_set_name($entity, $reading_name, $suffix);
+			my $set_name = $set_name{$read_name}
+				// capability_set_name($entity, $reading_name, $suffix);
 			my %value;
 			$value{read} = $read_name{$read_name} if defined($read_name{$read_name});
 			$value{write} = $set_name if $has_set{$set_name};
@@ -377,7 +431,9 @@ sub _semantic_entity {
 		my $action = "${reading_name}_action";
 		$capabilities->{action} = { read => $read_name{$action} }
 			if defined($read_name{$action});
-		my $power = capability_set_name($entity, $reading_name, 'power');
+		my $power_name = "${reading_name}_power";
+		my $power = $set_name{$power_name}
+			// capability_set_name($entity, $reading_name, 'power');
 		my $mode_read = "${reading_name}_mode";
 		my @modes = ref($entity->{modes}) eq 'ARRAY'
 			? grep { defined($_) && !ref($_) && $_ !~ /[\x00-\x1f]/ } @{ $entity->{modes} }
@@ -390,16 +446,18 @@ sub _semantic_entity {
 			my $power_capability = _power_capability(
 				read => $has_off_mode ? $read_name{$mode_read} : undef,
 				write => $has_set{$power} ? $power : undef,
+				options => _set_choice_values($sets, $power),
+				state_on => $entity->{state_on}, state_off => $entity->{state_off},
 				payload_on => $entity->{payload_on}, payload_off => $entity->{payload_off},
 			);
 
 			# Wenn off Teil der Modusliste ist, werden alle anderen Modi als aktiv
-			# interpretiert und auf die konfigurierten Power-Payloads normalisiert.
+			# interpretiert und auf die FHEM-Set-Werte normalisiert.
 			if ($has_off_mode && defined($read_name{$mode_read})) {
-				my $on = $entity->{payload_on} // 'ON';
-				my $off = $entity->{payload_off} // 'OFF';
+				my $active = $power_capability->{activeValue};
+				my $inactive = $power_capability->{inactiveValue};
 				$power_capability->{valueMap}{read} = {
-					map { ("$_" => ($_ eq 'off' ? $off : $on)) } @modes
+					map { ("$_" => ($_ eq 'off' ? $inactive : $active)) } @modes
 				};
 			}
 			$capabilities->{power} = $power_capability;
@@ -409,6 +467,8 @@ sub _semantic_entity {
 		$capabilities->{power} = _power_capability(
 			read => $read_name{$reading_name},
 			write => $has_set{$state_set} ? $state_set : undef,
+			options => _set_choice_values($sets, $state_set),
+			state_on => $entity->{state_on}, state_off => $entity->{state_off},
 			payload_on => $entity->{payload_on}, payload_off => $entity->{payload_off},
 		) if defined($read_name{$reading_name}) || $has_set{$state_set};
 		my $brightness = "${reading_name}_brightness";
@@ -452,6 +512,8 @@ sub _semantic_entity {
 		$capabilities->{power} = _power_capability(
 			read => $read_name{$reading_name},
 			write => $has_set{$state_set} ? $state_set : undef,
+			options => _set_choice_values($sets, $state_set),
+			state_on => $entity->{state_on}, state_off => $entity->{state_off},
 			payload_on => $entity->{payload_on}, payload_off => $entity->{payload_off},
 		) if defined($read_name{$reading_name}) || $has_set{$state_set};
 		my $percentage = "${reading_name}_percentage";

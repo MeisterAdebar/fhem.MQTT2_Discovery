@@ -26,6 +26,10 @@ is(value_of('{{ value | lower }}', ' AbC ')->{value}, ' abc ', 'lower');
 is(value_of('{{ value | upper | trim }}', ' abc ')->{value}, 'ABC', 'Filterkette');
 is(value_of('{{ value | int }}', '12.9')->{value}, '12', 'int');
 is(value_of('{{ value | float }}', '12.5')->{value}, '12.5', 'float');
+is(value_of('{{ value | int(7) }}', 'ungueltig')->{value}, '7',
+	'int verwendet den von HA vorgesehenen Fehler-Fallback');
+is(value_of('{{ value | float(2.5) }}', 'ungueltig')->{value}, '2.5',
+	'float verwendet den von HA vorgesehenen Fehler-Fallback');
 is(value_of('{{ value_json.temperature | float | round(1) }}', '{"temperature":12.56}')->{value}, '12.6', 'round');
 is(value_of('{{ value_json.temperature | is_defined }}', '{"temperature":21.5}')->{value}, '21.5',
 	'is_defined reicht einen vorhandenen JSON-Wert unveraendert weiter');
@@ -38,6 +42,34 @@ is(value_of('{{ missing | default(7) }}', '')->{value}, '7', 'default ersetzt fe
 is(value_of("{{ 'on' if value == 'ON' else 'off' }}", 'ON')->{value}, 'on', 'Ternary wahr');
 is(value_of("{{ 'on' if value == 'ON' else 'off' }}", 'OFF')->{value}, 'off', 'Ternary falsch');
 is(value_of('{% if value_json.active %}on{% else %}off{% endif %}', '{"active":true}')->{value}, 'on', 'If-Block');
+
+subtest 'Filtermetadaten trennen Quellpfad und direkte Wertidentitaet' => sub {
+	my $lower_template = '{{ value_json.permit_join | lower }}';
+	my $lower = MQTT2_Discovery::Template::compile($lower_template);
+	is(MQTT2_Discovery::Template::source_json_key($lower_template, $lower), 'permit_join',
+		'lower behaelt permit_join als fachlichen Quellpfad');
+	is(MQTT2_Discovery::Template::simple_json_key($lower_template, $lower), undef,
+		'lower bleibt eine auszufuehrende Werttransformation');
+
+	my $chain_template = '{{ value_json.log_level | upper | trim }}';
+	my $chain = MQTT2_Discovery::Template::compile($chain_template);
+	is(MQTT2_Discovery::Template::source_json_key($chain_template, $chain), 'log_level',
+		'eine Kette pfaderhaltender Filter behaelt denselben Hauptpfad');
+	is(MQTT2_Discovery::Template::simple_json_key($chain_template, $chain), undef,
+		'wertveraendernde Filterketten werden nicht direkt als JSON-Identitaet behandelt');
+
+	my $defined_template = '{{ value_json.temperature | is_defined }}';
+	my $defined = MQTT2_Discovery::Template::compile($defined_template);
+	is(MQTT2_Discovery::Template::simple_json_key($defined_template, $defined), 'temperature',
+		'is_defined bleibt als unveraenderte Durchleitung direkt abbildbar');
+
+	my $default_template = '{{ value_json.temperature | default(0) }}';
+	my $default = MQTT2_Discovery::Template::compile($default_template);
+	is(MQTT2_Discovery::Template::source_json_key($default_template, $default), undef,
+		'default besitzt wegen seines alternativen Ergebniszweigs keinen eindeutigen Quellpfad');
+	ok(!MQTT2_Discovery::Template::compile('{{ value | lower(1) }}')->{ok},
+		'nicht von HA vorgesehene lower-Argumente werden zentral abgelehnt');
+};
 
 subtest 'fehlend, false, null und leer bleiben unterscheidbar' => sub {
 	is(value_of('{{ value_json.zero | default(9) }}', '{"zero":0}')->{value}, '0', 'Null bleibt');

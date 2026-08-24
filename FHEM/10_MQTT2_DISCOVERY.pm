@@ -22,8 +22,10 @@ use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
 use vars qw(%defs %attr %modules $readingFnAttributes);
 
-our $MQTT2_DISCOVERY_VERSION = '0.9.3';
+our $MQTT2_DISCOVERY_VERSION = '0.9.5';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
+our $MQTT2_DISCOVERY_AVAILABILITY_REFRESH_DELAY = 60;
+our $MQTT2_DISCOVERY_AVAILABILITY_RETRY_DELAY = 10;
 
 # --- FHEM-Zugriffe und Logging ------------------------------------------------
 
@@ -169,11 +171,12 @@ sub MQTT2_DISCOVERY_Define($$) {
 	$hash->{IODev} = $iodev;
 	$hash->{IODevName} = $io_name;
 	$hash->{DEF} = $io_name;
-	$hash->{NOTIFYDEV} = 'global';
+	MQTT2_DISCOVERY_set_notify_devices($hash);
 	$modules{MQTT2_DISCOVERY}{defptr}{$io_name} = $hash;
 	MQTT2_DISCOVERY_registry($hash);
 	MQTT2_DISCOVERY_reading($hash, 'state', MQTT2_DISCOVERY_state($hash));
 	MQTT2_DISCOVERY_update_counts($hash);
+	MQTT2_DISCOVERY_sync_io_availability($hash) if $main::init_done;
 	MQTT2_DISCOVERY_log($hash, 2, "defined for $iodev->{TYPE} $io_name; version=$MQTT2_DISCOVERY_VERSION");
 	MQTT2_DISCOVERY_check_ignore_regexp($hash);
 	return undef;
@@ -184,6 +187,7 @@ sub MQTT2_DISCOVERY_Undef($$) {
 	my ($hash, undef) = @_;
 	my $io_name = $hash->{IODevName};
 	MQTT2_DISCOVERY_clear_queue($hash);
+	MQTT2_DISCOVERY_clear_availability_refreshes($hash);
 	MQTT2_DISCOVERY_log($hash, 2, 'undefined' . ($io_name ? "; IODev=$io_name" : ''));
 	delete $modules{MQTT2_DISCOVERY}{defptr}{$io_name}
 		if $io_name && $modules{MQTT2_DISCOVERY}{defptr}{$io_name} == $hash;
@@ -208,7 +212,10 @@ sub MQTT2_DISCOVERY_Attr(@) {
 			# Das Reading wird sofort aktualisiert; beim Deaktivieren darf keine
 			# bereits geplante Discovery-Arbeit spaeter weiterlaufen.
 			my $disabled = $operation eq 'set' && $value eq '1';
-			MQTT2_DISCOVERY_clear_queue($hash) if $disabled;
+			if ($disabled) {
+				MQTT2_DISCOVERY_clear_queue($hash);
+				MQTT2_DISCOVERY_clear_availability_refreshes($hash);
+			}
 			MQTT2_DISCOVERY_reading($hash, 'state', $disabled ? 'disabled' : MQTT2_DISCOVERY_state($hash, 1));
 			MQTT2_DISCOVERY_log($hash, 2, $disabled ? 'disabled by attribute' : 'enabled by attribute');
 		}
@@ -307,6 +314,9 @@ sub MQTT2_DISCOVERY_state($;$) {
 	my ($hash, $ignore_disable) = @_;
 	return 'disabled' if !$ignore_disable
 		&& MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'disable', 0);
+	my $io_name = $hash->{IODevName} || '';
+	return 'inactive' if !$io_name || !$defs{$io_name}
+		|| $defs{$io_name} != $hash->{IODev};
 	return MQTT2_DISCOVERY_is_active($hash) ? 'active' : 'inactive';
 }
 
@@ -515,25 +525,334 @@ sub MQTT2_DISCOVERY_schedule_queue($) {
 	return;
 }
 
-# Startet vor INITIALIZED gesammelte Discovery-Arbeit nach dem globalen
-# Lebenszyklusereignis genau einmal.
+# Begrenzt FHEMs Notify-Auswertung auf Lebenszyklus und gebundenes MQTT-IODev.
+sub MQTT2_DISCOVERY_set_notify_devices($) {
+	my ($hash) = @_;
+	my $notify_devices = 'global,' . ($hash->{IODevName} || '');
+	$notify_devices =~ s/,$//;
+
+	# setNotifyDev invalidiert zusaetzlich FHEMs internen Notify-Cache. Die direkte
+	# Zuweisung haelt isolierte Testumgebungen ohne diese Hilfsfunktion nutzbar.
+	if (defined(&main::setNotifyDev)) {
+		&main::setNotifyDev($hash, $notify_devices);
+	} else {
+		$hash->{NOTIFYDEV} = $notify_devices;
+	}
+	return;
+}
+
+# Liefert den Brokerzugang des gebundenen MQTT2-IODev als normierten Zustand.
+sub MQTT2_DISCOVERY_iodev_available($) {
+	my ($hash) = @_;
+	return 0 if ref($hash) ne 'HASH';
+	my $iodev = $hash->{IODev};
+	return 0 if ref($iodev) ne 'HASH';
+	my $name = $iodev->{NAME} || '';
+
+	# Eine im Hash verbliebene Perl-Referenz bedeutet nicht, dass das IODev noch
+	# in FHEM definiert ist. Nur das aktuelle Objekt unter demselben Namen gilt.
+	return 0 if $name eq '' || !$defs{$name} || $defs{$name} != $iodev;
+	my $gateway = MQTT2_DISCOVERY_gateway($hash);
+	my $disabled = $gateway->attr_value($name, 'disable', 0);
+
+	# IsDisabled beruecksichtigt neben disable auch zeitgesteuerte Sperren. Ein
+	# Fehler der optionalen FHEM-Hilfe darf die einfache Attributpruefung nicht
+	# verdecken.
+	if (defined(&main::IsDisabled)) {
+		my $value = eval { &main::IsDisabled($name) };
+		$disabled = 1 if !$@ && $value;
+	}
+	return 0 if $disabled;
+	my $state = $iodev->{STATE};
+	$state = $gateway->reading_value($name, 'state', '')
+		if !defined($state) || $state eq '';
+	$state = lc($state || '');
+
+	# MQTT2_CLIENT bezeichnet nur eine vollstaendig aufgebaute Brokerverbindung
+	# als opened. Alle Zwischen- und Fehlerzustaende bleiben offline.
+	return $state eq 'opened' ? 1 : 0
+		if ($iodev->{TYPE} || '') eq 'MQTT2_CLIENT';
+
+	# MQTT2_SERVER besitzt keine einzelne Upstream-Verbindung. Er gilt als
+	# verfuegbar, solange sein eigener Laufzeitstatus nicht explizit beendet ist.
+	return $state =~ /^(?:closed|disconnected|disabled|inactive)$/ ? 0 : 1;
+}
+
+# Sammelt die verborgenen Entity-Regeln, die den sichtbaren Zustand bestimmen.
+sub MQTT2_DISCOVERY_availability_policies($) {
+	my ($record) = @_;
+	my %policies;
+
+	for my $mapping (values %{ $record->{entities} || {} }) {
+
+		for my $entry (@{ $mapping->{reading_lines} || [] }) {
+			next if ref($entry) ne 'HASH' || ($entry->{role} || '') ne 'availability';
+			my $policy = $entry->{policy};
+			next if ref($policy) ne 'HASH' || !defined($policy->{reading})
+				|| ref($policy->{reading}) || $policy->{reading} eq '';
+			$policies{ $policy->{reading} } = 1;
+		}
+
+	}
+
+	return [ sort keys %policies ];
+}
+
+# Sammelt alle exakten Availability-Topics eines fertig aufgeloesten Registry-Ziels.
+sub MQTT2_DISCOVERY_availability_topics($) {
+	my ($record) = @_;
+	my %topics;
+
+	for my $mapping (values %{ $record->{entities} || {} }) {
+
+		for my $entry (@{ $mapping->{reading_lines} || [] }) {
+			next if ref($entry) ne 'HASH' || ($entry->{role} || '') ne 'availability';
+			my $topic = $entry->{topic};
+			next if !defined($topic) || ref($topic) || $topic eq '';
+			$topics{$topic} = 1;
+		}
+
+	}
+
+	return [ sort keys %topics ];
+}
+
+# Prueft gegen die aktive Registry, ob mindestens ein Ziel das Topic noch verwendet.
+sub MQTT2_DISCOVERY_availability_topic_used($$) {
+	my ($hash, $topic) = @_;
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+
+	for my $record (values %{ $registry->{devices} || {} }) {
+		return 1 if grep { $_ eq $topic } @{ MQTT2_DISCOVERY_availability_topics($record) };
+	}
+
+	return 0;
+}
+
+# Erkennt, ob ein Discovery-Batch noch Nachrichten vorbereitet oder Devices anwendet.
+sub MQTT2_DISCOVERY_queue_busy($) {
+	my ($hash) = @_;
+	my $queue = $hash->{helper}{queue};
+	return 0 if ref($queue) ne 'HASH';
+	return 1 if $queue->{scheduled} || $queue->{waiting_for_init};
+	return 1 if @{ $queue->{order} || [] } || keys %{ $queue->{messages} || {} };
+	return 1 if ref($queue->{batch}) eq 'HASH'
+		&& keys %{ $queue->{batch}{pending_identities} || {} };
+	return 0;
+}
+
+# Plant pro Topic hoechstens einen Retained-Abruf; bestehende Topic-Timer werden wiederverwendet.
+sub MQTT2_DISCOVERY_schedule_availability_refresh($$;$) {
+	my ($hash, $topic, $delay) = @_;
+	return if ref($hash) ne 'HASH' || !defined($topic) || ref($topic) || $topic eq '';
+	return if ref($hash->{IODev}) ne 'HASH'
+		|| ($hash->{IODev}{TYPE} || '') ne 'MQTT2_CLIENT';
+	my $gateway = MQTT2_DISCOVERY_gateway($hash);
+	return if !$gateway->can_schedule();
+	my $refreshes = $hash->{helper}{availability_refreshes} ||= {};
+	my $timer = $refreshes->{$topic} ||= {
+		discovery => $hash, topic => $topic, scheduled => 0,
+	};
+	return if $timer->{scheduled};
+	delete $timer->{waiting_for_io};
+	$timer->{scheduled} = 1;
+	$gateway->schedule(
+		defined($delay) ? $delay : $MQTT2_DISCOVERY_AVAILABILITY_REFRESH_DELAY,
+		$timer, 'MQTT2_DISCOVERY_refresh_availability_topic',
+	);
+	return;
+}
+
+# Entfernt alle noch ausstehenden Topic-Timer einer Discovery-Instanz.
+sub MQTT2_DISCOVERY_clear_availability_refreshes($) {
+	my ($hash) = @_;
+	my $refreshes = $hash->{helper}{availability_refreshes};
+	return if ref($refreshes) ne 'HASH';
+
+	for my $timer (values %$refreshes) {
+		MQTT2_DISCOVERY_gateway($hash)->cancel_timer(
+			$timer, 'MQTT2_DISCOVERY_refresh_availability_topic',
+		) if ref($timer) eq 'HASH' && $timer->{scheduled};
+	}
+
+	delete $hash->{helper}{availability_refreshes};
+	return;
+}
+
+# Setzt bei wieder geoeffnetem IODev zuvor verbindungslos geparkte Abrufe fort.
+sub MQTT2_DISCOVERY_resume_availability_refreshes($) {
+	my ($hash) = @_;
+	return if !MQTT2_DISCOVERY_iodev_available($hash);
+	my $refreshes = $hash->{helper}{availability_refreshes};
+	return if ref($refreshes) ne 'HASH';
+
+	for my $topic (sort keys %$refreshes) {
+		my $timer = $refreshes->{$topic};
+		next if ref($timer) ne 'HASH' || !$timer->{waiting_for_io};
+		MQTT2_DISCOVERY_schedule_availability_refresh(
+			$hash, $topic, $MQTT2_DISCOVERY_AVAILABILITY_RETRY_DELAY,
+		);
+	}
+
+	return;
+}
+
+# Fordert nach allen Sicherheitspruefungen genau das Retained Availability-Topic an.
+sub MQTT2_DISCOVERY_refresh_availability_topic($) {
+	my ($timer) = @_;
+	return if ref($timer) ne 'HASH';
+	my $hash = $timer->{discovery};
+	my $topic = $timer->{topic};
+	return if ref($hash) ne 'HASH' || !defined($topic);
+	$timer->{scheduled} = 0;
+	my $refreshes = $hash->{helper}{availability_refreshes};
+	return if ref($refreshes) ne 'HASH' || !$refreshes->{$topic}
+		|| $refreshes->{$topic} != $timer;
+
+	# Entfernte, ersetzte oder deaktivierte Discovery-Instanzen duerfen keine
+	# spaeten Brokeraktionen mehr ausloesen.
+	if (!$defs{ $hash->{NAME} } || $defs{ $hash->{NAME} } != $hash
+			|| MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'disable', 0)) {
+		delete $refreshes->{$topic};
+		delete $hash->{helper}{availability_refreshes} if !keys %$refreshes;
+		return;
+	}
+
+	# Der aktive Registry-Stand ist erst nach Abschluss des Queue-Batches sicher.
+	# Solange der Worker laeuft, wird derselbe Topic-Timer kurz zurueckgestellt.
+	if (MQTT2_DISCOVERY_queue_busy($hash)) {
+		MQTT2_DISCOVERY_schedule_availability_refresh(
+			$hash, $topic, $MQTT2_DISCOVERY_AVAILABILITY_RETRY_DELAY,
+		);
+		return;
+	}
+
+	# Eine inzwischen entfernte oder geaenderte Entity darf kein veraltetes Topic
+	# mehr abonnieren. Die aktuelle Registry ist dafuer die einzige Quelle.
+	if (!MQTT2_DISCOVERY_availability_topic_used($hash, $topic)) {
+		delete $refreshes->{$topic};
+		delete $hash->{helper}{availability_refreshes} if !keys %$refreshes;
+		return;
+	}
+
+	# Ohne Brokerverbindung bleibt der Abruf ereignisbasiert geparkt. Notify setzt
+	# ihn nach dem naechsten opened-Zustand fort, ohne dauerhaft zu pollen.
+	if (!MQTT2_DISCOVERY_iodev_available($hash)) {
+		$timer->{waiting_for_io} = 1;
+		return;
+	}
+
+	my $error = MQTT2_DISCOVERY_gateway($hash)->refresh_retained_topic(
+		$hash->{IODev}, $topic,
+	);
+	MQTT2_DISCOVERY_log($hash, $error ? 2 : 4, $error
+		? "retained availability refresh failed for topic=$topic: $error"
+		: "retained availability refresh requested for topic=$topic");
+	delete $refreshes->{$topic};
+	delete $hash->{helper}{availability_refreshes} if !keys %$refreshes;
+	return;
+}
+
+# Verknuepft den IO-Zustand mit den erhaltenen Entity-Availability-Regeln.
+sub MQTT2_DISCOVERY_sync_target_availability($$$) {
+	my ($hash, $record, $io_available) = @_;
+	return if ref($record) ne 'HASH' || !keys %{ $record->{entities} || {} };
+	my $name = $record->{name};
+	my $target = $defs{$name};
+	return if !$target || ($target->{TYPE} || '') ne 'MQTT2_DEVICE';
+	my $gateway = MQTT2_DISCOVERY_gateway($hash);
+	my $io_status = $io_available ? 'online' : 'offline';
+
+	# Das interne Reading verhindert, dass eine bereits zugestellte MQTT-Nachricht
+	# einen inzwischen getrennten Brokerzugang wieder sichtbar online setzt.
+	if ($gateway->reading_value($name, '.availability_io', '') ne $io_status) {
+		$gateway->update_reading($target, '.availability_io', $io_status, 0);
+	}
+	my $policies = MQTT2_DISCOVERY_availability_policies($record);
+	my $status = $io_available ? 'online' : 'offline';
+
+	# Ohne erhaltenen Retained-Wert bleibt eine vorhandene HA-Regel unbekannt.
+	# Ein sicherer Offline-Zustand besitzt Vorrang, online erfordert alle Regeln.
+	if ($io_available && @$policies) {
+		my @states = map {
+			$gateway->reading_value($name, $_, 'unknown')
+		} @$policies;
+		$status = (grep { $_ eq 'offline' } @states) ? 'offline'
+			: (grep { $_ ne 'online' } @states) ? 'unknown' : 'online';
+	}
+	$gateway->update_reading($target, 'availability', $status, 1)
+		if $gateway->reading_value($name, 'availability', '') ne $status;
+	return;
+}
+
+# Uebertraegt eine IO-Zustandsaenderung genau einmal auf alle Registry-Ziele.
+sub MQTT2_DISCOVERY_sync_io_availability($;$$) {
+	my ($hash, $force, $override) = @_;
+	my $available = defined($override)
+		? ($override ? 1 : 0)
+		: MQTT2_DISCOVERY_iodev_available($hash);
+	return if !$force && defined($hash->{helper}{io_available})
+		&& $hash->{helper}{io_available} == $available;
+	$hash->{helper}{io_available} = $available;
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+
+	for my $record (values %{ $registry->{devices} || {} }) {
+		MQTT2_DISCOVERY_sync_target_availability($hash, $record, $available);
+	}
+
+	MQTT2_DISCOVERY_log($hash, 3, 'IODev availability=' . ($available ? 'online' : 'offline')
+		. '; targets=' . scalar(keys %{ $registry->{devices} || {} }));
+	return;
+}
+
+# Startet vor INITIALIZED gesammelte Arbeit und uebernimmt IO-Zustandsereignisse.
 sub MQTT2_DISCOVERY_Notify($$) {
 	my ($hash, $device) = @_;
 	return undef if ref($device) ne 'HASH';
-	return undef if ($device->{NAME} || '') ne 'global';
+	my $device_name = $device->{NAME} || '';
+	my $io_name = $hash->{IODevName} || '';
+	return undef if $device_name ne 'global' && $device_name ne $io_name;
 	my $events = deviceEvents($device, 1);
 	return undef if ref($events) ne 'ARRAY';
+
+	# Das gebundene IODev kann viele Ereignisse erzeugen. Der Helperzustand sorgt
+	# dafuer, dass nur ein wirklicher Online-/Offline-Wechsel alle Ziele anfasst.
+	if ($device_name eq $io_name) {
+		MQTT2_DISCOVERY_sync_io_availability($hash);
+		MQTT2_DISCOVERY_resume_availability_refreshes($hash);
+		return undef;
+	}
 	my $lifecycle = grep { $_ eq 'INITIALIZED' || $_ eq 'REREADCFG' } @$events;
-	my $io_name = $hash->{IODevName} || '';
 	my $ignore_regexp_changed = grep {
 		/^(?:ATTR|DELETEATTR)\s+\Q$io_name\E\s+ignoreRegexp(?:\s|$)/
 	} @$events;
+	my $io_availability_changed = grep {
+		/^(?:ATTR|DELETEATTR)\s+\Q$io_name\E\s+
+			(?:disable|disabledForIntervals)(?:\s|$)/x
+	} @$events;
+	my $io_deleted = grep {
+		/^DELETED\s+\Q$io_name\E(?:\s|$)/
+	} @$events;
+
+	# Beim Loeschen des IODev darf weder eine vorgemerkte Config noch dessen
+	# letzte Perl-Referenz einen scheinbar verfuegbaren Zustand erhalten.
+	if ($io_deleted) {
+		MQTT2_DISCOVERY_clear_queue($hash);
+		MQTT2_DISCOVERY_clear_availability_refreshes($hash);
+		MQTT2_DISCOVERY_sync_io_availability($hash, 1, 0);
+		MQTT2_DISCOVERY_reading($hash, 'state', MQTT2_DISCOVERY_state($hash));
+		MQTT2_DISCOVERY_log($hash, 2, "bound IODev $io_name was deleted; targets offline");
+	}
 
 	# Beim Start sind IODev-Attribute und clientOrder vollstaendig geladen. Die
 	# erneute, deduplizierte Pruefung erfasst deshalb auch gespeicherte Filter.
 	# Globale Attributereignisse machen spaetere Aenderungen sofort sichtbar.
 	MQTT2_DISCOVERY_check_ignore_regexp($hash)
 		if $lifecycle || $ignore_regexp_changed;
+	MQTT2_DISCOVERY_sync_io_availability($hash, 1)
+		if !$io_deleted && ($lifecycle || $io_availability_changed);
+	MQTT2_DISCOVERY_resume_availability_refreshes($hash)
+		if !$io_deleted && ($lifecycle || $io_availability_changed);
 
 	# INITIALIZED folgt beim Start auf das statefile; REREADCFG wird unmittelbar
 	# vor der Rueckkehr in den Eventloop ausgeloest und darf denselben Start planen.
@@ -861,8 +1180,10 @@ sub MQTT2_DISCOVERY_process_inner($$$$;$) {
 			. '; target=' . ($mapping->{proposed_name} || '') . '; readings=' . scalar(@{ $mapping->{reading_lines} || [] })
 			. '; sets=' . scalar(@{ $mapping->{set_lines} || [] }));
 		push @warnings, @{ $mapping->{warnings} || [] };
-		my $identity_existed = exists $registry->{devices}{ $mapping->{identity} };
-		my $error = MQTT2_DISCOVERY_stage_mapping($hash, $registry, $mapping, $cid);
+		my $created_now = 0;
+		my $error = MQTT2_DISCOVERY_stage_mapping(
+			$hash, $registry, $mapping, $cid, \$created_now,
+		);
 
 		# Ein Staging-Fehler kann bereits ein neues Device angelegt haben; solche
 		# Seiteneffekte dieses Laufs werden entfernt, bevor der Fehler weitergereicht wird.
@@ -873,8 +1194,7 @@ sub MQTT2_DISCOVERY_process_inner($$$$;$) {
 			return 'error';
 		}
 		$pending_identities{ $mapping->{identity} } = 1;
-		$created_identities{ $mapping->{identity} } = 1
-			if !$identity_existed && $registry->{devices}{ $mapping->{identity} }{created};
+		$created_identities{ $mapping->{identity} } = 1 if $created_now;
 	}
 
 	# Im Batch werden nur betroffene Identitaeten vorgemerkt; ohne Batch koennen
@@ -932,6 +1252,8 @@ sub MQTT2_DISCOVERY_registry_valid($) {
 		return 0 if ref($record) ne 'HASH' || ref($record->{entities}) ne 'HASH';
 		return 0 if exists($record->{owned_reading}) && ref($record->{owned_reading}) ne 'ARRAY';
 		return 0 if exists($record->{owned_set}) && ref($record->{owned_set}) ne 'ARRAY';
+		return 0 if exists($record->{availability_topics})
+			&& ref($record->{availability_topics}) ne 'ARRAY';
 		return 0 if grep { ref($_) ne 'HASH' } values %{ $record->{entities} };
 	}
 
@@ -1089,12 +1411,13 @@ sub MQTT2_DISCOVERY_existing_cid_target($$$$$) {
 }
 
 # Ordnet ein Mapping einem bestehenden oder neu angelegten Registry-Zieldevice zu.
-sub MQTT2_DISCOVERY_stage_mapping($$$$) {
-	my ($hash, $registry, $mapping, $cid) = @_;
+sub MQTT2_DISCOVERY_stage_mapping($$$$;$) {
+	my ($hash, $registry, $mapping, $cid, $created_now_ref) = @_;
 	my $identity = $mapping->{identity};
 	my $record = $registry->{devices}{$identity};
 	my $created_now = 0;
 	my ($target_cid, $cid_error);
+	$$created_now_ref = 0 if ref($created_now_ref) eq 'SCALAR';
 
 	# Die Registry haelt die dauerhafte Zielzuordnung. Nur eine erstmals
 	# auftretende Discovery-Identitaet benoetigt eine neue CID-Aufloesung.
@@ -1110,21 +1433,36 @@ sub MQTT2_DISCOVERY_stage_mapping($$$$) {
 	);
 	return $target_error if $target_error;
 
-	# Ein Registry-Eintrag besitzt Vorrang vor neuer Namensfindung, weil er die
-	# stabile Zuordnung zwischen Discovery-Identitaet und Zieldevice festhaelt.
+	# Ein Registry-Eintrag besitzt Vorrang vor neuer Namensfindung, solange sein
+	# Ziel noch existiert oder anhand der gespeicherten CID wiedergefunden wird.
 	if ($record) {
 		my $registered = $defs{ $record->{name} };
 
 		# Wurde das Ziel ausserhalb der Discovery umbenannt, kann seine eindeutige
 		# Client-ID die Registry-Zuordnung wiederherstellen, ohne ein Duplikat anzulegen.
 		if (!$registered || ($registered->{TYPE} || '') ne 'MQTT2_DEVICE') {
-			return "Verwaltetes Device $record->{name} existiert nicht und Client-ID $target_cid ist nicht eindeutig auffindbar"
-				if !$cid_target;
-			MQTT2_DISCOVERY_log($hash, 2,
-				"recovered renamed target device $record->{name} as $cid_target->{NAME} by cid=$target_cid");
-			$record->{name} = $cid_target->{NAME};
+
+			# Ohne CID-Ziel ist der Registry-Eintrag veraltet. Das aktuelle Mapping
+			# durchlaeuft deshalb erneut die regulaere Uebernahme und autoCreate-Pruefung.
+			if (!$cid_target) {
+				my $stale_name = $record->{name};
+				MQTT2_DISCOVERY_log($hash, 2,
+					"stale registry target $stale_name is missing; reprocessing identity=$identity");
+				$record = undef;
+				my $io_type = $defs{ $hash->{IODevName} }{TYPE} || '';
+				($target_cid, $cid_error) = MQTT2_DISCOVERY_autocreate_cid($mapping, $cid, $io_type);
+				return $cid_error if $cid_error;
+				($cid_target, $target_error) = MQTT2_DISCOVERY_existing_cid_target(
+					$hash, $registry, $identity, $mapping, $target_cid,
+				);
+				return $target_error if $target_error;
+			} else {
+				MQTT2_DISCOVERY_log($hash, 2,
+					"recovered renamed target device $record->{name} as $cid_target->{NAME} by cid=$target_cid");
+				$record->{name} = $cid_target->{NAME};
+			}
 		}
-		$record->{cid} = $target_cid;
+		$record->{cid} = $target_cid if $record;
 	}
 
 	# Nur bisher unbekannte Identitaeten durchlaufen Uebernahme, Namenskonflikt
@@ -1173,6 +1511,7 @@ sub MQTT2_DISCOVERY_stage_mapping($$$$) {
 	}
 	$record->{entities}{ $mapping->{entity_key} } = $mapping;
 	MQTT2_DISCOVERY_log($hash, 4, "staged target=$record->{name}; entity=$mapping->{entity_key}");
+	$$created_now_ref = $created_now if ref($created_now_ref) eq 'SCALAR';
 	return undef;
 }
 
@@ -1255,12 +1594,16 @@ sub MQTT2_DISCOVERY_apply_device_lines($$) {
 	my ($hash, $record) = @_;
 	my $name = $record->{name};
 	return "Verwaltetes Device $name existiert nicht" if !$defs{$name};
+	my %previous_availability_topics = map { ($_ => 1) }
+		grep { defined($_) && !ref($_) && $_ ne '' }
+		@{ $record->{availability_topics} || [] };
 
 	# Namen werden ueber alle Entities des Devices gemeinsam aufgeloest, bevor
 	# eine einzige readingList- oder setList-Zeile gerendert wird.
+	my $reserved_readings = { availability => 1 };
 	my $resolved_mappings = MQTT2_Discovery::Mapper::resolve_mapping_names([
 		map { $record->{entities}{$_} } sort keys %{ $record->{entities} }
-	]);
+	], $reserved_readings);
 	my %resolved_by_key = map { (($_->{entity_key} // '') => $_) } @$resolved_mappings;
 	my (@reading_entries, @set_entries);
 
@@ -1268,6 +1611,11 @@ sub MQTT2_DISCOVERY_apply_device_lines($$) {
 		push @reading_entries, @{ $mapping->{reading_lines} || [] };
 		push @set_entries, @{ $mapping->{set_lines} || [] };
 	}
+	my @availability_topics = sort stable_unique(map { $_->{topic} }
+		grep {
+			ref($_) eq 'HASH' && ($_->{role} || '') eq 'availability'
+				&& defined($_->{topic}) && !ref($_->{topic}) && $_->{topic} ne ''
+		} @reading_entries);
 
 	my @all_entries = (@reading_entries, @set_entries);
 	my $generated_device_topic = MQTT2_Discovery::DevicePlanner::device_topic($record, \@all_entries);
@@ -1312,7 +1660,9 @@ sub MQTT2_DISCOVERY_apply_device_lines($$) {
 	my ($prepared_readings, $prepared_old_reading) = MQTT2_Discovery::DevicePlanner::prepare_json_readings(
 		$mode, $old_reading, $record->{owned_reading}, \@reading_entries, \@json_conflicts,
 	);
-	@reading_entries = @{ MQTT2_Discovery::Mapper::render_entries($prepared_readings, $render_device_topic) };
+	@reading_entries = @{ MQTT2_Discovery::Mapper::render_entries(
+		$prepared_readings, $render_device_topic, $reserved_readings,
+	) };
 	@set_entries = @{ MQTT2_Discovery::Mapper::render_entries(\@set_entries, $render_device_topic) };
 	my $reading = merge_generated_lines(
 		kind => 'reading', mode => $mode, current => $prepared_old_reading,
@@ -1342,6 +1692,7 @@ sub MQTT2_DISCOVERY_apply_device_lines($$) {
 	$record->{owned_reading} = $reading->{owned};
 	$record->{owned_set} = $set->{owned};
 	$record->{owned_devicetopic} = $manage_device_topic ? $generated_device_topic : undef;
+	$record->{availability_topics} = \@availability_topics;
 	MQTT2_DISCOVERY_apply_device_semantics($hash, $record, \%resolved_by_key);
 	my @conflicts = (@json_conflicts, @{ $reading->{conflicts} }, @{ $set->{conflicts} });
 
@@ -1354,6 +1705,18 @@ sub MQTT2_DISCOVERY_apply_device_lines($$) {
 	}
 	MQTT2_DISCOVERY_log($hash, 4, "attributes updated for target=$name; readingLines="
 		. scalar(@{ $reading->{owned} }) . '; setLines=' . scalar(@{ $set->{owned} }));
+	my $io_available = defined($hash->{helper}{io_available})
+		? $hash->{helper}{io_available}
+		: MQTT2_DISCOVERY_iodev_available($hash);
+	MQTT2_DISCOVERY_sync_target_availability($hash, $record, $io_available);
+
+	# Erst nach erfolgreichem Attributplan und initialem unknown-Reading wird fuer
+	# jedes neu hinzugekommene Availability-Topic genau ein Abruf vorgemerkt.
+	for my $topic (@availability_topics) {
+		MQTT2_DISCOVERY_schedule_availability_refresh($hash, $topic)
+			if !$previous_availability_topics{$topic};
+	}
+
 	return undef;
 }
 
@@ -1575,6 +1938,90 @@ sub MQTT2_Discovery_runtime {
 			);
 			$answer = { $reading => $result->{value} }
 				if ref($result) eq 'HASH' && $result->{ok};
+		} elsif ($operation eq 'availability') {
+			my ($device, $event, $configuration_json) = @arguments;
+			my $configuration = JSON::PP::decode_json($configuration_json);
+			die 'Ungueltige Availability-Konfiguration'
+				if ref($configuration) ne 'HASH'
+					|| ref($configuration->{sources}) ne 'ARRAY'
+					|| ref($configuration->{policies}) ne 'ARRAY';
+			my (%updates, %updated_sources);
+
+			# Jede fuer das aktuelle Topic deklarierte Quelle wertet ihren eigenen
+			# Payloadvertrag aus und speichert nur normalisierte Online-Werte.
+			for my $source (@{ $configuration->{sources} }) {
+				next if ref($source) ne 'HASH' || !defined($source->{reading})
+					|| !defined($source->{available}) || !defined($source->{unavailable});
+				my $value = $event;
+
+				# Ein optionales HA-Template extrahiert den Vergleichswert aus dem
+				# empfangenen Payload, bevor Online und Offline unterschieden werden.
+				if (defined($source->{template}) && $source->{template} ne '') {
+					my $compiled = MQTT2_Discovery::Template::compile($source->{template});
+					my $result = MQTT2_Discovery::Template::render($compiled, value => $event);
+					next if ref($result) ne 'HASH' || !$result->{ok};
+					$value = $result->{value};
+				}
+				my $status;
+				$status = 'online'
+					if defined($value) && "$value" eq "$source->{available}";
+				$status = 'offline'
+					if defined($value) && "$value" eq "$source->{unavailable}";
+				next if !defined($status);
+				$updates{ $source->{reading} } = $status;
+				$updated_sources{ $source->{reading} } = 1;
+			}
+			$answer = {};
+
+			# Nur von der aktuellen Nachricht betroffene Regeln werden neu bewertet;
+			# gespeicherte Quellreadings liefern dabei die uebrigen Zustaende.
+			for my $policy (@{ $configuration->{policies} }) {
+				next if ref($policy) ne 'HASH' || !defined($policy->{reading})
+					|| ref($policy->{sources}) ne 'ARRAY';
+				my @changed = grep { $updated_sources{$_} } @{ $policy->{sources} };
+				next if !@changed;
+				my @states = map {
+					exists($updates{$_}) ? $updates{$_} : ReadingsVal($device, $_, 'unknown')
+				} @{ $policy->{sources} };
+				my $mode = $policy->{mode} || 'latest';
+				my $status;
+				if ($mode eq 'all') {
+					$status = (grep { $_ eq 'offline' } @states) ? 'offline'
+						: @states && !(grep { $_ ne 'online' } @states)
+							? 'online' : 'unknown';
+				} elsif ($mode eq 'any') {
+					$status = (grep { $_ eq 'online' } @states)
+						? 'online'
+						: @states && !(grep { $_ ne 'offline' } @states)
+							? 'offline' : 'unknown';
+				} else {
+					$status = $updates{ $changed[-1] };
+				}
+				$updates{ $policy->{reading} } = $status;
+			}
+
+			# Ein FHEM-Device gilt nur als verfuegbar, wenn alle darin gruppierten
+			# Discovery-Entities gemaess ihrer jeweiligen Regel verfuegbar sind.
+			if (%updated_sources && @{ $configuration->{policies} }) {
+				my @policy_states = map {
+					exists($updates{ $_->{reading} })
+						? $updates{ $_->{reading} }
+						: ReadingsVal($device, $_->{reading}, 'unknown')
+				} grep { ref($_) eq 'HASH' && defined($_->{reading}) }
+					@{ $configuration->{policies} };
+				$updates{availability} = (grep { $_ eq 'offline' } @policy_states)
+					? 'offline'
+					: @policy_states && !(grep { $_ ne 'online' } @policy_states)
+						? 'online' : 'unknown';
+			}
+
+			# Die Brokerverbindung ist eine zusaetzliche, uebergeordnete HA-Bedingung.
+			# Quell- und Regelreadings werden auch offline aktualisiert, der sichtbare
+			# Zustand darf dadurch aber nicht wieder online werden.
+			$updates{availability} = 'offline'
+				if %updated_sources
+					&& ReadingsVal($device, '.availability_io', 'online') ne 'online';
+			$answer = \%updates;
 		} elsif ($operation eq 'templatePublish') {
 			my ($topic, $template, $event) = @arguments;
 			my $value = MQTT2_Discovery_commandValue($event);
@@ -1640,6 +2087,43 @@ sub MQTT2_DISCOVERY_runtimeTriggerReading($$$) {
 	return ref($answer) eq 'HASH' ? $answer : {};
 }
 
+# Berechnet aus einer MQTT-Nachricht interne Quellen und die Gesamtverfuegbarkeit.
+sub MQTT2_DISCOVERY_runtimeAvailability($$$) {
+	my $answer = MQTT2_Discovery_runtime('availability', @_);
+	return ref($answer) eq 'HASH' ? $answer : {};
+}
+
+# Ergaenzt JSON-Zuordnungen um kollisionsfreie Namen reservierter Rollenreadings.
+sub MQTT2_DISCOVERY_runtimeJSONMap($$) {
+	my ($device_or_map, $renames) = @_;
+	my $json_map = ref($device_or_map) eq 'HASH'
+		? $device_or_map
+		: defined($device_or_map) && exists($defs{$device_or_map})
+			&& ref($defs{$device_or_map}{JSONMAP}) eq 'HASH'
+				? $defs{$device_or_map}{JSONMAP} : {};
+	my %mapping = ref($json_map) eq 'HASH' ? %$json_map : ();
+	return \%mapping if ref($renames) ne 'HASH';
+
+	for my $source_name (sort keys %$renames) {
+		my $target_name = $renames->{$source_name};
+		next if !defined($source_name) || $source_name eq ''
+			|| !defined($target_name) || ref($target_name) || $target_name eq '';
+
+		# Auch ein vorhandenes jsonMap darf keinen beliebigen Quellwert auf den
+		# inzwischen fuer eine technische Rolle reservierten Namen abbilden.
+		for my $key (keys %mapping) {
+			next if !defined($mapping{$key}) || ref($mapping{$key});
+			$mapping{$key} = $target_name if $mapping{$key} eq $source_name;
+		}
+
+		# Ohne benutzerdefinierte Zuordnung wird ein gleichnamiges rohes JSON-Feld
+		# auf denselben kollisionsfreien Zielnamen umgeleitet.
+		$mapping{$source_name} = $target_name if !exists($mapping{$source_name});
+	}
+
+	return \%mapping;
+}
+
 # Rendert einen freien Set-Wert mit sicherem Template zu einem MQTT-Publish-String.
 sub MQTT2_DISCOVERY_runtimeTemplatePublish($$$) {
 	return MQTT2_Discovery_runtime('templatePublish', @_);
@@ -1701,6 +2185,15 @@ and creates conservatively managed <code>MQTT2_DEVICE</code> devices.</p>
 <a id="MQTT2_DISCOVERY-define"></a>
 <h4>Define</h4>
 <p><code>define &lt;name&gt; MQTT2_DISCOVERY &lt;MQTT2_SERVER|MQTT2_CLIENT&gt;</code></p>
+<p>The bound IO device gates the public <code>availability</code> reading of every
+managed target. A disconnected client marks all targets offline. After reconnect,
+the most recently known discovery availability sources are evaluated again;
+targets without such sources follow the IO device directly. A source that has
+not delivered a value yet leaves the target at <code>unknown</code>. For each newly
+applied availability topic on an <code>MQTT2_CLIENT</code>, one timer requests only
+that retained topic after 60 seconds; normal MQTT traffic is not cached or
+evaluated by this module. Deleting the bound IO device discards pending discovery
+work, marks all managed targets offline and leaves this discovery device inactive.</p>
 
 <a id="MQTT2_DISCOVERY-set"></a>
 <h4>Set</h4>
@@ -1775,6 +2268,17 @@ und erzeugt daraus konservativ verwaltete <code>MQTT2_DEVICE</code>-Devices.</p>
 <a id="MQTT2_DISCOVERY-define"></a>
 <h4>Define</h4>
 <p><code>define &lt;name&gt; MQTT2_DISCOVERY &lt;MQTT2_SERVER|MQTT2_CLIENT&gt;</code></p>
+<p>Das gebundene IODev bestimmt zusaetzlich das sichtbare Reading
+<code>availability</code> aller verwalteten Ziele. Eine getrennte Client-Verbindung
+setzt alle Ziele offline. Nach dem Reconnect werden die zuletzt bekannten
+Discovery-Availability-Quellen erneut ausgewertet; Ziele ohne solche Quellen
+folgen direkt dem IODev. Eine noch nie empfangene Quelle laesst das Ziel auf
+<code>unknown</code>. Fuer jedes neu angewendete Availability-Topic an einem
+<code>MQTT2_CLIENT</code> fordert ein eigener Timer nach 60 Sekunden nur dieses
+Retained-Topic an; der normale MQTT-Datenstrom wird weder gecacht noch durch das
+Modul ausgewertet. Wird das gebundene IODev geloescht, werden ausstehende
+Discovery-Arbeiten verworfen, alle verwalteten Ziele offline gesetzt und dieses
+Discovery-Device bleibt als <code>inactive</code> definiert.</p>
 
 <a id="MQTT2_DISCOVERY-set"></a>
 <h4>Set</h4>

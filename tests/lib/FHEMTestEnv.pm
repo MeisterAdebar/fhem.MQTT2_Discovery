@@ -36,9 +36,12 @@ sub reset_env {
 sub add_iodev {
 	my ($name, $type) = @_;
 	$type ||= 'MQTT2_SERVER';
+	my $state = $type eq 'MQTT2_CLIENT' ? 'opened' : 'Initialized';
 	my $hash = {
 		NAME => $name, TYPE => $type, ClientsKeepOrder => 1,
 		Clients => ':MQTT2_DEVICE:MQTT_GENERIC_BRIDGE:', retain => {},
+		STATE => $state,
+		READINGS => { state => { VAL => $state, TIME => '2026-08-18 12:00:00' } },
 	};
 	$main::defs{$name} = $hash;
 	return $hash;
@@ -115,6 +118,13 @@ sub ReadingsVal($$$) {
 sub deviceEvents {
 	my ($device, undef) = @_;
 	return $device->{CHANGED};
+}
+
+# Setzt NOTIFYDEV und bildet damit auch die Cache-aktualisierende FHEM-Hilfe ab.
+sub setNotifyDev {
+	my ($hash, $devices) = @_;
+	$hash->{NOTIFYDEV} = $devices;
+	return undef;
 }
 
 # Aktualisiert ein simuliertes Reading mit einem festen reproduzierbaren Zeitstempel.

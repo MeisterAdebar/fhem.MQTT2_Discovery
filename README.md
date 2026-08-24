@@ -122,6 +122,22 @@ zugeordnet. Ein leerer retained Config-Payload entfernt die zuvor ueber dieses
 Topic angekuendigte Entity beziehungsweise das gesamte Device aus der
 Discovery-Verwaltung.
 
+Das sichtbare Reading `availability` verknuepft die angekuendigten
+Availability-Quellen mit dem Zustand des am `MQTT2_DISCOVERY` gebundenen IODev.
+Verliert beispielsweise ein `MQTT2_CLIENT` seine Brokerverbindung, gehen alle
+von dieser Discovery-Instanz verwalteten Devices offline. Nach dem Reconnect
+werden die zuletzt bekannten Quellen erneut ausgewertet. Devices ohne eigene
+Availability-Quelle folgen direkt dem IODev-Zustand. Ist eine angekuendigte
+Quelle noch nie eingetroffen, bleibt das sichtbare Reading auf `unknown`. Fuer
+jedes neu angewendete Availability-Topic an einem `MQTT2_CLIENT` wird genau ein
+Timer angelegt, der nach 60 Sekunden nur dieses Retained-Topic abonniert. Der
+normale MQTT-Datenstrom wird dabei weder gecacht noch von Discovery ausgewertet.
+Ein gleichnamiges Nutzdatenfeld wird kollisionsfrei als `state_availability`
+beziehungsweise mit seinem qualifizierten Entity-Namen angelegt. Wird das gebundene
+`MQTT2_SERVER`- oder `MQTT2_CLIENT`-Device geloescht, verwirft Discovery zudem
+seine ausstehende Queue, setzt alle verwalteten Ziele offline und wechselt selbst
+auf `inactive`.
+
 Gueltige MQTT-Wildcards in eingehenden HA-Topicfiltern werden unterstuetzt:
 `+` steht fuer genau ein Topicsegment, ein abschliessendes `#` fuer beliebig
 viele Untersegmente. Der sichere Template-Interpreter versteht ausserdem den
@@ -183,16 +199,22 @@ Dasselbe gilt fuer die gleichwertige Jinja-Schreibweise mit literalem Schluessel
 beispielsweise `{{ value_json.get('battery') }}`.
 Das inline sichtbare Mapping enthaelt nur echte Abweichungen zwischen JSON-Schluessel
 und dem von Discovery abgeleiteten Reading-Namen. Identische Namen bleiben bei
-`json2nameValue()` auch ohne Eintrag unveraendert. Gibt es keine echte Umbenennung,
-verwendet die Zeile deshalb nur `json2nameValue($EVENT)`. Ein Filter wird bewusst
-nicht gesetzt, damit beim Anlegen eines Devices alle Felder des JSON-Payloads als
-Readings erscheinen. Topic-lokale Umbenennungen vermeiden weiterhin Kollisionen
-zwischen gleichnamigen JSON-Schluesseln verschiedener Topics. Komplexe Templates
-mit Filtern oder Bedingungen verwenden weiterhin die sichere Template-Engine; das
-Template steht dabei lesbar im Aufruf statt als Base64-Text. Auch komplexe
-`setList`-Fallbacks enthalten Topics, Payloads, Command-Templates und
-Auswahl-Mappings als sicher escapeten Klartext. Erzeugte `readingList`- und
-`setList`-Attribute verwenden kein Base64.
+`json2nameValue()` auch ohne Eintrag unveraendert. Zusaetzlich enthaelt die
+Auswertung die allgemeine Schutzabbildung von `availability` auf
+`state_availability`, da das sichtbare Availability-Reading fuer den IO-Zustand
+reserviert ist. Ein verankerter Filter aus den finalen Reading-Namen begrenzt
+explizite Discovery-Pfade auf die tatsaechlich angekuendigten JSON-Felder. Weitere
+Felder desselben Payloads erzeugen dadurch keine zusaetzlichen Readings.
+
+Nur Adapter mit aktiviertem `json_autocreate`, insbesondere die nativen
+Tasmota-State-Klassen, entpacken weiterhin bewusst alle Felder eines Payloads.
+Topic-lokale Umbenennungen vermeiden Kollisionen zwischen gleichnamigen
+JSON-Schluesseln verschiedener Topics. Komplexe Templates mit Filtern oder
+Bedingungen verwenden weiterhin die sichere Template-Engine; das Template steht
+dabei lesbar im Aufruf statt als Base64-Text. Auch komplexe `setList`-Fallbacks
+enthalten Topics, Payloads, Command-Templates und Auswahl-Mappings als sicher
+escapeten Klartext. Erzeugte `readingList`- und `setList`-Attribute verwenden
+kein Base64.
 
 Besitzt eine schreibbare Entity ein Zustandsreading, verwendet ihr Setter exakt
 dessen endgueltigen FHEM-Namen. Das gilt protokollunabhaengig fuer Home-Assistant-

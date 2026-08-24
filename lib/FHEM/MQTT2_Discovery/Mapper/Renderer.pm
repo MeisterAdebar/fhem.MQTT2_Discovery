@@ -127,6 +127,15 @@ sub _perl_hash_literal {
 	return '{' . join(', ', @pairs) . '}';
 }
 
+# Kombiniert FHEMs bestehendes jsonMap erst zur Laufzeit mit sicheren Umbenennungen.
+sub _json_map_argument {
+	my ($renames) = @_;
+	return q{$JSONMAP} if ref($renames) ne 'HASH' || !keys %$renames;
+	my $literal = _perl_hash_literal($renames);
+	return q{$JSONMAP} if !defined($literal);
+	return 'MQTT2_DISCOVERY_runtimeJSONMap($NAME, ' . $literal . ')';
+}
+
 # Erkennt Templates, die den Eingangswert ohne inhaltliche Aenderung weiterreichen.
 sub identity_template {
 	my ($compiled) = @_;
@@ -172,14 +181,15 @@ sub _render_runtime_reading {
 
 # Rendert eine json2nameValue-Zeile, die mehrere Sensorreadings automatisch erzeugt.
 sub _render_json_autocreate {
-	my ($entry, $device_topic) = @_;
+	my ($entry, $device_topic, $renames) = @_;
 	my $regex = _regex($entry->{topic}, $device_topic, undef);
-	return $regex . q{ { json2nameValue($EVENT,'',$JSONMAP) }};
+	return $regex . q! { json2nameValue($EVENT,'',!
+		. _json_map_argument($renames) . ') }';
 }
 
 # Rendert mehrere JSON-Pfade eines Topics in definierter Auswertungsreihenfolge.
 sub _render_json_sequence {
-	my ($entry, $device_topic) = @_;
+	my ($entry, $device_topic, $renames) = @_;
 	my $topic = $entry->{topic};
 	return undef if !defined($topic) || ref($topic) || $topic eq '';
 	my $key_prefix = $entry->{key_prefix};
@@ -191,22 +201,43 @@ sub _render_json_sequence {
 	my $regex = _regex($topic, $device_topic, undef);
 	$regex =~ s/:\.\*$//;
 	my $payload_key = _regex_literal($key_prefix) . $part_pattern;
+	my $json_map = _json_map_argument($renames);
 	return $regex . $part_pattern . ':.* { $EVENT =~ m,^..' . $payload_key
-		. q!..(.+).$, ?  json2nameValue($1,'',$JSONMAP) : json2nameValue($EVENT,'',$JSONMAP) }!;
+		. q!..(.+).$, ?  json2nameValue($1,'',! . $json_map
+		. q!) : json2nameValue($EVENT,'',! . $json_map . ') }';
+}
+
+# Erzeugt einen exakten Filter aus den finalen Namen expliziter JSON-Readings.
+sub _json_reading_filter {
+	my ($entries) = @_;
+	my %names;
+
+	for my $entry (@{ $entries || [] }) {
+		return undef if ref($entry) ne 'HASH';
+		my $name = $entry->{name};
+		return undef if !defined($name) || ref($name) || $name eq '';
+		$names{$name} = 1;
+	}
+
+	return undef if !keys %names;
+	my $pattern = '^(?:' . join('|', map { _regex_literal($_) } sort keys %names) . ')$';
+	return _perl_quote($pattern);
 }
 
 # Fasst kompatible JSON-Readings eines Topics zu einer einzigen FHEM-Zeile zusammen.
 sub _render_json_group {
-	my ($entries, $device_topic) = @_;
+	my ($entries, $device_topic, $extra_mapping) = @_;
 	my @entries = @{ $entries || [] };
 	return undef if !@entries;
 	my $regex = _regex($entries[0]{topic}, $device_topic, undef);
-	my %mapping = map { ($_->{json_key} => $_->{name}) } @entries;
+	my $filter = _json_reading_filter(\@entries);
+	return undef if !defined($filter);
+	my %mapping = ref($extra_mapping) eq 'HASH' ? %$extra_mapping : ();
+	$mapping{ $_->{json_key} } = $_->{name} for @entries;
 	my @pairs = map { _perl_quote($_) . ' => ' . _perl_quote($mapping{$_}) }
 		grep { $_ ne $mapping{$_} } sort keys %mapping;
-	return $regex . q{ { json2nameValue($EVENT) }} if !@pairs;
-	return $regex . ' { json2nameValue($EVENT, \'\', {' . join(', ', @pairs)
-		. '}) }';
+	my $map = @pairs ? '{' . join(', ', @pairs) . '}' : '{}';
+	return $regex . ' { json2nameValue($EVENT, \'\', ' . $map . ', ' . $filter . ') }';
 }
 
 # Uebersetzt genau einen abstrakten Reading- oder Set-Eintrag in FHEM-Attributsyntax.
@@ -357,14 +388,105 @@ sub render_entry {
 	return $entry->{line};
 }
 
+# Leitet fuer beliebige reservierte Rollenreadings kollisionsfreie JSON-Ziele ab.
+sub _reserved_json_renames {
+	my ($entries, $extra_reserved) = @_;
+	my (%reserved, %occupied, %targets, %renames);
+	%reserved = map { ($_ => 1) }
+		grep { $extra_reserved->{$_} } keys %$extra_reserved
+		if ref($extra_reserved) eq 'HASH';
+
+	for my $entry (@{ $entries || [] }) {
+		next if ref($entry) ne 'HASH';
+		my $name = $entry->{name};
+		next if !defined($name) || ref($name) || $name eq '';
+		if ($entry->{reserved_reading}) {
+			$reserved{$name} = 1;
+		} else {
+			$occupied{$name} = 1;
+		}
+	}
+
+	for my $name (sort keys %reserved) {
+		my $base = "state_$name";
+		my $target = $base;
+		my $index = 2;
+
+		while ($reserved{$target} || $occupied{$target} || $targets{$target}) {
+			$target = $base . '_' . $index++;
+		}
+
+		$targets{$target} = 1;
+		$renames{$name} = $target;
+	}
+
+	return \%renames;
+}
+
+# Fasst Availability-Quellen pro MQTT-Topic in einen einzigen Runtime-Aufruf.
+sub _render_availability_groups {
+	my ($entries, $device_topic) = @_;
+	my (%sources, %topics, %policies);
+
+	for my $entry (@{ $entries || [] }) {
+		next if ref($entry) ne 'HASH' || ($entry->{kind} || '') ne 'availability';
+		my $source_reading = $entry->{source_reading};
+		my $topic = $entry->{topic};
+		next if !defined($source_reading) || !defined($topic);
+		$sources{$source_reading} ||= {
+			reading => $source_reading,
+			(defined($entry->{template}) ? (template => $entry->{template}) : ()),
+			available => $entry->{payload_available},
+			unavailable => $entry->{payload_not_available},
+		};
+		$topics{$topic}{$source_reading} = 1;
+		my $policy = $entry->{policy};
+		$policies{ $policy->{reading} } = {
+			reading => $policy->{reading}, mode => $policy->{mode},
+			sources => [ sort @{ $policy->{sources} || [] } ],
+		} if ref($policy) eq 'HASH' && defined($policy->{reading});
+	}
+	my @policies = map { $policies{$_} } sort keys %policies;
+	my @rendered;
+
+	for my $topic (sort keys %topics) {
+		my $configuration = JSON::PP->new->canonical(1)->encode({
+			sources => [ map { $sources{$_} } sort keys %{ $topics{$topic} } ],
+			policies => \@policies,
+		});
+		my $argument = _perl_template_quote($configuration);
+		next if !defined($argument);
+		push @rendered, {
+			kind => 'availability_group', role => 'availability',
+			name => 'availability', reserved_reading => 1, topic => $topic,
+			names => [
+				'availability', sort(keys %{ $topics{$topic} }), sort(keys %policies),
+			],
+			line => _regex($topic, $device_topic, undef)
+				. ' { MQTT2_DISCOVERY_runtimeAvailability($NAME, $EVENT, '
+				. $argument . ') }',
+		};
+	}
+
+	return \@rendered;
+}
+
 # Gruppiert optimierbare Eintraege und rendert die vollstaendige sortierte Zeilenliste.
 sub render_entries {
-	my ($entries, $device_topic) = @_;
-	my (@rendered, %json_groups, %json_autocreate);
+	my ($entries, $device_topic, $extra_reserved) = @_;
+	my (@rendered, @availability, %json_groups, %json_autocreate);
+	my $reserved_renames = _reserved_json_renames($entries, $extra_reserved);
 
 	# JSON-Eintraege werden zunaechst pro Topic gesammelt. So kann ein einziges
 	# json2nameValue mehrere Readings effizient erzeugen.
 	for my $entry (@{ $entries || [] }) {
+
+		# Availability benoetigt alle Quellen und Verknuepfungsregeln des Devices,
+		# bevor pro Topic ein zustandsbehafteter Runtime-Aufruf entstehen kann.
+		if (ref($entry) eq 'HASH' && ($entry->{kind} || '') eq 'availability') {
+			push @availability, $entry;
+			next;
+		}
 
 		# Explizite JSON-Felder desselben Topics werden spaeter auf Eindeutigkeit
 		# untersucht und moeglichst in eine gemeinsame Zeile verdichtet.
@@ -379,15 +501,32 @@ sub render_entries {
 			push @{ $json_autocreate{ $entry->{topic} } }, $entry;
 			next;
 		}
+
+		# Sequenz-JSON verwendet dieselben reservierten Zielnamen wie die spaeter
+		# gruppierten JSON-Arten, obwohl jede Sequenz eine eigene Regex benoetigt.
+		if (ref($entry) eq 'HASH' && ($entry->{kind} || '') eq 'json_sequence') {
+			push @rendered, +{ %$entry,
+				line => _render_json_sequence($entry, $device_topic, $reserved_renames) };
+			next;
+		}
 		push @rendered, +{ %$entry, line => render_entry($entry, $device_topic) };
 	}
 
 	for my $topic (sort keys %json_autocreate) {
 		my %by_name = map { (($_->{name} // '') => $_) } @{ $json_autocreate{$topic} };
 		my @entries = values %by_name;
+		my %renames = %$reserved_renames;
+
+		for my $entry (@entries) {
+			next if !defined($entry->{json_key}) || !defined($entry->{name})
+				|| $entry->{json_key} eq $entry->{name};
+			$renames{ $entry->{json_key} } = $entry->{name};
+		}
+
 		push @rendered, {
 			kind => 'json_autocreate_group', name => '', names => [ sort keys %by_name ],
-			topic => $topic, line => _render_json_autocreate($entries[0], $device_topic),
+			topic => $topic,
+			line => _render_json_autocreate($entries[0], $device_topic, \%renames),
 		} if @entries;
 	}
 
@@ -422,13 +561,15 @@ sub render_entries {
 		if (@grouped) {
 			push @rendered, {
 				kind => 'json_group', name => '', names => [ map { $_->{name} } @grouped ],
-				topic => $topic, line => _render_json_group(\@grouped, $device_topic),
+				topic => $topic,
+				line => _render_json_group(\@grouped, $device_topic, $reserved_renames),
 			};
 		}
 		push @rendered, map {
 			+{ %$_, kind => 'reading', line => _render_runtime_reading($_, $device_topic) }
 		} @fallback;
 	}
+	push @rendered, @{ _render_availability_groups(\@availability, $device_topic) };
 
 	return \@rendered;
 }
