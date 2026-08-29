@@ -1,6 +1,12 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: c4adfe77a6f4d3448c10307c2ad4099be500b131bd6559dffb6364a568b5dc7f
+# Msg-SHA256: 76e54db756a210b28cd6006c82a46779f500871432d2893b41dd0504aa11fbd8
+- change: MQTT2_DISCOVERY: Availability und HA-Namensaufloesung
+  vervollstaendigt
+  - Availability mit IODev-Zustand und Retained-Abrufen auswerten
+  - Reconnects und fehlende Registry-Ziele robust behandeln
+  - HA-Entity-, Template-, Reading- und Setter-Namen kollisionsfrei aufloesen
+  - Dokumentation und Tests erweitert
 - bugfix: MQTT2_DISCOVERY: MQTT2_DISCOVERY-Neustart ohne readingList-Duplikate
   - bytestream-Registry korrekt dekodieren
   - Queue bis INITIALIZED beziehungsweise REREADCFG zurueckhalten

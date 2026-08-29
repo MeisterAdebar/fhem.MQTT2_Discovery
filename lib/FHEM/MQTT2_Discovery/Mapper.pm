@@ -22,7 +22,7 @@ use MQTT2_Discovery::Mapper::Semantics ();
 # Mappingroutine konzentriert sich danach auf ihre jeweiligen Besonderheiten.
 my %SUPPORTED_COMPONENT = map { $_ => 1 } qw(
 	sensor binary_sensor switch button number select text light cover fan lock
-	climate device_tracker event device_automation
+	climate media_player update device_tracker event device_automation
 );
 
 # Erzeugt die stabile Device-Identitaet aus Herstellerkennung und Verbindungsdaten.
@@ -48,7 +48,13 @@ sub _identity {
 # Normalisiert einen fachlichen Namen zu einem gueltigen FHEM-Readingnamen.
 sub _reading_name {
 	my ($entity) = @_;
-	my $fallback = safe_name($entity->{object_id} || $entity->{name} || $entity->{component}, 'state');
+
+	# Eine Root-Entity wiederholt im object_id lediglich den Devicenamen. Ohne
+	# fachlicheren Binding-Namen beschreibt deshalb die Komponentenrolle das Reading.
+	my $source = $entity->{_canonical_root}
+		? $entity->{component}
+		: ($entity->{object_id} || $entity->{name} || $entity->{component});
+	my $fallback = safe_name($source, 'state');
 	return _state_path_reading_name($entity->{state_topic}, $fallback);
 }
 
@@ -139,6 +145,146 @@ sub _logical_reading_path {
 # Loest Reading- und Set-Namenskollisionen ueber einen ganzen Device-Satz auf.
 sub resolve_mapping_names {
 	return MQTT2_Discovery::Mapper::NameResolver::resolve(@_);
+}
+
+# Leitet fuer eine Topicgruppe einen freien, vom Topicende aus lesbaren Readingnamen ab.
+sub _device_automation_group_name {
+	my ($topic, $used) = @_;
+	my @parts = grep { $_ ne '' } split m{/}, $topic, -1;
+	@parts = ('action') if !@parts;
+
+	# Zuerst wird nur das fachliche Topicblatt verwendet; bei Kollisionen kommen
+	# schrittweise die davorliegenden Topicsegmente als Namensraum hinzu.
+	for my $depth (1 .. scalar(@parts)) {
+		my @suffix = @parts[scalar(@parts) - $depth .. $#parts];
+		my $candidate = safe_name(join('_', @suffix), 'action');
+		return $candidate if !$used->{$candidate};
+	}
+
+	my $base = safe_name($parts[-1], 'action');
+	my $suffix = stable_suffix($topic);
+	my $candidate = "${base}_$suffix";
+	my $counter = 2;
+
+	# Der Zaehler ist nur der deterministische Fallback, falls selbst der Topic-Hash belegt ist.
+	while ($used->{$candidate}) {
+		$candidate = "${base}_${suffix}_" . $counter++;
+	}
+
+	return $candidate;
+}
+
+# Fasst kompatible Device-Automationen nach der deviceweiten Namensaufloesung pro Topic zusammen.
+sub collapse_device_automation_readings {
+	my ($mappings, $extra_reserved) = @_;
+	return $mappings if ref($mappings) ne 'ARRAY' || !@$mappings;
+	my %groups;
+
+	# Jede Device-Automation steuert genau ihr primaeres Trigger-Reading zur Topicgruppe bei.
+	for my $mapping_index (0 .. $#$mappings) {
+		my $mapping = $mappings->[$mapping_index];
+		next if ref($mapping) ne 'HASH'
+			|| ref($mapping->{metadata}) ne 'HASH'
+			|| ($mapping->{metadata}{component} || '') ne 'device_automation';
+		my $entries = $mapping->{reading_lines};
+		next if ref($entries) ne 'ARRAY' || !@$entries;
+		my @entry_indexes = grep {
+			ref($entries->[$_]) eq 'HASH' && ($entries->[$_]{kind} || '') eq 'reading'
+		} 0 .. $#$entries;
+		next if @entry_indexes != 1;
+		my $entry_index = $entry_indexes[0];
+		my $entry = $entries->[$entry_index];
+		next if !defined($entry->{topic}) || ref($entry->{topic}) || $entry->{topic} eq '';
+		push @{ $groups{ $entry->{topic} } }, {
+			mapping_index => $mapping_index, entry_index => $entry_index, entry => $entry,
+		};
+	}
+
+	my %collapsible;
+
+	# Nur eine einheitliche Template- und Kontextsignatur darf dasselbe Reading befuellen.
+	for my $topic (sort keys %groups) {
+		my %signatures;
+
+		for my $candidate (@{ $groups{$topic} }) {
+			my $entry = $candidate->{entry};
+			my $template = defined($entry->{template}) ? $entry->{template} : '';
+			my $context = $template ne '' ? ($entry->{template_context} || '') : '';
+			$signatures{join("\0", $template, $context)} = 1;
+		}
+
+		$collapsible{$topic} = 1 if keys(%signatures) == 1;
+	}
+
+	my (%remove, %used);
+	%used = map { ($_ => 1) } keys %{ ref($extra_reserved) eq 'HASH' ? $extra_reserved : {} };
+
+	# Die kompatiblen Quellpositionen werden vor der Namenssuche eindeutig markiert.
+	for my $topic (sort keys %collapsible) {
+
+		for my $candidate (@{ $groups{$topic} }) {
+			$remove{"$candidate->{mapping_index}\0$candidate->{entry_index}"} = 1;
+		}
+
+	}
+
+	# Namen nicht reduzierter Readings bleiben belegt und schuetzen vor neuen Kollisionen.
+	for my $mapping_index (0 .. $#$mappings) {
+		my $entries = ref($mappings->[$mapping_index]) eq 'HASH'
+			? $mappings->[$mapping_index]{reading_lines} : undef;
+		next if ref($entries) ne 'ARRAY' || !@$entries;
+
+		for my $entry_index (0 .. $#$entries) {
+			my $entry = $entries->[$entry_index];
+			next if ref($entry) ne 'HASH'
+				|| $remove{"$mapping_index\0$entry_index"};
+			$used{ $entry->{name} } = 1
+				if defined($entry->{name}) && !ref($entry->{name}) && $entry->{name} ne '';
+		}
+	}
+
+	my %insert;
+
+	# Pro kompatiblem Topic entsteht genau ein Eintrag mit allen bekannten Payloadvarianten.
+	for my $topic (sort keys %collapsible) {
+		my @candidates = @{ $groups{$topic} };
+		my $name = _device_automation_group_name($topic, \%used);
+		$used{$name} = 1;
+		my @payloads = stable_unique(sort map { $_->{entry}{payload} }
+			grep { defined($_->{entry}{payload}) } @candidates);
+		my $match_all = grep { !defined($_->{entry}{payload}) } @candidates;
+		my $template = $candidates[0]{entry}{template};
+		my $context = $candidates[0]{entry}{template_context};
+		my $group = {
+			kind => 'device_automation_group', name => $name, semantic_name => $name,
+			names => [$name], topic => $topic, payloads => \@payloads,
+			match_all => $match_all ? 1 : 0,
+			(defined($template) && $template ne '' ? (template => $template) : ()),
+			(defined($template) && $template ne '' && defined($context)
+				? (template_context => $context) : ()),
+		};
+		$group->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($group, undef);
+		my $anchor = $candidates[0];
+		$insert{"$anchor->{mapping_index}\0$anchor->{entry_index}"} = $group;
+	}
+
+	# Die Registry-Mappings bleiben einzeln erhalten; nur ihre abgeleitete Readingliste wird reduziert.
+	for my $mapping_index (0 .. $#$mappings) {
+		my $mapping = $mappings->[$mapping_index];
+		next if ref($mapping) ne 'HASH' || ref($mapping->{reading_lines}) ne 'ARRAY';
+		my @entries;
+
+		for my $entry_index (0 .. $#{ $mapping->{reading_lines} }) {
+			my $slot = "$mapping_index\0$entry_index";
+			push @entries, $insert{$slot} if exists($insert{$slot});
+			next if $remove{$slot};
+			push @entries, $mapping->{reading_lines}[$entry_index];
+		}
+
+		$mapping->{reading_lines} = \@entries;
+	}
+
+	return $mappings;
 }
 
 # Bestimmt den Readingnamen bevorzugt aus dem JSON-Pfad des State-Bindings.
@@ -284,20 +430,24 @@ sub _button {
 
 # Baut einen numerischen JSON-Publish-Eintrag fuer einen einzelnen Payloadschluessel.
 sub _json_publish {
-	my ($name, $spec, $topic, $key) = @_;
+	my ($name, $spec, $topic, $key, $constants) = @_;
 	return undef if !defined($topic) || ref($topic) || $topic eq '';
-	my $entry = { kind => 'json', name => $name, spec => $spec, topic => $topic, key => $key };
+	my $entry = {
+		kind => 'json', name => $name, spec => $spec, topic => $topic, key => $key,
+		(ref($constants) eq 'HASH' ? (constants => { %$constants }) : ()),
+	};
 	$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 	return $entry;
 }
 
 # Baut einen JSON-Publish fuer eine begrenzte skalare Auswahl auf.
 sub _json_choice {
-	my ($name, $spec, $topic, $key, $mapping) = @_;
+	my ($name, $spec, $topic, $key, $mapping, $constants) = @_;
 	return undef if !defined($topic) || ref($topic) || $topic eq '';
 	my $entry = {
 		kind => 'json_choice', name => $name, spec => $spec, topic => $topic,
 		key => $key, mapping => $mapping,
+		(ref($constants) eq 'HASH' ? (constants => { %$constants }) : ()),
 	};
 	$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 	return $entry;
@@ -312,7 +462,8 @@ sub _choice_command {
 		if ($codec->{format} || '') ne 'json' || ($codec->{value_type} || '') ne 'string'
 			|| !defined($codec->{key}) || ref($codec->{key})
 			|| $codec->{key} !~ /^[A-Za-z_][A-Za-z0-9_]*$/;
-	return _json_choice($name, $spec, $topic, $codec->{key}, $mapping);
+	return _json_choice($name, $spec, $topic, $codec->{key}, $mapping,
+		$codec->{constants});
 }
 
 # Rendert numerische Commands gemaess dem normalisierten skalaren oder JSON-Codec.
@@ -324,7 +475,8 @@ sub _numeric_command {
 		if ($codec->{format} || '') ne 'json' || ($codec->{value_type} || '') ne 'number'
 			|| !defined($codec->{key}) || ref($codec->{key})
 			|| $codec->{key} !~ /^[A-Za-z_][A-Za-z0-9_]*$/;
-	return _json_publish($name, $spec, $topic, $codec->{key});
+	return _json_publish($name, $spec, $topic, $codec->{key},
+		$codec->{constants});
 }
 
 # Haengt einen gueltigen Eintrag an Reading- oder Set-Zielliste des Mappings an.
@@ -491,6 +643,22 @@ sub _map_canonical_entity {
 	} elsif ($component eq 'button') {
 		_add_entry(\@sets, \@warnings,
 			_button($command_set_name, $entity->{command_topic}, $entity->{payload_press} // 'PRESS'), 'button');
+	} elsif ($component eq 'update') {
+		my $install_name = _command_set_name($entity, 'install');
+
+		# Ein Installationsbefehl ist nur mit explizitem skalarem Payload sicher
+		# abbildbar; reine Status-Entities bleiben auch ohne Command gueltig.
+		if (defined($entity->{command_topic})) {
+			if (!defined($entity->{payload_install}) || ref($entity->{payload_install})
+					|| $entity->{payload_install} eq ''
+					|| $entity->{payload_install} =~ /[\x00-\x1f]/) {
+				push @warnings, 'update: payload_install fehlt oder ist ungueltig';
+			} else {
+				_add_entry(\@sets, \@warnings,
+					_button($install_name, $entity->{command_topic}, $entity->{payload_install}),
+					'update install');
+			}
+		}
 	} elsif ($component eq 'number') {
 		my ($min, $max, $step) = map { $entity->{$_} } qw(min max step);
 
@@ -649,6 +817,65 @@ sub _map_canonical_entity {
 				),
 				'climate power command');
 		}
+	} elsif ($component eq 'media_player') {
+		my $volume_semantic_name = "${reading_name}_volume";
+		my $volume_reading_name = defined($entity->{volume_reading_name})
+			&& !ref($entity->{volume_reading_name})
+			? safe_name($entity->{volume_reading_name}, 'volume') : 'volume';
+		my $volume_set_name = defined($entity->{volume_set_name})
+			&& !ref($entity->{volume_set_name})
+			? safe_name($entity->{volume_set_name}, $volume_reading_name) : $volume_reading_name;
+		_add_entry(\@readings, \@warnings,
+			_reading($entity->{volume_state_topic}, $entity->{volume_value_template},
+				$volume_reading_name, undef, undef, undef, $volume_semantic_name),
+			'media_player volume state');
+		_add_entry(\@sets, \@warnings,
+			_linked_set(
+				_numeric_command($volume_set_name, 'slider,0,1,100',
+					$entity->{volume_command_topic}, $entity->{volume_command_template},
+					$entity->{volume_command_codec}),
+				$volume_semantic_name,
+			),
+			'media_player volume command');
+		my $mute_semantic_name = "${reading_name}_mute";
+		my $mute_reading_name = defined($entity->{mute_reading_name})
+			&& !ref($entity->{mute_reading_name})
+			? safe_name($entity->{mute_reading_name}, 'mute') : 'mute';
+		my $mute_set_name = defined($entity->{mute_set_name})
+			&& !ref($entity->{mute_set_name})
+			? safe_name($entity->{mute_set_name}, $mute_reading_name) : $mute_reading_name;
+		_add_entry(\@readings, \@warnings,
+			_reading($entity->{mute_state_topic}, $entity->{mute_value_template},
+				$mute_reading_name, undef, undef, undef, $mute_semantic_name),
+			'media_player mute state');
+
+		# Mute und Unmute bleiben eine sichtbare binaere Auswahl, obwohl das
+		# Zielprotokoll dafuer zwei unterschiedliche JSON-Kommandos verwendet.
+		if (defined($entity->{payload_mute}) && !ref($entity->{payload_mute})
+				&& defined($entity->{payload_unmute}) && !ref($entity->{payload_unmute})) {
+			my %mute_mapping = (
+				on => $entity->{payload_mute}, off => $entity->{payload_unmute},
+			);
+			_add_entry(\@sets, \@warnings,
+				_linked_set(
+					_choice($mute_set_name, 'on,off', $entity->{mute_command_topic},
+						\%mute_mapping),
+					$mute_semantic_name,
+				),
+				'media_player mute command');
+		}
+
+		# Zustandslose Transportaktionen werden nur fuer explizit vom Adapter
+		# gelieferte Payloads angeboten; der Mapper erfindet keine Protokollwerte.
+		for my $command (qw(play pause stop toggle next previous)) {
+			my $payload_key = "payload_$command";
+			my $payload = $entity->{$payload_key};
+			next if !defined($payload) || ref($payload) || $payload eq '';
+			_add_entry(\@sets, \@warnings,
+				_button($command, $entity->{command_topic}, $payload),
+				"media_player $command command");
+		}
+
 	} elsif ($component eq 'text') {
 		_add_entry(\@sets, \@warnings, _publish($actual_reading_name // $reading_name, '', $entity->{command_topic}, $entity->{command_template}), 'text');
 	} elsif ($component eq 'light') {

@@ -17,12 +17,12 @@ our $SCHEMA_VERSION = 1;
 my %OPERATION = map { $_ => 1 } qw(upsert delete delete_device);
 my %KIND = map { $_ => 1 } qw(
 	sensor binary_sensor switch button number select text light cover fan lock climate
-	device_tracker event device_automation
+	media_player update device_tracker event device_automation
 );
 
 my %INTERNAL = map { $_ => 1 } qw(
 	operation prefix format component node_id object_id discovery_topic entity_key
-	component_key unique_id name preferred_entity_name device raw_metadata device_topic supplemental_signals
+	component_key unique_id name preferred_entity_name device raw_metadata device_topic supplemental_signals internal_rebuild
 	availability availability_topic availability_template availability_mode
 	payload_available payload_not_available
 );
@@ -40,6 +40,8 @@ my @SIGNAL_BINDINGS = (
 	[position => 'position_topic', 'position_template'],
 	[tilt => 'tilt_status_topic', 'tilt_status_template'],
 	[percentage => 'percentage_state_topic', 'percentage_value_template'],
+	[volume => 'volume_state_topic', 'volume_value_template', 'volume_reading_name'],
+	[mute => 'mute_state_topic', 'mute_value_template', 'mute_reading_name'],
 	[current_temperature => 'current_temperature_topic', 'current_temperature_template'],
 	[current_humidity => 'current_humidity_topic', 'current_humidity_template'],
 	[target_temperature => 'temperature_state_topic', 'temperature_state_template'],
@@ -63,6 +65,8 @@ my @COMMAND_BINDINGS = (
 	[position => 'position_command_topic', undef],
 	[tilt => 'tilt_command_topic', undef],
 	[percentage => 'percentage_command_topic', undef],
+	[volume => 'volume_command_topic', 'volume_command_template', 'volume_set_name', 'volume_command_codec'],
+	[mute => 'mute_command_topic', 'mute_command_template', 'mute_set_name', 'mute_command_codec'],
 	[target_temperature => 'temperature_command_topic', 'temperature_command_template'],
 	[target_temperature_high => 'temperature_high_command_topic', 'temperature_high_command_template'],
 	[target_temperature_low => 'temperature_low_command_topic', 'temperature_low_command_template'],
@@ -161,6 +165,9 @@ sub _capabilities {
 	if ($kind eq 'sensor' || $kind eq 'text' || $kind eq 'event'
 			|| $kind eq 'number' || $kind eq 'select') {
 		$add->('value', 'state', 'command');
+	} elsif ($kind eq 'update') {
+		$add->('state', 'state', undef);
+		$add->('install', undef, 'command');
 	} elsif ($kind eq 'binary_sensor' || $kind eq 'device_tracker') {
 		$add->('state', 'state', undef);
 	} elsif ($kind eq 'switch') {
@@ -185,6 +192,22 @@ sub _capabilities {
 	} elsif ($kind eq 'fan') {
 		$add->('power', 'state', 'command');
 		$add->('percentage', 'percentage', 'percentage');
+	} elsif ($kind eq 'media_player') {
+		$add->('state', 'state', undef);
+		$add->('volume', 'volume', 'volume');
+		$add->('mute', 'mute', 'mute');
+		$add->($_, undef, 'command') for qw(play pause stop toggle next previous);
+
+		# Lautstaerke und Mute erhalten ihre fachlichen Werttypen statt des
+		# allgemeinen String-Fallbacks einer zusammengesetzten Komponente.
+		if (ref($capabilities{volume}) eq 'HASH') {
+			$capabilities{volume}{value} = {
+				type => 'number', min => 0, max => 100, step => 1, unit => '%',
+			};
+		}
+		if (ref($capabilities{mute}) eq 'HASH') {
+			$capabilities{mute}{value} = { type => 'boolean' };
+		}
 	} elsif ($kind eq 'lock') {
 		$add->('state', 'state', undef);
 		$add->('action', undef, 'command');
@@ -275,6 +298,9 @@ sub from_entity {
 
 	$model->{extensions}{device_topic} = $source->{device_topic}
 		if defined($source->{device_topic}) && !ref($source->{device_topic});
+	# Die Markierung unterscheidet einen rein technischen Replace-Schritt von
+	# einem extern ausgeloesten Discovery-Loeschereignis.
+	$model->{extensions}{internal_rebuild} = 1 if $source->{internal_rebuild};
 
 	for my $key (qw(json_autocreate json_reading_name state_reading_name)) {
 		$model->{extensions}{$key} = $configuration{$key} if exists($configuration{$key});
@@ -293,8 +319,11 @@ sub from_entity {
 	if (defined($source->{object_id}) && !ref($source->{object_id})
 			&& defined($device_name) && !ref($device_name)) {
 		require MQTT2_Discovery::Helper;
-		$model->{entity}{root} = MQTT2_Discovery::Helper::safe_name($source->{object_id}, 'entity')
-			eq MQTT2_Discovery::Helper::safe_name($device_name, 'device') ? 1 : 0;
+		my $object_name = MQTT2_Discovery::Helper::safe_name($source->{object_id}, 'entity');
+		my $safe_device_name = MQTT2_Discovery::Helper::safe_name($device_name, 'device');
+
+		# HA schreibt object_id haeufig klein; die Schreibweise allein erzeugt keine Unter-Entity.
+		$model->{entity}{root} = lc($object_name) eq lc($safe_device_name) ? 1 : 0;
 	}
 
 	return $model;
@@ -363,6 +392,19 @@ sub validate {
 					|| !defined($codec->{key}) || ref($codec->{key})
 					|| $codec->{key} !~ /^[A-Za-z_][A-Za-z0-9_]*$/
 					|| ($codec->{value_type} || '') !~ /^(?:string|number)$/;
+			next if !exists($codec->{constants});
+			return "Ungueltige Command-Codec-Konstanten in $collection"
+				if ref($codec->{constants}) ne 'HASH';
+
+			# Konstante JSON-Felder duerfen weder den dynamischen Wertschluessel
+			# ueberschreiben noch verschachtelte oder unsichere Werte einschleusen.
+			for my $key (keys %{ $codec->{constants} }) {
+				my $value = $codec->{constants}{$key};
+				return "Ungueltige Command-Codec-Konstante $key in $collection"
+					if $key !~ /^[A-Za-z_][A-Za-z0-9_]*$/ || $key eq $codec->{key}
+						|| !defined($value) || ref($value) || $value =~ /[\x00-\x1f]/;
+			}
+
 		}
 
 	}

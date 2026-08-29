@@ -5,12 +5,14 @@ package MQTT2_Discovery::FormatRegistry;
 
 use strict;
 use warnings;
+use MQTT2_Discovery::Format::Sonos2mqtt ();
 use MQTT2_Discovery::Format::Tasmota ();
 use MQTT2_Discovery::Format::HomeAssistant ();
 
 
 # Spezifische Formate stehen vor dem allgemeineren HA-Discovery-Adapter.
 my @ADAPTERS = (
+	'MQTT2_Discovery::Format::Sonos2mqtt',
 	'MQTT2_Discovery::Format::Tasmota',
 	'MQTT2_Discovery::Format::HomeAssistant',
 );

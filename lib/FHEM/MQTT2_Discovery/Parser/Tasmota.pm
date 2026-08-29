@@ -659,6 +659,7 @@ sub _rebuild {
 		operation => 'delete_device', prefix => $args{prefix}, format => 'tasmota',
 		node_id => $args{mac}, discovery_topic => $discovery_topic,
 		entity_key => join('|', $discovery_topic, ''),
+		internal_rebuild => 1,
 	};
 	return {
 		status => 'ok',

@@ -203,6 +203,7 @@ sub _parse_atom {
 	if ($text =~ /^([A-Za-z_][A-Za-z0-9_]*)(.*)$/s) {
 		my ($root, $rest) = ($1, $2);
 		my @path;
+		my $get_default;
 
 		# Erlaubt sind nur reine Datenpfade; Methodenaufrufe ausser .get werden
 		# bereits beim Parsen verworfen.
@@ -210,7 +211,11 @@ sub _parse_atom {
 
 			# Die erlaubten Zugriffsschreibweisen werden alle in denselben neutralen
 			# Pfad umgewandelt, den der Evaluator spaeter ohne Methodenaufruf liest.
-			if ($rest =~ s/^\.get\(\s*(['"])([^'"]+)\1\s*\)//) {
+			if ($rest =~ s/^\.get\(\s*(['"])([^'"]+)\1\s*,\s*((?:'[^']*'|"[^"]*"|-?(?:\d+(?:\.\d*)?|\.\d+)|true|True|false|False|none|None|null))\s*\)//) {
+				push @path, $2;
+				$get_default = _parse_expression($3);
+				return if !$get_default || $rest ne '';
+			} elsif ($rest =~ s/^\.get\(\s*(['"])([^'"]+)\1\s*\)//) {
 				push @path, $2;
 			} elsif ($rest =~ s/^\.([A-Za-z_][A-Za-z0-9_]*)//) {
 				push @path, $1;
@@ -223,7 +228,10 @@ sub _parse_atom {
 			}
 		}
 
-		return { type => 'path', root => $root, path => \@path };
+		my $path = { type => 'path', root => $root, path => \@path };
+		return $get_default
+			? { type => 'get', input => $path, default => $get_default }
+			: $path;
 	}
 	return;
 }
@@ -234,13 +242,64 @@ sub _parse_expression {
 	$text = trim($text);
 	return if $text eq '';
 
-	# Ternary und Vergleiche werden vor Filtern gebunden. Das bildet genau den
-	# dokumentierten sicheren Teil der HA-Templates ab.
+	# Bedingte Ausdruecke und Vergleiche werden vor Filtern gebunden. Das bildet
+	# genau den dokumentierten sicheren Teil der HA-Templates ab.
 	if ($text =~ /^(.*?)\s+if\s+(.+?)\s+else\s+(.*?)$/s) {
 		my ($yes, $condition, $no) = ($1, $2, $3);
 		my ($yes_ast, $condition_ast, $no_ast) = map { _parse_expression($_) } ($yes, $condition, $no);
 		return if !$yes_ast || !$condition_ast || !$no_ast;
 		return { type => 'if', condition => $condition_ast, yes => $yes_ast, no => $no_ast };
+	}
+
+	# EMS-ESP laesst bei reinen Zustandswerten den else-Zweig weg. Der fehlende
+	# Zweig bleibt im AST absichtlich undefiniert und erzeugt damit keinen Wert.
+	if ($text =~ /^(.*?)\s+if\s+(.+)$/s) {
+		my ($yes, $condition) = ($1, $2);
+		my ($yes_ast, $condition_ast) = map { _parse_expression($_) } ($yes, $condition);
+		return if !$yes_ast || !$condition_ast;
+		return { type => 'if', condition => $condition_ast, yes => $yes_ast };
+	}
+
+	# Die Jinja-Tests pruefen ausschliesslich die Existenz eines sicheren Datenpfads.
+	# undefined ist dabei die gleichwertige Negation von defined.
+	if ($text =~ /^(.*?)\s+is\s+((?:not\s+)?defined|undefined)$/s) {
+		my ($input_source, $test) = ($1, $2);
+		my $negated = $test eq 'defined' ? 0 : 1;
+		my $input = _parse_expression($input_source);
+		return if !$input || ($input->{type} || '') ne 'path';
+		return { type => 'defined', input => $input, negated => $negated };
+	}
+
+	my @outer_filters = _split_outside($text, '|');
+
+	# Zigbee2MQTT klammert einen Vergleich, bevor es dessen booleschen Wert
+	# mit lower in ein JSON-Token umwandelt. Nur eine vollstaendig geklammerte
+	# sichere Basis darf an dieser Stelle vor einer Filterkette stehen.
+	if (@outer_filters > 1 && $outer_filters[0] =~ /^\((.*)\)$/s) {
+		my $base = _parse_expression($1);
+		return if !$base;
+		shift @outer_filters;
+
+		for my $filter (@outer_filters) {
+			return if $filter !~ /^([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$/s;
+			my ($name, $argument) = ($1, $2);
+			my $definition = $FILTERS{$name};
+			return if !$definition;
+			my $argument_count = defined($argument) && trim($argument) ne '' ? 1 : 0;
+			return if $argument_count < $definition->{min_args}
+				|| $argument_count > $definition->{max_args};
+			my $argument_ast;
+
+			# Filterargumente bleiben auch hinter einer geklammerten Basis auf das
+			# bestehende sichere Ausdruckssubset beschraenkt.
+			if (defined($argument) && trim($argument) ne '') {
+				$argument_ast = _parse_expression($argument);
+				return if !$argument_ast;
+			}
+			$base = { type => 'filter', name => $name, argument => $argument_ast, input => $base };
+		}
+
+		return $base;
 	}
 
 	for my $operator (qw(== != >= <= > <)) {
@@ -287,6 +346,76 @@ sub _parse_expression {
 	return $base;
 }
 
+# Zerlegt ein reines Ausgabetemplate in sichere Literale und Ausdrucksknoten.
+sub _parse_output_template {
+	my ($template) = @_;
+	my @parts;
+	my ($position, $expressions) = (0, 0);
+
+	# Nur {{ ... }} wird ausgewertet; Text dazwischen bleibt ein unveraendertes
+	# Literal und erweitert den erlaubten Ausdrucksumfang nicht.
+	while ($template =~ /\{\{\s*(.*?)\s*\}\}/gs) {
+		my $literal = substr($template, $position, $-[0] - $position);
+		return if $literal =~ /\{\{|\}\}|\{%|%\}/;
+		push @parts, { type => 'literal', value => $literal } if $literal ne '';
+		my $expression = _parse_expression($1);
+		return if !$expression;
+		push @parts, $expression;
+		$position = $+[0];
+		++$expressions;
+	}
+
+	my $tail = substr($template, $position);
+	return if !$expressions || $tail =~ /\{\{|\}\}|\{%|%\}/;
+	push @parts, { type => 'literal', value => $tail } if $tail ne '';
+	return @parts == 1 ? $parts[0] : { type => 'concat', parts => \@parts };
+}
+
+# Parst einen flachen Jinja-if-Block mit beliebig vielen sicheren elif-Zweigen.
+sub _parse_if_template {
+	my ($template) = @_;
+	return if $template !~ /^\s*\{%\s*if\s+(.+?)\s*%\}/s;
+	my @branches;
+	my $condition_source = $1;
+	my $remaining = substr($template, $+[0]);
+
+	# Jeder Zweig darf nur einen sicheren Ausdruck als Bedingung und ansonsten
+	# unveraenderten Literaltext enthalten.
+	while (1) {
+		return if $remaining !~ /^(.*?)\{%\s*(?:(elif)\s+(.+?)|(else))\s*%\}/s;
+		my ($output, $elif, $next_condition) = ($1, $2, $3);
+		my $tag_end = $+[0];
+		return if $output =~ /\{\{|\}\}|\{%|%\}/;
+		my $condition = _parse_expression($condition_source);
+		return if !$condition;
+		push @branches, {
+			condition => $condition,
+			yes => { type => 'literal', value => $output },
+		};
+		$remaining = substr($remaining, $tag_end);
+
+		# Nur elif fuehrt zu einem weiteren Bedingungszweig; else beendet die Kette.
+		if (defined $elif) {
+			$condition_source = $next_condition;
+			next;
+		}
+		last;
+	}
+
+	return if $remaining !~ /^(.*?)\{%\s*endif\s*%\}\s*$/s;
+	my $fallback = $1;
+	return if $fallback =~ /\{\{|\}\}|\{%|%\}/;
+	my $ast = { type => 'literal', value => $fallback };
+
+	# Die umgekehrte Verschachtelung bildet die elif-Kette aus einfachen,
+	# bereits sicher auswertbaren Bedingungsknoten ab.
+	for my $branch (reverse @branches) {
+		$ast = { type => 'if', %$branch, no => $ast };
+	}
+
+	return $ast;
+}
+
 # Kompiliert einen Template-Text einmalig in eine Folge aus Text- und AST-Segmenten.
 sub compile {
 	my ($template) = @_;
@@ -295,17 +424,20 @@ sub compile {
 		if $template =~ /(?:states\s*\(|state_attr\s*\(|is_state\s*\(|__|`|;|\{%-?\s*(?:for|macro|include|import))/;
 	my $ast;
 
-	# Nur ein einzelner Ausgabeausdruck oder ein einfaches if/else ist zulaessig.
+	# Einzelne Ausdruecke behalten ihre direkte AST-Form fuer die Pfadmetadaten;
+	# flache if/elif/else-Bloecke werden in verschachtelte Bedingungsknoten zerlegt.
 	if ($template =~ /^\s*\{\{\s*(.*?)\s*\}\}\s*$/s) {
 		my $source = $1;
-		$ast = _parse_expression($source);
-	} elsif ($template =~ /^\s*\{%\s*if\s+(.+?)\s*%\}(.*?)\{%\s*else\s*%\}(.*?)\{%\s*endif\s*%\}\s*$/s) {
-		my ($condition_source, $yes, $no) = ($1, $2, $3);
-		my $condition = _parse_expression($condition_source);
-		$ast = { type => 'if', condition => $condition,
-			yes => { type => 'literal', value => $yes }, no => { type => 'literal', value => $no } }
-			if $condition;
+		$ast = _parse_expression($source)
+			if $source !~ /\{\{|\}\}/;
+	} else {
+		$ast = _parse_if_template($template);
 	}
+
+	# Mehrere sichere Ausgabeausdruecke duerfen zu einem Text zusammengesetzt
+	# werden, sofern keinerlei Blocksyntax oder unvollstaendige Klammer verbleibt.
+	$ast = _parse_output_template($template)
+		if !$ast && index($template, '{{') >= 0 && index($template, '{%') < 0;
 	return _fail('Template liegt ausserhalb des unterstuetzten sicheren Subsets') if !$ast;
 	return { ok => 1, ast => $ast, source => $template };
 }
@@ -345,6 +477,21 @@ sub _truthy {
 sub _evaluate_ast {
 	my ($ast, $context) = @_;
 
+	# Zusammengesetzte Ausgabetemplates werten jeden bereits sicher kompilierten
+	# Teil aus und verbinden ihn ohne eine zweite Interpretationsstufe.
+	if ($ast->{type} eq 'concat') {
+		my $result = '';
+
+		for my $part (@{ $ast->{parts} || [] }) {
+			my ($exists, $value) = _evaluate_ast($part, $context);
+			return (0, undef) if !$exists;
+			$value = '' if !defined $value;
+			$result .= ref($value) ? encode_json($value) : "$value";
+		}
+
+		return (1, $result);
+	}
+
 	# Literale sind bereits beim Kompilieren validiert und koennen direkt in die
 	# Auswertung uebernommen werden.
 	if ($ast->{type} eq 'literal') {
@@ -354,6 +501,22 @@ sub _evaluate_ast {
 	# Pfadknoten delegieren Existenz- und Typbehandlung an den sicheren Lookup.
 	if ($ast->{type} eq 'path') {
 		return _lookup($context, $ast->{root}, $ast->{path});
+	}
+
+	# Jinja-dict.get mit Default liest zuerst denselben sicheren Pfad und wertet
+	# den bereits kompilierten Fallback nur bei einem fehlenden Schluessel aus.
+	if ($ast->{type} eq 'get') {
+		my ($exists, $value) = _evaluate_ast($ast->{input}, $context);
+		return ($exists, $value) if $exists;
+		return _evaluate_ast($ast->{default}, $context);
+	}
+
+	# defined unterscheidet die Existenz bewusst vom Wahrheitswert. Vorhandene
+	# Null-, False- und Leerwerte gelten deshalb ebenso als definiert wie Text.
+	if ($ast->{type} eq 'defined') {
+		my ($exists, undef) = _evaluate_ast($ast->{input}, $context);
+		my $defined = $exists ? 1 : 0;
+		return (1, $ast->{negated} ? ($defined ? 0 : 1) : $defined);
 	}
 
 	# Vergleiche werten zuerst beide Seiten aus; ein fehlender Operand ergibt
@@ -375,11 +538,13 @@ sub _evaluate_ast {
 		return (1, $result ? 1 : 0);
 	}
 
-	# Der Bedingungsknoten wertet nur den ausgewaehlten Zweig aus, damit ein
-	# fehlender Pfad im unbenutzten Zweig das Ergebnis nicht ungueltig macht.
+	# Der Bedingungsknoten wertet nur den ausgewaehlten Zweig aus. Ein fehlender
+	# else-Zweig unterdrueckt die Ausgabe wie ein undefinierter Jinja-Wert.
 	if ($ast->{type} eq 'if') {
 		my ($exists, $condition) = _evaluate_ast($ast->{condition}, $context);
-		return _evaluate_ast(_truthy($condition, $exists) ? $ast->{yes} : $ast->{no}, $context);
+		my $branch = _truthy($condition, $exists) ? $ast->{yes} : $ast->{no};
+		return (0, undef) if !defined $branch;
+		return _evaluate_ast($branch, $context);
 	}
 
 	# Filter bauen auf dem Ergebnis ihres Eingangsknotens auf und behandeln ein
@@ -389,6 +554,13 @@ sub _evaluate_ast {
 		my ($argument_exists, $argument) = $ast->{argument}
 			? _evaluate_ast($ast->{argument}, $context) : (0, undef);
 		my $name = $ast->{name};
+
+		# Jinja stellt boolesche Vergleichsergebnisse als True/False dar; dadurch
+		# liefern die Textfilter lower/upper die erwarteten JSON-Tokens.
+		$value = $value ? 'True' : 'False'
+			if ref($ast->{input}) eq 'HASH'
+				&& ($ast->{input}{type} || '') eq 'compare'
+				&& ($name eq 'lower' || $name eq 'upper');
 		my $definition = $FILTERS{$name};
 		return (0, undef) if !$definition || ref($definition->{evaluate}) ne 'CODE';
 

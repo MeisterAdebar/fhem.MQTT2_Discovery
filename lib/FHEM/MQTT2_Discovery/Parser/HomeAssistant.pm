@@ -14,7 +14,7 @@ use MQTT2_Discovery::Template ();
 
 
 my %SUPPORTED = map { $_ => 1 } qw(
-	sensor binary_sensor switch button number select text light cover fan lock climate
+	sensor binary_sensor switch button number select text light cover fan lock climate update
 	device_tracker event device_automation
 );
 
@@ -84,6 +84,7 @@ my %ABBREVIATION = (
 	pl_on           => 'payload_on',
 	pl_open         => 'payload_open',
 	pl_prs          => 'payload_press',
+	pl_inst         => 'payload_install',
 	pl_stop         => 'payload_stop',
 	pl_unlk         => 'payload_unlock',
 	pow_cmd_t       => 'power_command_topic',
@@ -328,6 +329,13 @@ sub _normalise_bindings {
 	$config->{preferred_reading_name} = $preferred_name if defined($preferred_name);
 	$config->{state_reading_name} = $preferred_name if defined($preferred_name);
 
+	# Update-Entities besitzen genau eine zustandslose Installationsaktion. Der
+	# feste fachliche Name bleibt von technischer object_id und Topicstruktur frei.
+	if ($component eq 'update') {
+		$config->{command_set_name} = 'install';
+		return;
+	}
+
 	return if !$json_light;
 	$config->{command_set_name} = $preferred_name || 'state';
 	$config->{command_codec} = {
@@ -423,7 +431,7 @@ sub _entity {
 		brightness_reading_name brightness_set_name brightness_command_codec
 		payload_on payload_off state_on state_off payload_available payload_not_available payload_home
 		payload_not_home payload_open payload_close payload_stop payload_lock
-		payload_unlock payload_press brightness_command_topic brightness_state_topic
+		payload_unlock payload_press payload_install brightness_command_topic brightness_state_topic
 		brightness_value_template brightness_scale color_temp_command_topic
 		color_temp_state_topic color_temp_value_template min_mireds max_mireds
 		rgb_command_topic rgb_state_topic rgb_value_template effect_command_topic

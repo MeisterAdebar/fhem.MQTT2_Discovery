@@ -90,6 +90,32 @@ sub mqtt2_devices_for_cid {
 	return [ grep { !$seen{ $_->{NAME} }++ } @devices ];
 }
 
+# Sucht alle lebenden MQTT2_DEVICE-Instanzen, die exakt am angegebenen IODev haengen.
+sub mqtt2_devices_for_iodev {
+	my ($self, $iodev) = @_;
+	my $callback = $self->{callbacks}{mqtt2_devices_for_iodev};
+	return $callback->($iodev) if ref($callback) eq 'CODE';
+	return [] if ref($iodev) ne 'HASH' || !defined($iodev->{NAME})
+		|| ref($iodev->{NAME}) || $iodev->{NAME} eq '';
+	my $io_name = $iodev->{NAME};
+
+	# Eine veraltete IODev-Referenz darf keine scheinbar zugeordneten Devices liefern.
+	return [] if !$main::defs{$io_name} || $main::defs{$io_name} != $iodev;
+	my @devices;
+
+	# Nur aktuelle MQTT2_DEVICE-Hashes mit derselben IODev-Referenz gehoeren zur Liste.
+	for my $name (sort keys %main::defs) {
+		my $device = $main::defs{$name};
+		next if ref($device) ne 'HASH'
+			|| ($device->{TYPE} || '') ne 'MQTT2_DEVICE';
+		next if ref($device->{IODev}) ne 'HASH'
+			|| $device->{IODev} != $iodev;
+		push @devices, $device;
+	}
+
+	return \@devices;
+}
+
 # Setzt oder entfernt ein Attribut idempotent und gibt einen FHEM-Fehler zurueck.
 sub set_attribute {
 	my ($self, $device, $attribute, $value) = @_;
@@ -138,6 +164,34 @@ sub update_reading {
 		return &main::readingsSingleUpdate(@_);
 	});
 	return $callback->($hash, $name, defined($value) ? $value : '', $trigger ? 1 : 0);
+}
+
+# Entfernt genau ein Reading, nachdem dessen Besitz durch den Aufrufer geprueft wurde.
+sub delete_reading {
+	my ($self, $hash, $name) = @_;
+	my $callback = $self->_callback(delete_reading => sub {
+		my ($target, $reading) = @_;
+		return undef if ref($target) ne 'HASH' || !defined($target->{NAME});
+
+		# Im vollstaendigen FHEM sorgt deletereading fuer den regulaeren Lebenszyklus;
+		# dessen Erfolgstext darf jedoch nicht als Fehlermeldung weitergereicht werden.
+		if (defined(&main::CommandDeleteReading)) {
+			my $pattern = quotemeta($reading);
+			my $result = main::CommandDeleteReading(undef, "$target->{NAME} ^$pattern\$");
+
+			# Der tatsaechliche Readingzustand entscheidet, weil FHEM auch bei Erfolg
+			# den nichtleeren Text "Deleted reading ..." zurueckliefert.
+			return undef if ref($target->{READINGS}) ne 'HASH'
+				|| !exists($target->{READINGS}{$reading});
+			return defined($result) && $result ne '' ? $result
+				: "Reading $reading wurde an $target->{NAME} nicht geloescht";
+		}
+
+		# Schlanke Testumgebungen erhalten denselben Datenzustand direkt im Hash.
+		delete $target->{READINGS}{$reading} if ref($target->{READINGS}) eq 'HASH';
+		return undef;
+	});
+	return $callback->($hash, $name);
 }
 
 # Schreibt eine bereits aufbereitete Meldung mit Name und Stufe in FHEMs Log.

@@ -27,6 +27,10 @@ sub device_topic {
 		grep { ref($_) eq 'HASH' && ($_->{role} // '') ne 'availability'
 			&& defined($_->{topic}) && !ref($_->{topic}) && $_->{topic} ne '' }
 		@{ $entries || [] });
+	my @availability_topics = stable_unique(map { $_->{topic} }
+		grep { ref($_) eq 'HASH' && ($_->{role} // '') eq 'availability'
+			&& defined($_->{topic}) && !ref($_->{topic}) && $_->{topic} ne '' }
+		@{ $entries || [] });
 	return undef if !@topics;
 
 	# Parser-Vorschlaege sind sichere Kandidaten, duerfen aber einen tieferen
@@ -59,9 +63,16 @@ sub device_topic {
 		push @common, $part;
 	}
 
+	# Ein unterhalb des einzigen Nutzdaten-Topics liegendes Availability-Topic
+	# belegt, dass dieses Topic selbst bereits der stabile Geraetestamm ist.
+	my $single_topic_is_device_root = @topics == 1 && grep {
+		$_ ne $topics[0] && topic_has_prefix($_, $topics[0])
+	} @availability_topics;
+
 	# Ein einzelnes Topic enthaelt keinen Beleg, dass sein Blatt bereits ein
 	# Geraetestamm ist; in diesem Fall bleibt das letzte Segment Nutzdatenname.
-	pop @common if @topics == 1 && @common == $limit && @common > 1;
+	pop @common if @topics == 1 && @common == $limit && @common > 1
+		&& !$single_topic_is_device_root;
 
 	# Generische Funktionssegmente sind kein stabiler Geraetestamm.
 	pop @common if @common > 1 && $common[-1] =~ /^(?:cmd|command|set|state|status)$/i;
@@ -75,25 +86,119 @@ sub device_topic {
 	return $suggested;
 }
 
-# Bereitet JSON-Reading-Eintraege unter Beachtung manueller Namenskonflikte vor.
+# Sammelt manuelle JSON-Sammelhandler, die ein komplettes Topic verarbeiten.
+sub _manual_json_topic_patterns {
+	my ($manual, $device_topic) = @_;
+	my @patterns;
+
+	# Nur breite json2nameValue-Regeln mit beliebigem Payload koennen eine
+	# generierte JSON-Auswertung vollstaendig und nicht nur fallweise ersetzen.
+	for my $line (@{ $manual || [] }) {
+		my ($regexp, $code) = split /\s+/, $line, 2;
+		next if !defined($regexp) || !defined($code)
+			|| $code !~ /\bjson2nameValue\s*\(\s*[^,]+\s*,\s*(['"])\1\s*(?:,|\))/;
+		next if $regexp !~ s/:\.\*(?:\$)?\z//;
+
+		# $DEVICETOPIC wird wie in MQTT2_DEVICE auf den fuer den fertigen Plan
+		# wirksamen Topicstamm aufgeloest; unbekannte Variablen bleiben unbewertet.
+		if (index($regexp, '$DEVICETOPIC') >= 0) {
+			next if !defined($device_topic) || $device_topic eq '';
+			my $literal = quotemeta($device_topic);
+			$regexp =~ s/\$DEVICETOPIC/$literal/g;
+		}
+		next if $regexp =~ /\$[A-Za-z_][A-Za-z0-9_]*/;
+		my $compiled = eval { qr/\A(?:$regexp)\z/ };
+		next if !$compiled;
+		push @patterns, $compiled;
+	}
+
+	return \@patterns;
+}
+
+# Liefert die konkreten Topics, die ein JSON-Eintrag vollstaendig abdecken muss.
+sub _json_entry_topics {
+	my ($entry) = @_;
+	return () if ref($entry) ne 'HASH';
+	my $topic = $entry->{topic};
+	return () if !defined($topic) || ref($topic) || $topic eq '';
+
+	# MQTT-Wildcards beschreiben unendlich viele Topics und werden nicht durch
+	# einzelne Stichproben als vollstaendig manuell abgedeckt eingestuft.
+	return () if grep { $_ eq '+' || $_ eq '#' } split m{/}, $topic, -1;
+
+	# Nummerierte Sequenzen wie INFO1 bis INFO3 gelten nur dann als abgedeckt,
+	# wenn derselbe manuelle Handler jede angekuendigte Variante verarbeitet.
+	if (($entry->{kind} || '') eq 'json_sequence') {
+		my $parts = $entry->{parts};
+		return () if ref($parts) ne 'ARRAY' || !@$parts
+			|| grep { !defined($_) || ref($_) } @$parts;
+		return map { $topic . $_ } @$parts;
+	}
+
+	return ($topic);
+}
+
+# Prueft, ob eine manuelle JSON-Regel alle Topics eines generierten Eintrags trifft.
+sub _manual_json_handler_covers {
+	my ($patterns, $entry, $cid) = @_;
+	my @topics = _json_entry_topics($entry);
+	return 0 if !@topics;
+
+	for my $pattern (@{ $patterns || [] }) {
+		my $covers_all = 1;
+
+		for my $topic (@topics) {
+			my $direct = $topic =~ $pattern;
+			my $cid_scoped = defined($cid) && !ref($cid) && $cid ne ''
+				&& "$cid:$topic" =~ $pattern;
+
+			# Bereits eine nicht getroffene Sequenzvariante verhindert, dass die
+			# manuelle Regel den generierten Sammelhandler sicher ersetzen kann.
+			if (!$direct && !$cid_scoped) {
+				$covers_all = 0;
+				last;
+			}
+		}
+
+		return 1 if $covers_all;
+	}
+
+	return 0;
+}
+
+# Bereitet JSON-Reading-Eintraege unter Beachtung manueller Namens- und Topickonflikte vor.
 sub prepare_json_readings {
-	my ($mode, $current, $previous_owned, $entries, $conflicts) = @_;
+	my ($mode, $current, $previous_owned, $entries, $conflicts, $device_topic, $cid) = @_;
 	my %previous = map { $_ => 1 } @{ $previous_owned || [] };
 	my @current = split_lines($current);
 	my @manual = grep { !$previous{$_} } @current;
 	my %manual_by_key;
 	push @{ $manual_by_key{ line_key('reading', $_) } }, $_ for @manual;
+	my $manual_json_patterns = _manual_json_topic_patterns(\@manual, $device_topic);
 	my %remove;
 	my @prepared;
 
 	# JSON-Autocreate kann mehrere Readings aus einer Zeile erzeugen. Vor dem
 	# Rendern werden deshalb Konflikte gegen manuell gepflegte Namen aufgeloest.
 	for my $entry (@{ $entries || [] }) {
+		my $kind = ref($entry) eq 'HASH' ? ($entry->{kind} || '') : '';
+		my $json_topic_entry = $kind eq 'json_reading' || $kind eq 'json_autocreate'
+			|| $kind eq 'json_sequence';
+
+		# Ein vorhandener manueller JSON-Sammelhandler gewinnt konservativ fuer
+		# dasselbe Topic, damit MQTT2_DEVICE den Payload nicht zweimal auswertet.
+		if ($mode eq 'conservative' && $json_topic_entry
+				&& _manual_json_handler_covers($manual_json_patterns, $entry, $cid)) {
+			my $conflict = $entry->{name} // '';
+			$conflict = 'topic:' . ($entry->{topic} // '') if $conflict eq '';
+			push @$conflicts, $conflict;
+			next;
+		}
 
 		# Andere Entry-Arten benoetigen keine JSON-Namensaufloesung und bleiben
 		# deshalb unveraendert in ihrer urspruenglichen Reihenfolge erhalten.
 		if (ref($entry) ne 'HASH'
-				|| (($entry->{kind} || '') ne 'json_reading' && ($entry->{kind} || '') ne 'json_autocreate')) {
+				|| ($kind ne 'json_reading' && $kind ne 'json_autocreate')) {
 			push @prepared, $entry;
 			next;
 		}

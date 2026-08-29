@@ -329,6 +329,12 @@ sub _semantic_entity {
 	} elsif ($component eq 'button') {
 		my $set_name = _single_set_name($sets, $reading_name);
 		$capabilities->{press} = { write => $set_name, argument => 0 } if $has_set{$set_name};
+	} elsif ($component eq 'update') {
+		$capabilities->{state} = { read => $read_name{$reading_name} }
+			if defined($read_name{$reading_name});
+		my $set_name = _single_set_name($sets, 'install');
+		$capabilities->{install} = { write => $set_name, argument => 0 }
+			if $has_set{$set_name};
 	} elsif ($component eq 'number') {
 		my %value;
 		$value{read} = $read_name{$reading_name} if defined($read_name{$reading_name});
@@ -462,6 +468,45 @@ sub _semantic_entity {
 			}
 			$capabilities->{power} = $power_capability;
 		}
+	} elsif ($component eq 'media_player') {
+		$capabilities->{state} = { read => $read_name{$reading_name} }
+			if defined($read_name{$reading_name});
+		my $volume_name = "${reading_name}_volume";
+		my $volume_set = $set_name{$volume_name} // 'volume';
+
+		# Lautstaerke wird als Prozentwert verbunden, sobald Reading oder Setter
+		# im zuvor erzeugten Mapping tatsaechlich vorhanden ist.
+		if (defined($read_name{$volume_name}) || $has_set{$volume_set}) {
+			my %volume = (min => 0, max => 100, step => 1, unit => '%');
+			$volume{read} = $read_name{$volume_name} if defined($read_name{$volume_name});
+			$volume{write} = $volume_set if $has_set{$volume_set};
+			$capabilities->{volume} = \%volume;
+		}
+		my $mute_name = "${reading_name}_mute";
+		my $mute_set = $set_name{$mute_name} // 'mute';
+
+		# Der Sonos-Status liefert JSON-Boolean, die Bedienoberflaeche verwendet
+		# die stabilen Auswahlwerte on/off des erzeugten FHEM-Setters.
+		if (defined($read_name{$mute_name}) || $has_set{$mute_set}) {
+			my %mute = (
+				kind => 'boolean', options => ['on', 'off'],
+				activeValue => 'on', inactiveValue => 'off',
+				valueMap => { read => {
+					true => 'on', false => 'off', 1 => 'on', 0 => 'off',
+				} },
+			);
+			$mute{read} = $read_name{$mute_name} if defined($read_name{$mute_name});
+			$mute{write} = $mute_set if $has_set{$mute_set};
+			$capabilities->{mute} = \%mute;
+		}
+
+		# Jede vorhandene argumentlose Transportaktion wird als eigene semantische
+		# Capability sichtbar; fehlende Befehle werden nicht vorgetaeuscht.
+		for my $action (qw(play pause stop toggle next previous)) {
+			$capabilities->{$action} = { write => $action, argument => 0 }
+				if $has_set{$action};
+		}
+
 	} elsif ($component eq 'light') {
 		my $state_set = $read_name{$reading_name} // "${reading_name}_state";
 		$capabilities->{power} = _power_capability(
