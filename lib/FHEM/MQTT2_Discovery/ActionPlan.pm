@@ -15,14 +15,6 @@ sub new {
 	return bless { actions => [] }, $class;
 }
 
-# Liefert eine defensive Kopie aller geplanten Aenderungen zur Diagnose oder Kontrolle.
-sub actions {
-	my ($self) = @_;
-
-	# Aufrufer erhalten Kopien und koennen den internen Plan nicht veraendern.
-	return [ map { +{ %$_ } } @{ $self->{actions} } ];
-}
-
 # Haengt eine validierte Attributaenderung samt Ruecksprungwert an den Plan an.
 sub set_attribute {
 	my ($self, %args) = @_;

@@ -1,24 +1,24 @@
 # MQTT2_DISCOVERY
 
-`MQTT2_DISCOVERY` verarbeitet Home-Assistant-MQTT-Discovery und das native
-Tasmota-Discovery-Protokoll in FHEM. Daraus erzeugt es konservativ verwaltete
-`MQTT2_DEVICE`-Definitionen. 
+`MQTT2_DISCOVERY` verarbeitet Home-Assistant-MQTT-Discovery sowie die nativen
+Discovery-Protokolle von Tasmota und Sonos2mqtt in FHEM. Daraus erzeugt es
+konservativ verwaltete `MQTT2_DEVICE`-Definitionen.
 
 ## Architektur und Discovery-Formate
 
 Eingehende Konfigurationen werden zuerst durch eine geordnete Format-Registry
-klassifiziert. Spezifische Adapter wie Tasmota stehen vor dem allgemeinen
-Home-Assistant-Adapter. Ein Adapter, der ein Topic beansprucht, liefert entweder
+klassifiziert. Spezifische Adapter wie Sonos2mqtt und Tasmota stehen vor dem
+allgemeinen Home-Assistant-Adapter. Ein Adapter, der ein Topic beansprucht, liefert entweder
 ein gueltiges Ergebnis oder einen sichtbaren Fehler; fehlerhafte Nachrichten
 fallen nicht versuchsweise auf ein anderes Format zurueck.
 
 Jeder Adapter normalisiert sein Protokoll in das versionierte kanonische Modell
 `mqtt2-discovery/1`. Es trennt Device-Identitaet, lesbare `signals`, schreibbare
-`commands`, `availability` und die sie verbindenden `capabilities`. Erst danach
-erzeugt der allgemeine Mapper FHEM-`readingList`, `setList` und konservative
+`commands` und `availability`. Erst danach erzeugt der allgemeine Mapper
+FHEM-`readingList`, `setList` und konservative
 Semantic-Metadaten. Der Mapper kennt weder Home-Assistant-Kurzformen noch native
-Tasmota-Discovery-Payloads. Das Modell und die Erweiterung um weitere Adapter
-sind in [docs/canonical-model.md](docs/canonical-model.md) beschrieben.
+Tasmota- oder Sonos2mqtt-Discovery-Payloads. Das Modell und die Erweiterung um
+weitere Adapter sind in [docs/canonical-model.md](docs/canonical-model.md) beschrieben.
 
 Normale MQTT-State-Nachrichten werden nicht als Discovery beansprucht. Ein Topic
 wie `zigbee2mqtt/wohnzimmer` erreicht weiterhin das passende `MQTT2_DEVICE`; nur
@@ -58,13 +58,21 @@ Moduls an. Nach einem Modulupdate ist `shutdown restart` erforderlich.
 ## Konfiguration
 
 - `discoveryPrefixes`: kommaseparierte Prefixe, Default
-  `homeassistant,tasmota/discovery`
+  `homeassistant,tasmota/discovery,sonos2mqtt`
 - `deviceNamePrefix`: optionaler Prefix fuer neu angelegte Device-Namen. Ohne das
   Attribut wird nichts vorangestellt, beispielsweise entsteht der Name `Node`.
   Mit `attr mqttDiscovery deviceNamePrefix Tasmota_` wird daraus `Tasmota_Node`.
 - `existingDevice`: `conservative`, `ignore` oder `replace`
+- `extraJsonReadings`: `include` oder `ignore`, Default `include`; `include`
+  entpackt auch nicht konkret angekuendigte JSON-Felder, `ignore` rendert nur
+  die durch Discovery bekannten Felder
+- `availabilityReading`: optionaler, fuer alle von dieser Discovery-Instanz
+  verwalteten Devices verbindlicher Name des sichtbaren Availability-Readings;
+  ohne Attribut lautet er `deviceAvailability`
 - `autoCreate`: `0` oder `1`, Default `1`
 - `autoDelete`: `0` oder `1`, Default `0`
+- `createReadings`: `0` oder `1`, Default `0`; bei `1` werden sicher aus
+  Discovery ableitbare State-Readings sofort mit leerem Wert angelegt
 - `disable`: `0` oder `1`, Default `0`; bei `1` werden Discovery-Nachrichten ohne Aenderungen konsumiert
 
 Die Zielauflösung folgt dabei der Geräteidentität des FHEM-`MQTT2_DEVICE`-
@@ -87,12 +95,37 @@ denselben sicheren Fallback.
 Eine Aenderung von `deviceNamePrefix` gilt fuer Devices, die danach erstmals
 entdeckt und angelegt werden.
 
+
 Mit `attr mqttDiscovery disable 1` kann das Modul bereits beim FHEM-Start kontrolliert
 deaktiviert bleiben. Nach `deleteattr mqttDiscovery disable` verarbeitet es wieder neue
 Discovery-Nachrichten. Retained Nachrichten eines `MQTT2_SERVER` koennen danach gezielt
 mit `set mqttDiscovery rescan` verarbeitet werden.
 
 `rescan` verarbeitet beim `MQTT2_SERVER` dessen lokalen Retain-Cache. `MQTT2_CLIENT` besitzt keinen entsprechenden Cache; dort muessen retained Discovery-Nachrichten durch Broker-Replay bzw. Reconnect eintreffen.
+
+Mit `get mqttDiscovery devices` zeigt FHEMWEB alle aktuell vorhandenen
+`MQTT2_DEVICE`-Devices am gebundenen IODev in einem Popup. Zwei alphabetisch
+sortierte Tabellen trennen die von dieser Discovery-Instanz verwalteten Devices
+von den nicht verwalteten. Auch uebernommene Bestandsdevices gelten als
+verwaltet; veraltete Registry-Eintraege ohne vorhandenes Device werden nicht
+angezeigt. Jeder Devicename fuehrt als Link direkt zur FHEMWEB-Detailansicht.
+
+Mit `set mqttDiscovery rebuildDevice <MQTT2_DEVICE>` werden `devicetopic`,
+`readingList` und `setList` eines bereits verwalteten Devices vollstaendig aus
+dem gespeicherten Discovery-Stand neu erzeugt. `devicetopic` wird dabei auf den
+tiefsten gemeinsamen segmentgenauen Topic-Stamm normalisiert und beide Listen
+werden passend relativ dazu aufgebaut. Vorhandene manuelle Zeilen sowie ein
+abweichendes `devicetopic` werden unabhaengig von `existingDevice` verworfen;
+andere Attribute und bestehende Readingwerte bleiben unveraendert. Der Befehl
+fordert keine neuen Nachrichten vom Broker an.
+
+Der optionale Zusatz
+`set mqttDiscovery rebuildDevice <MQTT2_DEVICE> clearReadings` entfernt erst
+nach dem erfolgreichen Listen-Neuaufbau alle nicht versteckten Readings,
+einschliesslich manueller Werte. Versteckte Readings mit fuehrendem Punkt bleiben
+erhalten. Availability und durch `createReadings` ausgewaehlte Readings werden
+danach neu initialisiert; alle anderen Werte erscheinen erst mit neuen
+MQTT-Nachrichten wieder.
 
 Fehler bleiben pro Discovery-Topic sichtbar, bis genau dieses Topic korrigiert
 oder geloescht wird. `errorCount`, `lastError`, `lastErrorAdapter` und
@@ -114,7 +147,11 @@ erkannt.
 
 Angekuendigte State-Topics werden als FHEM-Readings in die `readingList`
 uebernommen, schreibbare Command-Topics mit ihren Wertebereichen und Optionen in
-die `setList`. Availability, Templates, Einheiten, Geraete- und Zustandsklassen
+die `setList`. Mit `createReadings 1` legt das Modul sicher angekuendigte
+Reading-Namen sofort mit leerem Wert an, ohne bereits vorhandene Werte zu
+ueberschreiben. Die Darstellung des leeren Wertes bleibt FHEM ueberlassen. Frei
+entpackte JSON-Felder und JSON-Sequenzen entstehen weiterhin erst mit den
+entsprechenden Nutzdaten. Availability, Templates, Einheiten, Geraete- und Zustandsklassen
 sowie weitere Komponenteneigenschaften fliessen in die Abbildung und die
 Semantic-Metadaten ein. Zusammengehoerige Entities werden anhand der von
 Discovery gelieferten Geraeteidentitaet einem gemeinsamen `MQTT2_DEVICE`
@@ -122,7 +159,8 @@ zugeordnet. Ein leerer retained Config-Payload entfernt die zuvor ueber dieses
 Topic angekuendigte Entity beziehungsweise das gesamte Device aus der
 Discovery-Verwaltung.
 
-Das sichtbare Reading `availability` verknuepft die angekuendigten
+Das sichtbare Reading `deviceAvailability` beziehungsweise der mit
+`availabilityReading` festgelegte Name verknuepft die angekuendigten
 Availability-Quellen mit dem Zustand des am `MQTT2_DISCOVERY` gebundenen IODev.
 Verliert beispielsweise ein `MQTT2_CLIENT` seine Brokerverbindung, gehen alle
 von dieser Discovery-Instanz verwalteten Devices offline. Nach dem Reconnect
@@ -132,7 +170,7 @@ Quelle noch nie eingetroffen, bleibt das sichtbare Reading auf `unknown`. Fuer
 jedes neu angewendete Availability-Topic an einem `MQTT2_CLIENT` wird genau ein
 Timer angelegt, der nach 60 Sekunden nur dieses Retained-Topic abonniert. Der
 normale MQTT-Datenstrom wird dabei weder gecacht noch von Discovery ausgewertet.
-Ein gleichnamiges Nutzdatenfeld wird kollisionsfrei als `state_availability`
+Ein gleichnamiges Nutzdatenfeld wird kollisionsfrei als `state_deviceAvailability`
 beziehungsweise mit seinem qualifizierten Entity-Namen angelegt. Wird das gebundene
 `MQTT2_SERVER`- oder `MQTT2_CLIENT`-Device geloescht, verwirft Discovery zudem
 seine ausstehende Queue, setzt alle verwalteten Ziele offline und wechselt selbst
@@ -141,7 +179,9 @@ auf `inactive`.
 Gueltige MQTT-Wildcards in eingehenden HA-Topicfiltern werden unterstuetzt:
 `+` steht fuer genau ein Topicsegment, ein abschliessendes `#` fuer beliebig
 viele Untersegmente. Der sichere Template-Interpreter versteht ausserdem den
-HA-Filter `is_defined`. Bei `device_automation` stehen die Triggerpfade
+HA-Filter `is_defined`, die Existenztests `is defined`, `is not defined` und
+`is undefined`, bedingte Ausdruecke mit optionalem `else` sowie flache
+`if`/`elif`/`else`-Bloecke. Bei `device_automation` stehen die Triggerpfade
 `trigger.value`, `trigger.value_json`, `trigger.payload` und
 `trigger.payload_json` zur Verfuegung.
 
@@ -151,8 +191,9 @@ Aktuelle Tasmota-Versionen senden standardmaessig keine klassischen
 `homeassistant/.../config`-Nachrichten mehr. Stattdessen werden je Geraet die
 beiden retained Topics `tasmota/discovery/<MAC>/config` und
 `tasmota/discovery/<MAC>/sensors` veroeffentlicht. Home Assistant und Tasmota
-Discovery sind deshalb standardmaessig aktiv. Falls `discoveryPrefixes` bereits
-abweichend gesetzt ist, laesst sich der Default so wiederherstellen:
+Discovery sind gemeinsam mit Sonos2mqtt standardmaessig aktiv. Falls
+`discoveryPrefixes` bereits abweichend gesetzt ist, laesst sich der aktuelle
+Default so wiederherstellen:
 
 ```text
 deleteattr mqttDiscovery discoveryPrefixes
@@ -172,6 +213,20 @@ Arraykanaele uebernommen, beispielsweise `Power[0]` als `power` in `W`,
 `ApparentPower[0]` als `apparent_power` in `VA`, `ReactivePower[0]` als
 `reactive_power` in `var` und `Current[0]` als `current` in `A`. Der von Tasmota
 zwischen `0` und `1` gelieferte Leistungsfaktor bleibt dimensionslos.
+
+## Sonos2mqtt Discovery
+
+Sonos2mqtt verwendet ein eigenes, retained Discovery-Format unter
+`sonos2mqtt/discovery/<mqttPrefix>/<RINCON>`. Der Adapter normalisiert jeden
+angekuendigten Speaker als kanonischen `media_player` und legt pro Sonos-Raum ein
+`MQTT2_DEVICE` an.
+
+Das Device liest `transportState`, `volume`, `mute` und die gemeinsame
+Sonos2mqtt-Verfuegbarkeit. Es stellt die Sets `play`, `pause`, `stop`, `toggle`,
+`next`, `previous`, `volume` und `mute` bereit. Beim Availability-Topic
+`<mqttPrefix>/connected` gilt nur der Sonos2mqtt-Status `2` als online; `0` und
+`1` bleiben offline, weil dabei keine verwendbare Verbindung zu den Speakern
+besteht.
 
 Live eintreffende Discovery-Konfigurationen werden ueber eine kurze interne Queue
 in getrennten Topic- und Device-Schritten verarbeitet. Pro Timer-Tick wird hoechstens
@@ -193,18 +248,18 @@ tatsaechlich erzeugten Rohreadings. Da jeweils der komplette Payload ausgewertet
 wird, koennen auch weitere von Tasmota gesendete Felder als Readings erscheinen.
 
 Einfache Home-Assistant-Templates wie `{{ value_json.ENERGY.Power[0] }}` werden
-nicht als eigene Runtime-Aufrufe gespeichert. Alle einfachen JSON-Pfade desselben
-State-Topics werden in einer einzigen `json2nameValue()`-Zeile zusammengefasst.
-Dasselbe gilt fuer die gleichwertige Jinja-Schreibweise mit literalem Schluessel,
-beispielsweise `{{ value_json.get('battery') }}`.
-Das inline sichtbare Mapping enthaelt nur echte Abweichungen zwischen JSON-Schluessel
-und dem von Discovery abgeleiteten Reading-Namen. Identische Namen bleiben bei
-`json2nameValue()` auch ohne Eintrag unveraendert. Zusaetzlich enthaelt die
-Auswertung die allgemeine Schutzabbildung von `availability` auf
-`state_availability`, da das sichtbare Availability-Reading fuer den IO-Zustand
-reserviert ist. Ein verankerter Filter aus den finalen Reading-Namen begrenzt
-explizite Discovery-Pfade auf die tatsaechlich angekuendigten JSON-Felder. Weitere
-Felder desselben Payloads erzeugen dadurch keine zusaetzlichen Readings.
+nicht als einzelne Runtime-Aufrufe gespeichert. Alle explizit angekuendigten
+JSON-Pfade und komplexen Templates desselben State-Topics werden in einer einzigen
+kompakten `MQTT2_DISCOVERY_runtimeRef()`-Zeile zusammengefasst. Dasselbe gilt fuer die
+gleichwertige Jinja-Schreibweise mit literalem Schluessel, beispielsweise
+`{{ value_json.get('battery') }}`. Die sichere Template-Engine liest dabei nur die
+tatsaechlich angekuendigten Werte; weitere Felder desselben Payloads erzeugen keine
+zusaetzlichen Readings. Enthalten umfangreiche JSON-Payloads selbst escapete
+JSON-Beispiele, bleiben diese fuer nicht angekuendigte Felder unangetastet.
+
+Verwendet Availability dasselbe MQTT-Topic wie ein fachliches Reading, liefert
+dieselbe Runtime-Zeile beide Ergebnisse atomar. Damit reagiert jede erzeugte
+`readingList` pro Funktionstopic nur einmal auf eine Nachricht.
 
 Nur Adapter mit aktiviertem `json_autocreate`, insbesondere die nativen
 Tasmota-State-Klassen, entpacken weiterhin bewusst alle Felder eines Payloads.
@@ -322,18 +377,6 @@ perl tools/generate_controls.pl
 PERL5OPT=-Mwarnings=FATAL prove -I tests/lib -lv tests
 ```
 
-Der mitgelieferte Pre-Commit-Hook erzeugt das Controlfile bei jedem Commit neu
-und nimmt es automatisch in den Commit auf. Er wird pro lokaler Arbeitskopie
-einmalig aktiviert:
-
-```text
-git config core.hooksPath .githooks
-```
-
-Auf Systemen mit Unix-Dateirechten muss `.githooks/pre-commit` ausfuehrbar sein.
-Die Aktivierung laesst sich mit `git config --get core.hooksPath` pruefen. Der
-Hook bricht den Commit ab, wenn das Controlfile nicht erzeugt oder nicht zum
-Commit hinzugefuegt werden kann.
 
 ## Copyright
 

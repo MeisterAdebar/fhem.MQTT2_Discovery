@@ -1,6 +1,41 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 76e54db756a210b28cd6006c82a46779f500871432d2893b41dd0504aa11fbd8
+# Msg-SHA256: 9d93cae55ceff4dcabd0effe7baf2f4de034d3e328e52718e759c8eac7d9ef0b
+- change: MQTT2_DISCOVERY: - Sonos2mqtt-Laufzeitintegration und
+  End-to-End-Tests vervollstaendigt
+  - Geraeteuebersicht ueber get devices ergaenzt
+  - rebuildDevice samt Devicetopic-Neuaufbau und clearReadings umgesetzt
+  - extraJsonReadings, availabilityReading und createReadings eingefuehrt
+  - Registryweites Neurendern nach Attributaenderungen ergaenzt
+  - Availability mehrerer Entities korrekt zum Geraetestatus verdichtet
+  - JSON-, Template- und Set-Auswertungen ueber stabile Runtime-Referenzen
+    gekapselt
+  - Unicode-Werte an der MQTT- und FHEM-Grenze eindeutig codiert
+  - Reading-Namensaufloesung und Topic-Kollisionen robuster behandelt
+  - Kanonisches Modell und Mapping-Besitzgrenzen vereinfacht
+  - Pre-Commit-Pruefung gegen ungestagte Auslieferungsdateien abgesichert
+- change: MQTT2_DISCOVERY: Sonos2mqtt integriert und Discovery-Verarbeitung
+  erweitert
+  - Sonos2mqtt als dritten Discovery-Adapter eingebunden
+  - Media-Player-Readings, Availability und Steuerbefehle abgebildet
+  - Home-Assistant-Update-Entitaeten samt Installationsbefehl unterstuetzt
+  - Root-Entities unabhaengig von Gross- und Kleinschreibung korrekt benannt
+  - Geraeteaktionen mit gemeinsamem Topic zu einem Reading zusammengefuehrt
+  - Jinja-Auswertung um defined, undefined und bedingte Ausdruecke erweitert
+  - Komplexe Templates, Mappings und JSON-Auswertungen ueber stabile
+    Runtime-Referenzen gekapselt
+  - Unicode-Werte an der FHEM- und MQTT-Grenze korrekt als UTF-8 codiert
+  - Doppelte Codierung bereits vorliegender MQTT-Bytes verhindert
+  - extraJsonReadings, availabilityReading und createReadings ergaenzt
+  - Reading-Kollisionen anhand des Topic-Pfads eindeutig aufgeloest
+  - Attributaenderungen ohne erneute Discovery-Nachrichten neu gerendert
+  - Vorhandene JSON-Sammelhandler im konservativen Modus beruecksichtigt
+  - Devicetopic-Ableitung anhand geraeteeigener Availability-Topics verbessert
+  - rebuildDevice um atomare Devicetopic- und Listenerzeugung erweitert
+  - Optionales Loeschen sichtbarer Readings beim Neuaufbau ergaenzt
+  - Rollback und Erfolgserkennung beim Loeschen von Readings korrigiert
+  - FHEMWEB-Uebersicht fuer verwaltete und nicht verwaltete Devices ergaenzt
+  - Interne Tasmota-Neuaufbauten von echten Discovery-Loeschungen getrennt
 - change: MQTT2_DISCOVERY: Availability und HA-Namensaufloesung
   vervollstaendigt
   - Availability mit IODev-Zustand und Retained-Abrufen auswerten

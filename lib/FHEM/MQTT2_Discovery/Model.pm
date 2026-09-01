@@ -23,6 +23,7 @@ my %KIND = map { $_ => 1 } qw(
 my %INTERNAL = map { $_ => 1 } qw(
 	operation prefix format component node_id object_id discovery_topic entity_key
 	component_key unique_id name preferred_entity_name device raw_metadata device_topic supplemental_signals internal_rebuild
+	entity_category json_autocreate json_reading_name
 	availability availability_topic availability_template availability_mode
 	payload_available payload_not_available
 );
@@ -79,6 +80,11 @@ my @COMMAND_BINDINGS = (
 	[power => 'power_command_topic', 'power_command_template'],
 );
 
+# Binding-Felder werden ausschliesslich ueber signals beziehungsweise commands
+# transportiert und dadurch nicht noch einmal in configuration dupliziert.
+my %BINDING_CONFIGURATION_KEY = map { ($_ => 1) }
+	grep { defined($_) } map { @$_[1 .. $#$_] } (@SIGNAL_BINDINGS, @COMMAND_BINDINGS);
+
 # Normalisiert einzelne oder mehrere Topic-Bindings in eine kanonische Liste.
 sub _binding_list {
 	my ($configuration, $specs) = @_;
@@ -125,96 +131,6 @@ sub _project_bindings {
 	}
 }
 
-# Ueberfuehrt komponentenspezifische Eigenschaften in ein einheitliches Capability-Modell.
-sub _capabilities {
-	my ($kind, $signals, $commands, $configuration) = @_;
-	$kind = '' if !defined $kind;
-	my %read = map { ($_->{id} => 1) } @$signals;
-	my %write = map { ($_->{id} => 1) } @$commands;
-	my %capabilities;
-
-	# Die Closure legt eine Capability nur an, wenn mindestens eine ihrer
-	# Richtungen im Entity-Modell tatsaechlich vorhanden ist.
-	my $add = sub {
-		my ($name, $read_id, $write_id) = @_;
-		my %capability;
-		$capability{read} = $read_id if defined($read_id) && $read{$read_id};
-		$capability{write} = $write_id if defined($write_id) && $write{$write_id};
-		return if !%capability;
-		$capability{value} = {
-			type => $kind eq 'binary_sensor' || $kind eq 'switch' ? 'boolean'
-				: $kind eq 'number' ? 'number'
-				: $kind eq 'select' ? 'enum' : 'string',
-			(defined($configuration->{unit_of_measurement})
-				? (unit => $configuration->{unit_of_measurement}) : ()),
-			(defined($configuration->{device_class})
-				? (device_class => $configuration->{device_class}) : ()),
-			(defined($configuration->{state_class})
-				? (state_class => $configuration->{state_class}) : ()),
-		};
-
-		for my $key (qw(min max step options)) {
-			$capability{value}{$key} = $configuration->{$key} if defined($configuration->{$key});
-		}
-
-		$capabilities{$name} = \%capability;
-	};
-
-	# Die Geraeteklasse bestimmt das fachliche Capability-Vokabular und damit,
-	# welche vorhandenen Signal-/Command-Bindings miteinander verknuepft werden.
-	if ($kind eq 'sensor' || $kind eq 'text' || $kind eq 'event'
-			|| $kind eq 'number' || $kind eq 'select') {
-		$add->('value', 'state', 'command');
-	} elsif ($kind eq 'update') {
-		$add->('state', 'state', undef);
-		$add->('install', undef, 'command');
-	} elsif ($kind eq 'binary_sensor' || $kind eq 'device_tracker') {
-		$add->('state', 'state', undef);
-	} elsif ($kind eq 'switch') {
-		$add->('power', 'state', 'command');
-	} elsif ($kind eq 'button') {
-		$add->('press', undef, 'command');
-	} elsif ($kind eq 'climate') {
-
-		for my $id (qw(current_temperature current_humidity target_temperature
-				target_temperature_high target_temperature_low target_humidity mode fan_mode
-				swing_mode swing_horizontal_mode preset_mode action power)) {
-			$add->($id, $id, $id);
-		}
-
-	} elsif ($kind eq 'light') {
-		$add->('power', 'state', 'command');
-		$add->($_, $_, $_) for qw(brightness color_temperature rgb effect white);
-	} elsif ($kind eq 'cover') {
-		$add->('state', 'state', undef);
-		$add->('action', undef, 'command');
-		$add->($_, $_, $_) for qw(position tilt);
-	} elsif ($kind eq 'fan') {
-		$add->('power', 'state', 'command');
-		$add->('percentage', 'percentage', 'percentage');
-	} elsif ($kind eq 'media_player') {
-		$add->('state', 'state', undef);
-		$add->('volume', 'volume', 'volume');
-		$add->('mute', 'mute', 'mute');
-		$add->($_, undef, 'command') for qw(play pause stop toggle next previous);
-
-		# Lautstaerke und Mute erhalten ihre fachlichen Werttypen statt des
-		# allgemeinen String-Fallbacks einer zusammengesetzten Komponente.
-		if (ref($capabilities{volume}) eq 'HASH') {
-			$capabilities{volume}{value} = {
-				type => 'number', min => 0, max => 100, step => 1, unit => '%',
-			};
-		}
-		if (ref($capabilities{mute}) eq 'HASH') {
-			$capabilities{mute}{value} = { type => 'boolean' };
-		}
-	} elsif ($kind eq 'lock') {
-		$add->('state', 'state', undef);
-		$add->('action', undef, 'command');
-	}
-	return \%capabilities;
-}
-
 # Konvertiert eine Parser-Entity in ein formatunabhaengiges kanonisches Event.
 sub from_entity {
 	my (%args) = @_;
@@ -222,7 +138,7 @@ sub from_entity {
 	return undef if ref($source) ne 'HASH';
 	my $operation = $source->{operation} || 'upsert';
 	my %configuration = map { ($_ => $source->{$_}) }
-		grep { !$INTERNAL{$_} } keys %$source;
+		grep { !$INTERNAL{$_} && !$BINDING_CONFIGURATION_KEY{$_} } keys %$source;
 	my @availability;
 	my $payload_available = exists($source->{payload_available})
 		? $source->{payload_available} : 'online';
@@ -260,8 +176,8 @@ sub from_entity {
 
 	my $layout = $source->{format} || 'entity';
 	my $component = $source->{component};
-	my $signals = _binding_list(\%configuration, \@SIGNAL_BINDINGS);
-	my $commands = _binding_list(\%configuration, \@COMMAND_BINDINGS);
+	my $signals = _binding_list($source, \@SIGNAL_BINDINGS);
+	my $commands = _binding_list($source, \@COMMAND_BINDINGS);
 
 	# Ab diesem Punkt werden Protokolldetails nur noch als Source/Extensions
 	# transportiert; die Kernfelder haben fuer alle Adapter dieselbe Bedeutung.
@@ -289,7 +205,6 @@ sub from_entity {
 		},
 		signals => $signals,
 		commands => $commands,
-		capabilities => _capabilities($component, $signals, $commands, \%configuration),
 		availability => \@availability,
 		availability_mode => @availability
 			? ($source->{availability_mode} // 'latest') : undef,
@@ -302,8 +217,8 @@ sub from_entity {
 	# einem extern ausgeloesten Discovery-Loeschereignis.
 	$model->{extensions}{internal_rebuild} = 1 if $source->{internal_rebuild};
 
-	for my $key (qw(json_autocreate json_reading_name state_reading_name)) {
-		$model->{extensions}{$key} = $configuration{$key} if exists($configuration{$key});
+	for my $key (qw(json_autocreate json_reading_name)) {
+		$model->{extensions}{$key} = $source->{$key} if exists($source->{$key});
 	}
 
 	$model->{extensions}{supplemental_signals} = [
@@ -352,7 +267,6 @@ sub validate {
 		if defined($model->{entity}{logical_name}) && ref($model->{entity}{logical_name});
 	return 'Kanonische Signals-Liste fehlt' if ref($model->{signals}) ne 'ARRAY';
 	return 'Kanonische Commands-Liste fehlt' if ref($model->{commands}) ne 'ARRAY';
-	return 'Kanonische Capabilities fehlen' if ref($model->{capabilities}) ne 'HASH';
 
 	for my $collection (qw(signals commands availability)) {
 		return "Ungueltiger Eintrag in $collection"
@@ -407,19 +321,6 @@ sub validate {
 
 		}
 
-	}
-
-	my %signal = map { ($_->{id} => 1) } @{ $model->{signals} };
-	my %command = map { ($_->{id} => 1) } @{ $model->{commands} };
-
-	# Capabilities duerfen nur auf zuvor deklarierte Bindings verweisen.
-	for my $name (keys %{ $model->{capabilities} }) {
-		my $capability = $model->{capabilities}{$name};
-		return "Ungueltige Capability $name" if ref($capability) ne 'HASH';
-		return "Capability $name verweist auf unbekanntes Signal"
-			if defined($capability->{read}) && !$signal{$capability->{read}};
-		return "Capability $name verweist auf unbekannten Command"
-			if defined($capability->{write}) && !$command{$capability->{write}};
 	}
 
 	return undef;
@@ -482,6 +383,7 @@ sub to_entity {
 		unique_id       => $entity->{unique_id},
 		name            => $entity->{name},
 		preferred_entity_name => $entity->{logical_name},
+		entity_category => $entity->{category},
 		discovery_topic => $source->{topic},
 		entity_key      => $source->{key},
 		device          => ref($model->{device}) eq 'HASH' ? { %{ $model->{device} } } : {},

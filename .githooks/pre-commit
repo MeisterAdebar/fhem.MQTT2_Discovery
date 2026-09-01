@@ -10,10 +10,65 @@ my $root = File::Spec->rel2abs(
 );
 chdir $root or die "Kann nicht in das Projektverzeichnis $root wechseln: $!\n";
 
+my @delivery_pathspecs = (
+	'FHEM/10_MQTT2_DISCOVERY.pm',
+	':(glob)lib/FHEM/MQTT2_Discovery/**/*.pm',
+);
+
+# Fuehrt einen Git-Lesebefehl aus und liefert dessen Exitcode fuer die
+# fachliche Auswertung durch den Hook zurueck.
+sub git_exit_code {
+	my (@arguments) = @_;
+	my $status = system('git', @arguments);
+	die "Git-Befehl konnte nicht gestartet werden: $!\n" if $status == -1;
+	return $status >> 8;
+}
+
+# Liest die unveraenderte Git-Ausgabe ein, damit auch Dateinamen mit
+# Leerzeichen ueber die NUL-Trennung sicher ausgewertet werden koennen.
+sub git_output {
+	my (@arguments) = @_;
+	open my $pipe, '-|', 'git', @arguments
+		or die "Git-Befehl konnte nicht gestartet werden: $!\n";
+	local $/;
+	my $output = <$pipe> // '';
+	my $closed = close $pipe;
+	my $status = $? >> 8;
+	die "Git-Befehl ist mit Exitcode $status fehlgeschlagen.\n" if !$closed;
+	return $output;
+}
+
+# Die Control-Datei darf nur aus Produktionsdateien erzeugt werden, deren
+# Working-Tree-Inhalt exakt dem fuer den Commit vorgemerkten Index entspricht.
+my $diff_exit = git_exit_code('diff', '--quiet', '--', @delivery_pathspecs);
+if ($diff_exit == 1) {
+	die <<'ERROR';
+Commit abgebrochen: Auslieferungsdateien enthalten ungestagte oder nur teilweise gestagte Aenderungen.
+Bitte alle gewuenschten Produktionsaenderungen vollstaendig stagen und den Commit erneut starten.
+ERROR
+}
+die "Pruefung der gestagten Auslieferungsdateien ist mit Exitcode $diff_exit fehlgeschlagen.\n"
+	if $diff_exit != 0;
+
+my $untracked_output = git_output(
+	'ls-files', '--others', '-z', '--', @delivery_pathspecs,
+);
+my @untracked_delivery = grep {
+	$_ eq 'FHEM/10_MQTT2_DISCOVERY.pm'
+		|| m{\Alib/FHEM/MQTT2_Discovery/.*\.pm\z}
+} split /\0/, $untracked_output;
+
+# Neue Produktionsmodule muessen vor der Control-Generierung im Index liegen,
+# damit kein Eintrag auf eine im Commit fehlende Datei verweist.
+if (@untracked_delivery) {
+	die "Commit abgebrochen: Folgende Auslieferungsdateien sind noch nicht gestaged:\n"
+		. join('', map { "  $_\n" } @untracked_delivery)
+		. "Bitte die gewuenschten Dateien stagen und den Commit erneut starten.\n";
+}
+
 my $generator = File::Spec->catfile('tools', 'generate_controls.pl');
 system($^X, $generator) == 0
 	or die "Erzeugen von controls_MQTT2_DISCOVERY.txt fehlgeschlagen.\n";
 
 system('git', 'add', '--', 'controls_MQTT2_DISCOVERY.txt') == 0
 	or die "Staging von controls_MQTT2_DISCOVERY.txt fehlgeschlagen.\n";
-

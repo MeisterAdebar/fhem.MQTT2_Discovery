@@ -91,13 +91,6 @@ sub _plain_topic {
 	return 1;
 }
 
-# Bereitet ein Topic fuer eingebettete Perl-Ausdruecke in readingList oder setList auf.
-sub _inline_topic {
-	my ($topic) = @_;
-	return defined($topic) && ($topic =~ /^\$DEVICETOPIC(?:\/[A-Za-z0-9_.:+-]+)*$/
-		|| $topic =~ m{^[A-Za-z0-9_.:+/-]+$});
-}
-
 # Quotiert einen skalaren Wert als sicheres einfaches Perl-Stringliteral.
 sub _perl_quote {
 	my ($value) = @_;
@@ -202,6 +195,33 @@ sub retain_enabled {
 	return $normalised eq '1' || $normalised eq 'true';
 }
 
+# Liefert die im Set-Widget sichtbaren Choice-Werte aus dem deklarativen Eintrag.
+sub visible_set_values {
+	my ($entry, $device_topic) = @_;
+	return [] if ref($entry) ne 'HASH' || ($entry->{kind} || '') !~ /^(?:choice|json_choice)$/;
+	my @keys = split /,/, ($entry->{spec} // ''), -1;
+	return \@keys if !@keys || grep { $_ eq '' } @keys;
+	my $mapping = $entry->{mapping};
+	return \@keys if ref($mapping) ne 'HASH';
+	my $topic = _command_topic(_topic($entry->{topic}, $device_topic), $entry->{retain});
+
+	# Normale Choices zeigen gemappte Werte nur bei der nativen Gross- oder
+	# Kleinschreibungsform; Runtime-Referenzen behalten die deklarierte Auswahl.
+	if (($entry->{kind} || '') eq 'choice') {
+		return \@keys if defined($entry->{template}) && $entry->{template} ne ''
+			|| !_plain_topic($topic) || grep { !exists($mapping->{$_}) } @keys;
+		my $all_upper = !grep { "$mapping->{$_}" ne uc($_) } @keys;
+		my $all_lower = !grep { "$mapping->{$_}" ne lc($_) } @keys;
+		return ($all_upper || $all_lower) ? [map { $mapping->{$_} } @keys] : \@keys;
+	}
+
+	my @values = map { $mapping->{$_} } @keys;
+	my %seen;
+	return \@keys if !_plain_topic($topic)
+		|| grep { !defined($_) || ref($_) || $_ !~ /^[A-Za-z0-9_.-]+$/ || $seen{$_}++ } @values;
+	return \@values;
+}
+
 # Liefert das validierte Zieltopic eines abstrakten Set-Eintrags.
 sub _command_topic {
 	my ($topic, $retain) = @_;
@@ -239,55 +259,19 @@ sub _runtime_set_descriptor {
 	return $descriptor;
 }
 
-# Leitet aus einem gerenderten Eintrag seine rein deklarative Runtime-Beschreibung ab.
-sub _runtime_descriptor {
-	my ($entry) = @_;
-	return undef if ref($entry) ne 'HASH';
-	return $entry->{runtime_descriptor} if ref($entry->{runtime_descriptor}) eq 'HASH';
-	my $kind = $entry->{kind} || '';
-
-	# Einzelreadings benoetigen nur dann eine Referenz, wenn ein Template zur
-	# Laufzeit ausgewertet werden muss; direkte Topic-Reading-Zeilen bleiben kurz.
-	if ($kind eq 'reading' && defined($entry->{template}) && $entry->{template} ne '') {
-		return {
-			operation => 'reading',
-			runtime => ($entry->{template_context} || '') eq 'trigger'
-				? 'triggerReading' : 'reading',
-			template => $entry->{template}, name => $entry->{name},
-		};
-	}
-
-	# Device-Automationen filtern erst den sicher gerenderten Triggerwert und
-	# speichern deshalb Payloadvertrag und Template gemeinsam hinter der Referenz.
-	if ($kind eq 'device_automation_group'
-			&& defined($entry->{template}) && $entry->{template} ne '') {
-		return {
-			operation => 'reading', runtime => 'triggerReading',
-			template => $entry->{template}, name => $entry->{name},
-			filter => {
-				match_all => $entry->{match_all} ? 1 : 0,
-				payloads => $entry->{payloads},
-			},
-		};
-	}
-
-	# Komplexe Set-Ausdruecke und nicht-ASCII-Payloads werden aus dem sichtbaren
-	# Attribut entfernt. Native ASCII-Zeilen bleiben dagegen direkt lesbar.
-	if ($kind =~ /^(?:publish|choice|button|json|json_choice)$/) {
-		my $line = $entry->{line} || '';
-		return undef if $line !~ /MQTT2_DISCOVERY_runtime|\{my %map=|[^\x00-\x7f]/;
-		return _runtime_set_descriptor($entry);
-	}
-	return undef;
+# Verbindet den sichtbaren Set-Namen mit seiner registrierten Runtime-Beschreibung.
+sub _runtime_set_line {
+	my ($head, $entry, $references) = @_;
+	my $expression = _runtime_reference_expression(
+		_runtime_set_descriptor($entry), $references,
+	);
+	return defined($expression) ? "$head $expression" : undef;
 }
 
-# Ersetzt eine komplexe Attributzeile durch eine stabile kurze Registry-Referenz.
-sub _compact_runtime_entry {
-	my ($entry, $references) = @_;
-	return if ref($entry) ne 'HASH';
-	my $descriptor = _runtime_descriptor($entry);
-	delete $entry->{runtime_descriptor};
-	return if ref($references) ne 'HASH' || ref($descriptor) ne 'HASH';
+# Registriert eine deklarative Runtime-Beschreibung und liefert ihren kurzen Aufruf.
+sub _runtime_reference_expression {
+	my ($descriptor, $references) = @_;
+	return undef if ref($references) ne 'HASH' || ref($descriptor) ne 'HASH';
 	my $json = JSON::PP->new->canonical(1)->ascii(1)->encode($descriptor);
 	my $length = 16;
 	my $reference;
@@ -302,43 +286,28 @@ sub _compact_runtime_entry {
 	}
 	return if !defined($reference) || $length > 40;
 	$references->{$reference} = $descriptor;
-	my $expression = "{ MQTT2_DISCOVERY_runtimeRef(\$NAME, '$reference', \$EVENT) }";
-	my $kind = $entry->{kind} || '';
-
-	# setList behaelt Namen und Widget-Spezifikation sichtbar; bei readingList wird
-	# nur der ausfuehrbare Block hinter dem weiterhin lesbaren Topic ersetzt.
-	if ($kind =~ /^(?:publish|choice|button|json|json_choice)$/) {
-		my $head = $entry->{name}
-			. (defined($entry->{spec}) && $entry->{spec} ne '' ? ":$entry->{spec}" : '');
-		$entry->{line} = "$head $expression";
-	} else {
-		$entry->{line} =~ s/\s+\{.*\}\s*$/ $expression/s;
-	}
-	return;
+	return "{ MQTT2_DISCOVERY_runtimeRef(\$NAME, '$reference', \$EVENT) }";
 }
 
-# Rendert komplexe Reading-Templates ueber den sicheren Runtime-Wrapper.
+# Rendert komplexe Reading-Templates direkt als deklarative Runtime-Referenz.
 sub _render_runtime_reading {
-	my ($entry, $device_topic) = @_;
+	my ($entry, $device_topic, $references) = @_;
 	my $regex = _regex($entry->{topic}, $device_topic, $entry->{payload});
-	my $template = _perl_template_quote($entry->{template});
-	my $reading = _perl_quote($entry->{name});
-	return undef if !defined($template) || !defined($reading);
-	my $function = ($entry->{template_context} || '') eq 'trigger'
-		? 'MQTT2_DISCOVERY_runtimeTriggerReading' : 'MQTT2_DISCOVERY_runtimeReading';
-	return $regex . ' { ' . $function . '(' . $template
-		. ', $EVENT, ' . $reading . ') }';
+	my $expression = _runtime_reference_expression({
+		operation => 'reading',
+		runtime => ($entry->{template_context} || '') eq 'trigger'
+			? 'triggerReading' : 'reading',
+		template => $entry->{template}, name => $entry->{name},
+	}, $references);
+	return defined($expression) ? "$regex $expression" : undef;
 }
 
 # Rendert eine Topicgruppe von Device-Automationen in genau ein gemeinsames Reading.
 sub _render_device_automation_group {
-	my ($entry, $device_topic) = @_;
+	my ($entry, $device_topic, $references) = @_;
 	my $payloads = $entry->{payloads};
 	return undef if ref($payloads) ne 'ARRAY'
 		|| grep { !defined($_) || ref($_) || $_ =~ /[\x00-\x1f]/ } @$payloads;
-	my $reading = _perl_quote($entry->{name});
-	return undef if !defined($reading);
-
 	# Ohne Template kann bereits die readingList-Regulaerexpression alle Varianten filtern.
 	if (!defined($entry->{template}) || $entry->{template} eq '') {
 		my $filter = $entry->{match_all} ? undef : $payloads;
@@ -347,16 +316,16 @@ sub _render_device_automation_group {
 
 	# Mit Template wird zuerst der HA-Triggerwert berechnet und erst danach gegen
 	# die angekuendigten Payloads geprueft.
-	my $configuration = JSON::PP->new->canonical(1)->encode({
-		match_all => $entry->{match_all} ? 1 : 0,
-		payloads => $payloads,
-	});
-	my $template = _perl_template_quote($entry->{template});
-	my $argument = _perl_template_quote($configuration);
-	return undef if !defined($template) || !defined($argument);
-	return _regex($entry->{topic}, $device_topic, undef)
-		. ' { MQTT2_DISCOVERY_runtimeTriggerReading(' . $template
-		. ', $EVENT, ' . $reading . ', ' . $argument . ') }';
+	my $expression = _runtime_reference_expression({
+		operation => 'reading', runtime => 'triggerReading',
+		template => $entry->{template}, name => $entry->{name},
+		filter => {
+			match_all => $entry->{match_all} ? 1 : 0,
+			payloads => $payloads,
+		},
+	}, $references);
+	return defined($expression)
+		? _regex($entry->{topic}, $device_topic, undef) . " $expression" : undef;
 }
 
 # Rendert eine kompakte Wrapper-Zeile, die mehrere JSON-Readings automatisch erzeugt.
@@ -423,7 +392,7 @@ sub _render_json_group {
 
 # Rendert alle expliziten JSON- und Template-Readings eines Topics gemeinsam.
 sub _render_topic_runtime {
-	my ($topic, $entries, $availability, $device_topic) = @_;
+	my ($topic, $entries, $availability, $device_topic, $references) = @_;
 	return undef if !defined($topic) || ref($topic) || $topic eq '';
 	my @readings;
 
@@ -440,17 +409,18 @@ sub _render_topic_runtime {
 	my %configuration;
 	$configuration{readings} = \@readings if @readings;
 	$configuration{availability} = $availability if ref($availability) eq 'HASH';
-	my $configuration = JSON::PP->new->canonical(1)->encode(\%configuration);
-	my $argument = _perl_template_quote($configuration);
-	return undef if !defined($argument);
-	my $line = _regex($topic, $device_topic, undef)
-		. ' { MQTT2_DISCOVERY_runtimeTopic($NAME, $EVENT, ' . $argument . ') }';
-	return ($line, \%configuration);
+	my $expression = _runtime_reference_expression({
+		operation => 'topic', configuration => \%configuration,
+	}, $references);
+	return undef if !defined($expression);
+	my $line = _regex($topic, $device_topic, undef) . " $expression";
+	return $line;
 }
 
 # Uebersetzt genau einen abstrakten Reading- oder Set-Eintrag in FHEM-Attributsyntax.
 sub render_entry {
-	my ($entry, $device_topic) = @_;
+	my ($entry, $device_topic, $references) = @_;
+	$references = {} if ref($references) ne 'HASH';
 	return $entry->{line} if ref($entry) ne 'HASH' || !$entry->{kind};
 	my $topic = _topic($entry->{topic}, $device_topic);
 
@@ -458,12 +428,12 @@ sub render_entry {
 	if ($entry->{kind} eq 'reading') {
 		my $regex = _regex($entry->{topic}, $device_topic, $entry->{payload});
 		return "$regex $entry->{name}" if !defined($entry->{template}) || $entry->{template} eq '';
-		return _render_runtime_reading($entry, $device_topic);
+		return _render_runtime_reading($entry, $device_topic, $references);
 	}
 
 	# Topicweise reduzierte Trigger besitzen ihren eigenen Payload- und Template-Renderer.
 	if ($entry->{kind} eq 'device_automation_group') {
-		return _render_device_automation_group($entry, $device_topic);
+		return _render_device_automation_group($entry, $device_topic, $references);
 	}
 
 	# Ein einzelnes benanntes JSON-Feld nutzt denselben Gruppenrenderer wie
@@ -487,16 +457,13 @@ sub render_entry {
 	my $head = $entry->{name}
 		. (defined($entry->{spec}) && $entry->{spec} ne '' ? ":$entry->{spec}" : '');
 	$topic = _command_topic($topic, $entry->{retain});
-	my $runtime_topic = _command_topic($entry->{topic}, $entry->{retain});
 
 	# Publish kann nur bei einem unveraenderten Identitaetstemplate direkt von
 	# MQTT2_DEVICE ausgefuehrt werden; Transformationen brauchen die Runtime.
 	if ($entry->{kind} eq 'publish') {
 		# Ohne $EVENT/$EVTPART haengt MQTT2_DEVICE alle Set-Argumente selbst an und erhaelt auch Leerzeichen.
 		return "$head $topic" if $entry->{identity} && _plain_topic($topic);
-		return $head . ' { MQTT2_DISCOVERY_runtimeTemplatePublish('
-			. _perl_template_quote($runtime_topic) . ', '
-			. _perl_template_quote($entry->{template}) . ', $EVENT) }';
+		return _runtime_set_line($head, $entry, $references);
 	}
 
 	# Choice-Eintraege waehlen je nach Mapping-Komplexitaet die kuerzeste sichere
@@ -508,10 +475,7 @@ sub render_entry {
 		# Ein Command-Template muss nach der Auswahl auf den gemappten Wert
 		# angewendet werden und kann deshalb nicht statisch in setList stehen.
 		if (defined($entry->{template}) && $entry->{template} ne '') {
-			return $head . ' { MQTT2_DISCOVERY_runtimeTemplateChoice('
-				. _perl_template_quote($runtime_topic) . ', '
-				. _perl_template_quote($entry->{template}) . ', '
-			. _perl_hash_literal($mapping) . ', $EVENT) }';
+			return _runtime_set_line($head, $entry, $references);
 		}
 
 		# Direkte MQTT2_DEVICE-Syntax ist nur moeglich, wenn Topic und Mapping fuer
@@ -530,24 +494,8 @@ sub render_entry {
 				return "$mapped_head $topic";
 			}
 
-			# Beliebige skalare Mappings koennen inline bleiben, solange auch das
-			# Topic sicher in einen kleinen lokalen Hash-Ausdruck eingebettet wird.
-			if (_inline_topic($topic)) {
-				my @pairs;
-
-				for my $key (@keys) {
-					my ($quoted_key, $quoted_value) = (_perl_quote($key), _perl_quote($mapping->{$key}));
-					@pairs = () and last if !defined($quoted_key) || !defined($quoted_value);
-					push @pairs, "$quoted_key=>$quoted_value";
-				}
-
-				return $head . ' {my %map=(' . join(',', @pairs) . '); "' . $topic
-					. ' ".$map{$EVTPART1}}' if @pairs == @keys;
-			}
 		}
-		return $head . ' { MQTT2_DISCOVERY_runtimeChoice('
-			. _perl_template_quote($runtime_topic) . ', '
-			. _perl_hash_literal($mapping) . ', $EVENT) }';
+		return _runtime_set_line($head, $entry, $references);
 	}
 
 	# Buttons verwenden fuer sichere konstante Payloads die native Kurzform und
@@ -555,9 +503,7 @@ sub render_entry {
 	if ($entry->{kind} eq 'button') {
 		return "$head $topic $entry->{payload}"
 			if _plain_topic($topic) && defined($entry->{payload}) && $entry->{payload} !~ /[\r\n\$]/;
-		return $head . ' { MQTT2_DISCOVERY_runtimePublish('
-			. _perl_template_quote($runtime_topic) . ', '
-			. _perl_template_quote($entry->{payload}) . ') }';
+		return _runtime_set_line($head, $entry, $references);
 	}
 
 	# Begrenzte JSON-Auswahlen werden bei einfachen Payloadwerten direkt lesbar
@@ -578,11 +524,7 @@ sub render_entry {
 			$payload =~ s/"__VALUE__"/"\$EVTPART1"/;
 			return "$mapped_head $topic $payload";
 		}
-		my $constant_argument = keys(%$constants) ? ', ' . _perl_hash_literal($constants) : '';
-		return $head . ' { MQTT2_DISCOVERY_runtimeJSONChoice('
-			. _perl_template_quote($runtime_topic) . ', '
-			. _perl_template_quote($entry->{key}) . ', '
-			. _perl_hash_literal($mapping) . ', $EVENT' . $constant_argument . ') }';
+		return _runtime_set_line($head, $entry, $references);
 	}
 
 	# JSON-Sets bauen ein dynamisches Schluessel/Wert-Paar samt optionalen
@@ -597,17 +539,14 @@ sub render_entry {
 			$payload =~ s/"__VALUE__"/\$EVTPART1/;
 			return "$head $topic $payload";
 		}
-		my $constant_argument = keys(%$constants) ? ', ' . _perl_hash_literal($constants) : '';
-		return $head . ' { MQTT2_DISCOVERY_runtimeJSONPublish('
-			. _perl_template_quote($runtime_topic) . ', '
-			. _perl_template_quote($entry->{key}) . ', $EVENT' . $constant_argument . ') }';
+		return _runtime_set_line($head, $entry, $references);
 	}
 	return $entry->{line};
 }
 
 # Fasst Availability-Quellen pro MQTT-Topic in einen einzigen Runtime-Aufruf.
 sub _render_availability_groups {
-	my ($entries, $device_topic) = @_;
+	my ($entries, $device_topic, $references) = @_;
 	my (%sources, %topics, %policies);
 	my %visible_readings;
 
@@ -643,9 +582,10 @@ sub _render_availability_groups {
 			sources => [ map { $sources{$_} } sort keys %{ $topics{$topic} } ],
 			policies => \@policies,
 		};
-		my $configuration_json = JSON::PP->new->canonical(1)->encode($configuration);
-		my $argument = _perl_template_quote($configuration_json);
-		next if !defined($argument);
+		my $expression = _runtime_reference_expression({
+			operation => 'availability', configuration => $configuration,
+		}, $references);
+		next if !defined($expression);
 		push @rendered, {
 			kind => 'availability_group', role => 'availability',
 			name => $availability_reading, reserved_reading => 1, topic => $topic,
@@ -653,12 +593,7 @@ sub _render_availability_groups {
 				$availability_reading, sort(keys %{ $topics{$topic} }), sort(keys %policies),
 			],
 			configuration => $configuration,
-			runtime_descriptor => {
-				operation => 'availability', configuration => $configuration,
-			},
-			line => _regex($topic, $device_topic, undef)
-				. ' { MQTT2_DISCOVERY_runtimeAvailability($NAME, $EVENT, '
-				. $argument . ') }',
+			line => _regex($topic, $device_topic, undef) . " $expression",
 		};
 	}
 
@@ -668,6 +603,7 @@ sub _render_availability_groups {
 # Gruppiert optimierbare Eintraege und rendert die vollstaendige sortierte Zeilenliste.
 sub render_entries {
 	my ($entries, $device_topic, $extra_reserved, $runtime_references) = @_;
+	$runtime_references = {} if ref($runtime_references) ne 'HASH';
 	my (@rendered, @availability, %json_groups, %json_autocreate, %runtime_topics);
 
 	# JSON-Eintraege werden zunaechst pro Topic gesammelt. So kann eine einzige
@@ -711,7 +647,8 @@ sub render_entries {
 				line => _render_json_sequence($entry, $device_topic) };
 			next;
 		}
-		push @rendered, +{ %$entry, line => render_entry($entry, $device_topic) };
+		push @rendered, +{ %$entry,
+			line => render_entry($entry, $device_topic, $runtime_references) };
 	}
 
 	for my $topic (sort keys %json_autocreate) {
@@ -767,7 +704,9 @@ sub render_entries {
 	}
 	my %runtime_availability;
 
-	for my $entry (@{ _render_availability_groups(\@availability, $device_topic) }) {
+	for my $entry (@{ _render_availability_groups(
+			\@availability, $device_topic, $runtime_references,
+		) }) {
 
 		# Nur bei einem gemeinsam genutzten Topic wandert Availability in denselben
 		# Runtime-Aufruf; reine Availability-Zeilen behalten ihre kompakte Form.
@@ -790,26 +729,17 @@ sub render_entries {
 			!$seen{$signature}++;
 		} @{ $runtime_topics{$topic} };
 		my $availability = $runtime_availability{$topic};
-		my ($line, $configuration) = _render_topic_runtime($topic, \@entries,
+		my $line = _render_topic_runtime($topic, \@entries,
 			ref($availability) eq 'HASH' ? $availability->{configuration} : undef,
-			$device_topic);
+			$device_topic, $runtime_references);
 		next if !defined($line);
 		my @names = ((map { $_->{name} } @entries),
 			ref($availability) eq 'HASH' ? @{ $availability->{names} || [] } : ());
 		push @rendered, {
 			kind => 'topic_runtime_group', name => '', topic => $topic,
 			names => \@names, line => $line,
-			runtime_descriptor => {
-				operation => 'topic', configuration => $configuration,
-			},
 			(ref($availability) eq 'HASH' ? (role => 'availability', reserved_reading => 1) : ()),
 		};
-	}
-
-	# Referenzen sind optional, damit reine Mapper-Aufrufer weiterhin die voll
-	# aufgeloeste Diagnoseform erhalten; das FHEM-Modul aktiviert sie zentral.
-	for my $entry (@rendered) {
-		_compact_runtime_entry($entry, $runtime_references);
 	}
 
 	return \@rendered;

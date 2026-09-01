@@ -66,11 +66,8 @@ sub line_key {
 	# readingList-Zeilen tragen ihren logischen Key an einer anderen Stelle als
 	# setList-Zeilen und benoetigen deshalb eine eigene Extraktion.
 	if ($kind eq 'reading') {
-		# Generierte Runtime-Zeilen tragen ihren logischen Reading-Namen im
-		# Funktionsaufruf; einfache Zeilen bestehen direkt aus diesem Namen.
 		my (undef, $code) = split /\s+/, $line, 2;
 		return '' if !defined $code;
-		return $2 if $code =~ /MQTT2_DISCOVERY_runtime(?:Trigger)?Reading\(.*?\$EVENT,\s*(['"])([A-Za-z0-9_.-]+)\1(?:\s*,|\s*\))/;
 		return $1 if $code =~ /^([A-Za-z0-9_.-]+)$/;
 		return '';
 	}

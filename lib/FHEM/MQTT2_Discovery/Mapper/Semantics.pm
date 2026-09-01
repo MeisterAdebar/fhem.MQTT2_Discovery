@@ -10,6 +10,7 @@ use MQTT2_Discovery::Helper qw(safe_name stable_suffix stable_unique);
 use MQTT2_Discovery::Mapper::Common qw(
 	capability_set_name choice_values is_device_root_entity is_numeric temperature_unit
 );
+use MQTT2_Discovery::Mapper::Renderer ();
 
 # Sammelt die expliziten Zielnamen eines abstrakten Mapping-Eintrags.
 sub _entry_names {
@@ -26,17 +27,15 @@ sub _single_set_name {
 	return @names == 1 ? $names[0] : $fallback;
 }
 
-# Liest die tatsaechlich von MQTT2_DEVICE angebotenen Auswahlwerte aus der Set-Zeile.
+# Liest die tatsaechlich von MQTT2_DEVICE angebotenen Auswahlwerte aus dem Eintrag.
 sub _set_choice_values {
 	my ($entries, $name) = @_;
 	return undef if !defined($name) || $name eq '';
 	my @matches = grep {
 		ref($_) eq 'HASH' && defined($_->{name}) && $_->{name} eq $name
 	} @{ $entries || [] };
-	return undef if @matches != 1 || !defined($matches[0]{line});
-	my ($spec) = $matches[0]{line} =~ /^\Q$name\E:([^\s]+)(?:\s|$)/;
-	return undef if !defined($spec) || $spec eq '';
-	my @values = split /,/, $spec, -1;
+	return undef if @matches != 1;
+	my @values = @{ MQTT2_Discovery::Mapper::Renderer::visible_set_values($matches[0]) };
 	return undef if @values != 2 || grep { $_ eq '' } @values;
 	return \@values;
 }

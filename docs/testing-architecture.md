@@ -12,6 +12,8 @@ Die Produktionslogik ist in drei Schichten aufgeteilt:
   Home-Assistant-MQTT-Discovery.
 - `MQTT2_Discovery::Parser::Tasmota` verarbeitet ausschliesslich native
   Tasmota-Discovery-Nachrichten.
+- `MQTT2_Discovery::Parser::Sonos2mqtt` verarbeitet ausschliesslich native
+  Sonos2mqtt-Speaker-Discovery.
 - `MQTT2_Discovery::Mapper::Common` normalisiert gemeinsam verwendete
   Auswahlwerte, Capability-Namen und numerische Metadaten.
 - `MQTT2_Discovery::Mapper::NameResolver` loest kollidierende Entity-Namen auf.

@@ -21,10 +21,8 @@ is(length(stable_suffix('identitaet')), 8, 'stabiler Suffix hat Defaultlaenge');
 is([ split_lines("a\r\nb\n") ], [qw(a b)], 'Zeilen werden portabel zerlegt');
 is(line_key('set', 'power:on,off topic value'), 'power', 'Set-Schluessel wird erkannt');
 is(line_key('reading', 'topic:.* state'), 'state', 'Reading-Schluessel wird erkannt');
-is(line_key('reading', "topic:.* { MQTT2_DISCOVERY_runtimeReading('{{ value | upper }}', \$EVENT, 'state') }"),
-	'state', 'Reading-Schluessel wird aus lesbarem Runtime-Aufruf erkannt');
-is(line_key('reading', "topic:.* { MQTT2_DISCOVERY_runtimeTriggerReading('{{ trigger.value.raw }}', \$EVENT, 'event') }"),
-	'event', 'Reading-Schluessel wird aus einem Trigger-Runtime-Aufruf erkannt');
+is(line_key('reading', q!topic:.* { MQTT2_DISCOVERY_runtimeRef($NAME, 'r_0123456789abcdef', $EVENT) }!),
+	'', 'kompakte Runtime-Referenzen werden nicht aus ausfuehrbarem Text rekonstruiert');
 
 subtest 'konservativer Merge' => sub {
 	my $result = merge_generated_lines(

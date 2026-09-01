@@ -15,8 +15,9 @@ MQTT-Nachricht
   -> FHEM-Renderer und atomare Anwendung
 ```
 
-Die Registry prueft spezifische Formate zuerst. Der Home-Assistant-Adapter steht
-zuletzt. Ein Adapter kann eine Nachricht ablehnen (`error`) oder als nicht
+Die Registry prueft spezifische Formate zuerst. Sonos2mqtt und Tasmota stehen vor
+dem allgemeinen Home-Assistant-Adapter. Ein Adapter kann eine Nachricht ablehnen
+(`error`) oder als nicht
 zustaendig kennzeichnen (`next`). Sobald ein Adapter ein Topic beansprucht hat,
 gibt es nach einem Parserfehler keinen Fallback auf ein anderes Format.
 
@@ -56,7 +57,6 @@ Jedes Event ist ein Hash mit diesen Pflichtfeldern:
 
   signals      => [ ... ],
   commands     => [ ... ],
-  capabilities => { ... },
   availability => [
     {
       topic                 => 'node/availability',
@@ -72,8 +72,10 @@ Jedes Event ist ein Hash mit diesen Pflichtfeldern:
 
 `source` ist Herkunft und stabile Ownership. Der Mapper darf daraus keine
 geraetespezifische Semantik erraten. `entity.configuration` enthaelt nur bereits
-normalisierte, ausgeschriebene Domainfelder; Rohabkuerzungen eines
-Discovery-Protokolls gehoeren nicht in diese Ebene.
+normalisierte, ausgeschriebene Domainfelder, die weder Signal noch Command sind.
+Binding-Topics, Templates, Namen und Codecs stehen ausschliesslich in `signals`
+beziehungsweise `commands`; Rohabkuerzungen eines Discovery-Protokolls gehoeren
+nicht in diese Ebene.
 
 `entity.name` bewahrt den ausdruecklichen Anzeigenamen des Quellprotokolls.
 `entity.logical_name` ist dagegen ein optionaler, bereits vom Formatadapter nach
@@ -87,8 +89,12 @@ Home-Assistant-Felder aus, sondern nutzt nur diesen kanonischen Wert.
 Availability ist eine eigene Rolle und kein normales State-Signal. Der
 Formatadapter normalisiert jede Quelle auf Topic, optionales Template und ihre
 beiden Vergleichspayloads. `availability_mode` beschreibt mit `all`, `any` oder
-`latest`, wie mehrere Quellen zu dem sichtbaren Zustand `availability`
-verknuepft werden.
+`latest`, wie mehrere Quellen zunaechst zur Availability ihrer jeweiligen Entity
+verknuepft werden. Fasst ein `MQTT2_DEVICE` mehrere Entities zusammen, ist seine
+sichtbare Availability online, sobald mindestens eine Entity verfuegbar ist. Sie
+ist erst offline, wenn alle Entity-Regeln ausdruecklich offline melden, und sonst
+unknown. Damit kann eine fehlende optionale Funktion nicht den Ausfall des
+gesamten Devices vortaeuschen.
 
 Der gemeinsame Mapper leitet daraus keine Namen aus Topicsegmenten ab. Die
 einzelnen Quellzustaende und die Verknuepfungsregeln liegen in verborgenen
@@ -149,12 +155,14 @@ normalisiert bereits der Adapter das betreffende Command-Binding:
     format     => 'json',
     key        => 'brightness',
     value_type => 'number',
+    constants  => { command => 'brightness' },
   },
 }
 ```
 
-Der Mapper unterscheidet damit nur zwischen skalaren und typisierten
-JSON-Commands. Protokollregeln wie Home Assistants `schema=json` und dessen
+`constants` enthaelt optionale, validierte JSON-Felder neben dem dynamischen Wert.
+Der Mapper unterscheidet damit nur zwischen skalaren und typisierten JSON-Commands.
+Protokollregeln wie Home Assistants `schema=json` und dessen
 Felder `state` oder `brightness` werden ausschliesslich im jeweiligen Adapter
 ausgewertet und gelangen nicht als Mapper-Sonderfall hinter die Modellgrenze.
 
@@ -168,26 +176,16 @@ Tasmota-Adapter seine vollstaendige Standard-Telemetrie beschreiben, ohne dass
 das Modell oder der allgemeine Mapper Tasmota-Payloads oder Tasmota-Topicbasen
 kennen muss.
 
-## Capabilities
-
-Capabilities verknuepfen Signal und Command explizit:
-
-```perl
-capabilities => {
-  power => {
-    read  => 'state',
-    write => 'command',
-    value => {
-      type         => 'boolean',
-      device_class => undef,
-    },
-  },
-}
-```
-
 Alle sicher abbildbaren Signals erreichen die FHEM-`readingList`, alle Commands
 die `setList`. SemanticUI erhaelt davon nur die konservative Positivmenge. Ein
 Signal muss deshalb nicht automatisch in SemanticUI erscheinen.
+
+Ein `media_player` kann getrennte Signale fuer Transportstatus, Lautstaerke und
+Mute sowie schreibbare Transportaktionen besitzen. Der Sonos2mqtt-Adapter nutzt
+dabei das allgemeine JSON-Codec-Feld `constants`, um beispielsweise den
+dynamischen Lautstaerkewert mit dem festen Feld `command=volume` zu einem
+Payload zusammenzufuehren. Der Mapper kennt dadurch weder Sonos-Kommandonamen
+noch Sonos-Topics.
 
 ## Neuer Formatadapter
 

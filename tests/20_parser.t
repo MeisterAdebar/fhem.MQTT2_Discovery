@@ -222,8 +222,16 @@ subtest 'MQTT Device-Automation-Trigger' => sub {
 	is($entity->{subtype}, 'button_1', 'Subtype-Abkuerzung wird normalisiert');
 };
 
-is([MQTT2_Discovery::Parser::HomeAssistant::supported_components()],
-	[qw(binary_sensor button climate cover device_automation device_tracker event fan light lock number select sensor switch text)],
-	'alle unterstuetzten Komponenten sind registriert');
-
+subtest 'MQTT-Update-Komponente' => sub {
+	my $result = parse_config(
+		'homeassistant/update/0x001788010c570283/update/config',
+		'{"stat_t":"zigbee2mqtt/WZ_LIGHTSTRIP_LICHT","cmd_t":"zigbee2mqtt/bridge/request/device/ota_update/update","pl_inst":"{\"id\":\"0x001788010c570283\"}","val_tpl":"{{ value_json.update.installed_version }}"}',
+	);
+	is($result->{status}, 'ok', 'Update-Discovery wird akzeptiert');
+	my $entity = $result->{entities}[0];
+	is($entity->{component}, 'update', 'Update-Komponente bleibt erhalten');
+	is($entity->{command_set_name}, 'install', 'Installationsaktion erhaelt einen stabilen Set-Namen');
+	is($entity->{payload_install}, '{"id":"0x001788010c570283"}',
+		'payload_install-Kurzform wird unveraendert uebernommen');
+};
 done_testing;

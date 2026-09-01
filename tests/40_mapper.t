@@ -8,9 +8,67 @@ use strict;
 use warnings;
 use Test2::V0;
 use JSON::PP ();
+use Scalar::Util qw(refaddr);
 use lib 'lib/FHEM';
 use MQTT2_Discovery::Mapper ();
+use MQTT2_Discovery::Mapper::NameResolver ();
+use MQTT2_Discovery::Mapper::Renderer ();
 use MQTT2_Discovery::Mapper::Semantics ();
+use MQTT2_Discovery::Model ();
+
+# Die bequemen Legacy-Fassaden existieren nur noch lokal im Test. Produktionscode
+# arbeitet ausschliesslich ueber das kanonische Modell und besessene Mapping-Saetze.
+{
+	no warnings 'redefine';
+	*MQTT2_Discovery::Mapper::map_entity = sub {
+		my (%args) = @_;
+		my $model = MQTT2_Discovery::Model::from_entity(
+			adapter => 'test', entity => $args{entity},
+		);
+		my $mapping = MQTT2_Discovery::Mapper::map_model(%args, model => $model);
+		return $mapping if !$mapping->{ok};
+		my %runtime_references;
+
+		for my $group (qw(reading_lines set_lines)) {
+			for my $entry (@{ $mapping->{$group} || [] }) {
+				$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry(
+					$entry, undef, \%runtime_references,
+				);
+			}
+		}
+
+		$mapping->{_test_runtime_refs} = \%runtime_references;
+		return $mapping;
+	};
+	*MQTT2_Discovery::Mapper::resolve_mapping_names = sub {
+		my ($source, $reserved) = @_;
+		my $json = JSON::PP->new;
+		my $owned = $json->decode($json->encode(ref($source) eq 'ARRAY' ? $source : []));
+		return MQTT2_Discovery::Mapper::NameResolver::resolve_owned($owned, $reserved);
+	};
+}
+
+# Loest die kurze Referenz einer bereits testweise gerenderten Mapping-Zeile auf.
+sub descriptor_from_references {
+	my ($references, $line) = @_;
+	my ($reference) = ($line // '') =~ /'(r_[a-f0-9]+)'/;
+	return defined($reference) ? $references->{$reference} : undef;
+}
+
+sub runtime_descriptor {
+	my ($mapping, $line) = @_;
+	return descriptor_from_references($mapping->{_test_runtime_refs}, $line);
+}
+
+# Rendert Gruppen samt separat pruefbarer deklarativer Runtime-Registry.
+sub render_with_references {
+	my ($entries, $device_topic, $reserved) = @_;
+	my %references;
+	my $rendered = MQTT2_Discovery::Mapper::render_entries(
+		$entries, $device_topic, $reserved, \%references,
+	);
+	return ($rendered, \%references);
+}
 
 # Erzeugt eine kanonische Test-Entity mit gezielt ueberschreibbaren Feldern.
 sub entity {
@@ -41,6 +99,18 @@ my %extra = (
 		mode_state_topic => 'node/climate/mode', mode_command_topic => 'node/climate/mode/set', modes => [qw(off auto heat)],
 	},
 	fan            => { percentage_command_topic => 'node/fan/percentage/set', percentage_state_topic => 'node/fan/percentage' },
+	media_player => {
+		preferred_entity_name => 'player', value_template => '{{ value_json.transportState }}',
+		state_reading_name => 'transportState',
+		volume_state_topic => 'node/media/state', volume_value_template => '{{ value_json.volume.Master }}',
+		volume_reading_name => 'volume', volume_command_topic => 'node/media/control',
+		volume_command_codec => { format => 'json', key => 'input', value_type => 'number', constants => { command => 'volume' } },
+		mute_state_topic => 'node/media/state', mute_value_template => '{{ value_json.mute.Master }}',
+		mute_reading_name => 'mute', mute_command_topic => 'node/media/control',
+		payload_mute => '{"command":"mute"}', payload_unmute => '{"command":"unmute"}',
+		payload_play => '{"command":"play"}',
+	},
+	update         => { command_set_name => 'install', payload_install => '{"id":"node"}' },
 	lock           => {},
 	device_tracker => {},
 	event          => { event_types => [qw(single double)] },
@@ -112,6 +182,51 @@ subtest 'Auswahlwerte werden einheitlich normalisiert' => sub {
 		'semantische Rueckabbildung zeigt auf den kollisionsfreien Token');
 };
 
+subtest 'MQTT Update bildet Status und Installation ab' => sub {
+	my $update = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('update', command_set_name => 'install',
+			payload_install => '{"id":"node"}'),
+		io_name => 'mqtt', cid => 'client');
+	ok($update->{ok}, 'Update-Entity wird sicher gemappt');
+	is($update->{reading_lines}[0]{name}, 'update',
+		'Status verwendet den stabilen Entity-Namen');
+	is($update->{set_lines}[0]{line},
+		'install:noArg node/update/set {"id":"node"}',
+		'Installationsaktion sendet payload_install unveraendert an command_topic');
+	is($update->{semantic_entity}{class}, 'update',
+		'semantische Klasse bleibt Update');
+	is($update->{semantic_entity}{capabilities}{install}{write}, 'install',
+		'semantische Installationsaktion verweist auf denselben Setter');
+};
+
+subtest 'Root-Entities wiederholen den Devicenamen nicht als Reading' => sub {
+	my $root_update = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('update', object_id => 'Node', command_set_name => 'install',
+			payload_install => '{"id":"node"}'),
+		io_name => 'mqtt', cid => 'client');
+	is($root_update->{reading_lines}[0]{name}, 'update',
+		'Root-Update verwendet seine Komponentenrolle statt des Devicenamens');
+
+	my $root_binary = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('binary_sensor', object_id => 'Node'),
+		io_name => 'mqtt', cid => 'client');
+	is($root_binary->{reading_lines}[0]{name}, 'binary_sensor',
+		'die allgemeine Root-Regel gilt auch fuer andere Komponenten');
+
+	my $root_with_json_name = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('sensor', object_id => 'Node',
+			value_template => '{{ value_json.temperature }}'),
+		io_name => 'mqtt', cid => 'client');
+	is($root_with_json_name->{reading_lines}[0]{name}, 'temperature',
+		'ein fachlicher JSON-Name behaelt vor der Root-Komponentenrolle Vorrang');
+
+	my $child = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('sensor', object_id => 'firmware_status'),
+		io_name => 'mqtt', cid => 'client');
+	is($child->{reading_lines}[0]{name}, 'firmware_status',
+		'eine normale Unter-Entity behaelt weiterhin ihre eigene object_id');
+};
+
 subtest 'Jinja-dict.get wird als einfaches JSON-Reading gruppiert' => sub {
 	my $battery = MQTT2_Discovery::Mapper::map_entity(
 		entity => entity('sensor', object_id => 'sensor_battery', state_topic => 'findmy/person/device/state',
@@ -122,7 +237,7 @@ subtest 'Jinja-dict.get wird als einfaches JSON-Reading gruppiert' => sub {
 		'dict.get wird nicht als komplexes Runtime-Template behandelt');
 	is($battery->{reading_lines}[0]{json_key}, 'battery', 'JSON-Schluessel bleibt erhalten');
 	like($battery->{reading_lines}[0]{line}, qr/json2nameValue/, 'lesbare FHEM-JSON-Auswertung wird erzeugt');
-	unlike($battery->{reading_lines}[0]{line}, qr/runtimeReading/, 'kein Runtime-Fallback erforderlich');
+	unlike($battery->{reading_lines}[0]{line}, qr/runtimeRef/, 'kein Runtime-Fallback erforderlich');
 };
 
 subtest 'HA-Button verwendet den vom Adapter normalisierten Entity-Namen' => sub {
@@ -151,6 +266,37 @@ subtest 'HA-Button verwendet den vom Adapter normalisierten Entity-Namen' => sub
 	isnt($names[0], $names[1], 'die aufgeloesten Button-Namen bleiben eindeutig');
 	is([sort map { $_->{semantic_entity}{capabilities}{press}{write} } @$resolved], \@names,
 		'SemanticUI uebernimmt auch die kollisionsfrei aufgeloesten Namen');
+};
+
+subtest 'Namensaufloesung respektiert die Besitzgrenze der Mappings' => sub {
+	my $source = {
+		entity_key => 'sensor|availability',
+		reading_name => 'availability',
+		reading_path => [qw(sensor availability)],
+		reading_lines => [{ kind => 'raw', name => 'availability' }],
+		set_lines => [],
+		set_state_list => [],
+	};
+	my $resolved_copy = MQTT2_Discovery::Mapper::resolve_mapping_names(
+		[$source], { availability => 1 },
+	);
+	is($source->{reading_name}, 'availability',
+		'die allgemeine Schnittstelle veraendert das fremde Mapping nicht');
+	is($source->{reading_lines}[0]{name}, 'availability',
+		'auch verschachtelte Originaldaten bleiben unveraendert');
+	isnt(refaddr($resolved_copy->[0]), refaddr($source),
+		'die allgemeine Schnittstelle liefert weiterhin eine eigene Tiefenkopie');
+	is($resolved_copy->[0]{reading_name}, 'sensor_availability',
+		'der reservierte Name wird auf der Kopie aufgeloest');
+
+	my $owned = JSON::PP->new->decode(JSON::PP->new->encode([$source]));
+	my $resolved_owned = MQTT2_Discovery::Mapper::resolve_owned_mapping_names(
+		$owned, { availability => 1 },
+	);
+	is(refaddr($resolved_owned->[0]), refaddr($owned->[0]),
+		'die Besitzschnittstelle verwendet dasselbe Mapping ohne zweite Kopie');
+	is($owned->[0]{reading_name}, 'sensor_availability',
+		'die Namensaufloesung arbeitet direkt auf der exklusiven Kopie');
 };
 
 subtest 'kuerzeste eindeutige logische Entity-Namen' => sub {
@@ -196,6 +342,30 @@ subtest 'kuerzeste eindeutige logische Entity-Namen' => sub {
 		'klassische JSON-Kollision wird erst bei Bedarf mit der Entity qualifiziert');
 	is($by_key{'entity|outside'}{reading_name}, 'outside_temperature',
 		'zweite klassische JSON-Kollision wird symmetrisch lesbar qualifiziert');
+
+	my $audio_target = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('select', node_id => 'slwf08-tv-cec-4dd380',
+			object_id => 'slwf08_tv_cec_4dd380_audioziel',
+			entity_key => 'slwf08|audioziel', options => ['TV-Lautsprecher', 'Audiosystem'],
+			state_topic => 'slwf08/tv_cec/345f454dd380/config/audio_target/state',
+			command_topic => 'slwf08/tv_cec/345f454dd380/config/audio_target/set'),
+		io_name => 'mqtt', cid => 'slwf08');
+	is($audio_target->{reading_path}, [qw(select slwf08_tv_cec_4dd380 audioziel)],
+		'die node_id bleibt nur als Kollisionsreserve im logischen Pfad');
+	is($audio_target->{reading_name}, 'audioziel',
+		'ein ESPHome-Prefix aus node_id und Unterstrich entfaellt im sichtbaren Namen');
+	is($audio_target->{set_lines}[0]{name}, 'audioziel',
+		'der gekoppelte Setter verwendet denselben kurzen Namen');
+	is(MQTT2_Discovery::Mapper::resolve_mapping_names([$audio_target])->[0]{reading_name},
+		'audioziel', 'ein eindeutiger ESPHome-Suffix bleibt auch deviceweit kurz');
+
+	my $similar_prefix = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('sensor', node_id => 'slwf08-tv-cec-4dd380',
+			object_id => 'slwf08_tv_cec_4dd380x_status',
+			entity_key => 'slwf08|similar-prefix'),
+		io_name => 'mqtt', cid => 'slwf08');
+	is($similar_prefix->{reading_name}, 'slwf08_tv_cec_4dd380x_status',
+		'ein nur aehnlicher Prefix ohne Segmentgrenze bleibt unveraendert');
 };
 
 subtest 'gefilterter JSON-Hauptpfad steuert Reading und Setter' => sub {
@@ -214,9 +384,12 @@ subtest 'gefilterter JSON-Hauptpfad steuert Reading und Setter' => sub {
 	ok($permit_join->{ok}, 'gefilterte Zigbee2MQTT-Bridge-Entity wird gemappt');
 	is($permit_join->{reading_name}, 'permit_join',
 		'der technische Object-ID-Prefix gelangt nicht in den Readingnamen');
-	like($permit_join->{reading_lines}[0]{line},
-		qr/runtimeReading\("\{\{ value_json\.permit_join \| lower \}\}", \$EVENT, ['"]permit_join['"]\)/,
-		'lower wird weiterhin zur Laufzeit auf den kurzen Readingnamen angewendet');
+	like($permit_join->{reading_lines}[0]{line}, qr/MQTT2_DISCOVERY_runtimeRef/,
+		'lower wird ueber eine kompakte Runtime-Referenz ausgewertet');
+	is(runtime_descriptor($permit_join, $permit_join->{reading_lines}[0]{line}), {
+		operation => 'reading', runtime => 'reading',
+		template => '{{ value_json.permit_join | lower }}', name => 'permit_join',
+	}, 'die Referenz enthaelt Template und kurzen Readingnamen deklarativ');
 	is($permit_join->{set_lines}[0]{name}, 'permit_join',
 		'der zugehoerige Setter verwendet exakt denselben kurzen Namen');
 	is($permit_join->{semantic_entity}{capabilities}{power}, {
@@ -235,9 +408,12 @@ subtest 'Retained Command-Publishes' => sub {
 	my $templated = MQTT2_Discovery::Mapper::map_entity(
 		entity => entity('text', retain => JSON::PP::true(),
 			command_template => '{{ value | upper }}'), io_name => 'mqtt', cid => 'c');
-	like($templated->{set_lines}[0]{line},
-		qr/runtimeTemplatePublish\("node\/text\/set:r", "\{\{ value \| upper \}\}", \$EVENT\)/,
-		'Runtime-Publish zeigt Retain-Topic und Command-Template im Klartext');
+	like($templated->{set_lines}[0]{line}, qr/MQTT2_DISCOVERY_runtimeRef/,
+		'Runtime-Publish verwendet eine kompakte Referenz');
+	is(runtime_descriptor($templated, $templated->{set_lines}[0]{line}), {
+		operation => 'set', kind => 'publish', topic => 'node/text/set:r',
+		template => '{{ value | upper }}',
+	}, 'Retain-Topic und Command-Template bleiben deklarativ registriert');
 	unlike($templated->{set_lines}[0]{line}, qr/bm9|e3sg/,
 		'Runtime-Publish verwendet kein Base64');
 
@@ -251,15 +427,19 @@ subtest 'lesbare Runtime-Command-Fallbacks' => sub {
 	my $choice = MQTT2_Discovery::Mapper::map_entity(
 		entity => entity('switch', command_topic => 'node/{switch}', payload_on => 'YES', payload_off => 'NO'),
 		io_name => 'mqtt', cid => 'c');
-	like($choice->{set_lines}[0]{line},
-		qr/runtimeChoice\("node\/\{switch\}", \{"off" => "NO", "on" => "YES"\}, \$EVENT\)/,
-		'Choice-Fallback zeigt Topic und Payload-Mapping im Klartext');
+	like($choice->{set_lines}[0]{line}, qr/MQTT2_DISCOVERY_runtimeRef/,
+		'Choice-Fallback verwendet eine kompakte Referenz');
+	is(runtime_descriptor($choice, $choice->{set_lines}[0]{line}), {
+		operation => 'set', kind => 'choice', topic => 'node/{switch}',
+		mapping => { off => 'NO', on => 'YES' },
+	}, 'Choice-Topic und Payload-Mapping bleiben deklarativ registriert');
 
 	my $button = MQTT2_Discovery::Mapper::map_entity(
 		entity => entity('button', command_topic => 'node/{button}', payload_press => 'PRESS'),
 		io_name => 'mqtt', cid => 'c');
-	like($button->{set_lines}[0]{line}, qr/runtimePublish\("node\/\{button\}", "PRESS"\)/,
-		'Button-Fallback zeigt Topic und Payload im Klartext');
+	is(runtime_descriptor($button, $button->{set_lines}[0]{line}), {
+		operation => 'set', kind => 'button', topic => 'node/{button}', payload => 'PRESS',
+	}, 'Button-Fallback registriert Topic und Payload deklarativ');
 
 	my $json = MQTT2_Discovery::Mapper::map_entity(
 		entity => entity('light', command_topic => 'node/{light}', value_template => '{{ value_json.state }}',
@@ -270,9 +450,11 @@ subtest 'lesbare Runtime-Command-Fallbacks' => sub {
 			brightness_reading_name => 'brightness', brightness_set_name => 'brightness',
 			brightness_command_codec => { format => 'json', key => 'brightness', value_type => 'number' }),
 		io_name => 'mqtt', cid => 'c');
-	like(join("\n", map { $_->{line} } @{ $json->{set_lines} }),
-		qr/runtimeJSONPublish\("node\/\{light\}", "brightness", \$EVENT\)/,
-		'JSON-Fallback zeigt Topic und JSON-Schluessel im Klartext');
+	my @descriptors = map { runtime_descriptor($json, $_->{line}) }
+		@{ $json->{set_lines} };
+	ok(grep({ ref($_) eq 'HASH' && ($_->{kind} || '') eq 'json'
+		&& ($_->{key} || '') eq 'brightness' && ($_->{topic} || '') eq 'node/{light}' }
+		@descriptors), 'JSON-Fallback registriert Topic und JSON-Schluessel deklarativ');
 };
 
 subtest 'Validierung und Determinismus' => sub {
@@ -317,6 +499,89 @@ subtest 'Device-Automation und Texteingabe-Metadaten' => sub {
 		'Text-Entity fordert ein Texteingabefeld an');
 	is($text->{semantic_entity}{capabilities}{value}{maxLength}, 56,
 		'maximale Textlaenge wird an SemanticUI uebergeben');
+};
+
+subtest 'Device-Automationen werden topicweise zu einem Reading reduziert' => sub {
+	# Erzeugt eindeutig adressierbare Trigger desselben Devices fuer die deviceweite Reduktion.
+	my $automation = sub {
+		my (%args) = @_;
+		return MQTT2_Discovery::Mapper::map_entity(
+			entity => entity('device_automation',
+				object_id => $args{id}, entity_key => "trigger|$args{id}",
+				unique_id => "node_$args{id}", state_topic => $args{topic},
+				payload => $args{payload},
+				(defined($args{template}) ? (value_template => $args{template}) : ()),
+			),
+			io_name => 'mqtt', cid => 'c',
+		);
+	};
+	my $collapse = sub {
+		my ($mappings) = @_;
+		my $resolved = MQTT2_Discovery::Mapper::resolve_mapping_names($mappings, { availability => 1 });
+		return MQTT2_Discovery::Mapper::collapse_device_automation_readings(
+			$resolved, { availability => 1 },
+		);
+	};
+	my @actions = (
+		$automation->(id => 'action_on', topic => 'zigbee2mqtt/remote/action', payload => 'ON'),
+		$automation->(id => 'action_off', topic => 'zigbee2mqtt/remote/action', payload => 'OFF'),
+		$automation->(id => 'action_stop', topic => 'zigbee2mqtt/remote/action', payload => 'STOP.+'),
+	);
+	my $collapsed = $collapse->(\@actions);
+	my @entries = map { @{ $_->{reading_lines} || [] } } @$collapsed;
+	is(scalar(@entries), 1, 'alle kompatiblen Trigger desselben Topics ergeben genau einen Eintrag');
+	is($entries[0]{kind}, 'device_automation_group', 'der Eintrag bleibt bis zum Renderer strukturiert');
+	is($entries[0]{name}, 'action', 'das Topicblatt bestimmt den gemeinsamen Readingnamen');
+	is($entries[0]{payloads}, [qw(OFF ON), 'STOP.+'], 'alle Payloadvarianten bleiben erhalten');
+	my $rendered = MQTT2_Discovery::Mapper::render_entries(\@entries, 'zigbee2mqtt/remote');
+	is($rendered->[0]{line}, '$DEVICETOPIC/action:(?:OFF|ON|STOP\.\+)$ action',
+		'Regex-Sonderzeichen werden innerhalb der exakten Payloadalternativen maskiert');
+
+	my $remaining = $collapse->([$actions[2]]);
+	my @remaining_entries = map { @{ $_->{reading_lines} || [] } } @$remaining;
+	is($remaining_entries[0]{name}, 'action',
+		'das gemeinsame Reading bleibt auch nach dem Loeschen aller anderen Trigger stabil');
+
+	my $sensor = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('sensor', object_id => 'action', entity_key => 'sensor|action',
+			unique_id => 'node_sensor_action', state_topic => 'zigbee2mqtt/remote/state'),
+		io_name => 'mqtt', cid => 'c',
+	);
+	my $qualified = $collapse->([$sensor, @actions[0, 1]]);
+	my ($qualified_group) = grep { ($_->{kind} || '') eq 'device_automation_group' }
+		map { @{ $_->{reading_lines} || [] } } @$qualified;
+	is($qualified_group->{name}, 'remote_action',
+		'ein bereits belegtes action wird mit dem vorherigen Topicsegment qualifiziert');
+
+	my @templated = (
+		$automation->(id => 'templated_on', topic => 'zigbee2mqtt/templated/action', payload => 'ON',
+			template => '{{ trigger.value_json.action }}'),
+		$automation->(id => 'templated_off', topic => 'zigbee2mqtt/templated/action', payload => 'OFF',
+			template => '{{ trigger.value_json.action }}'),
+	);
+	my $template_groups = $collapse->(\@templated);
+	my @template_entries = map { @{ $_->{reading_lines} || [] } } @$template_groups;
+	is(scalar(@template_entries), 1, 'identische Trigger-Templates werden ebenfalls zusammengefasst');
+	my ($template_rendered, $template_references) = render_with_references(
+		\@template_entries, 'zigbee2mqtt/templated', undef,
+	);
+	like($template_rendered->[0]{line}, qr/MQTT2_DISCOVERY_runtimeRef/,
+		'die Template-Runtime verwendet eine kompakte Referenz');
+	is(descriptor_from_references($template_references, $template_rendered->[0]{line})
+		->{filter}, { match_all => 0, payloads => [qw(OFF ON)] },
+		'die Referenz enthaelt den gemeinsamen Payloadfilter deklarativ');
+
+	my @incompatible = (
+		$automation->(id => 'raw', topic => 'zigbee2mqtt/mixed/action', payload => 'ON',
+			template => '{{ trigger.payload }}'),
+		$automation->(id => 'lower', topic => 'zigbee2mqtt/mixed/action', payload => 'off',
+			template => '{{ trigger.payload | lower }}'),
+	);
+	my $unchanged = $collapse->(\@incompatible);
+	my @unchanged_entries = map { @{ $_->{reading_lines} || [] } } @$unchanged;
+	is(scalar(@unchanged_entries), 2, 'unterschiedliche Templates bleiben als getrennte Trigger erhalten');
+	is(scalar(grep { ($_->{kind} || '') eq 'device_automation_group' } @unchanged_entries), 0,
+		'inkompatible Topicbelegungen werden nicht teilweise reduziert');
 };
 
 subtest 'Climate bildet alle State- und Command-Kanaele ab' => sub {
@@ -425,7 +690,7 @@ subtest 'State-Pfad und Availability-Topic bestimmen kurze Reading-Namen' => sub
 		'die rohe Availability-Quelle erhaelt nur ein verborgenes stabiles Reading');
 	my $rendered = join("\n", map { $_->{line} }
 		@{ MQTT2_Discovery::Mapper::render_entries($sensor->{reading_lines}, undef) });
-	like($rendered, qr{^pac-1d797c/status:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability}m,
+	like($rendered, qr{^pac-1d797c/status:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
 		'Availability wird ueber die rollenbasierte Laufzeitauswertung gerendert');
 	unlike($rendered, qr{^pac-1d797c/status:\.\* (?:status|state)$}m,
 		'das Topic-Blatt wird nicht mehr zu einem sichtbaren State-Reading');
@@ -458,14 +723,35 @@ subtest 'mehrere Availability-Quellen kollidieren nicht mit normalen State-Readi
 	my $rendered = join("\n", map { $_->{line} }
 		@{ MQTT2_Discovery::Mapper::render_entries(
 			$light->{reading_lines}, 'zigbee2mqtt/WZ_LIGHTSTRIP_LICHT') });
-	like($rendered, qr{^\$DEVICETOPIC/availability:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability}m,
+	like($rendered, qr{^\$DEVICETOPIC/availability:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
 		'geraeteeigene Availability wird relativ gerendert');
-	like($rendered, qr{^zigbee2mqtt/bridge/state:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability}m,
+	like($rendered, qr{^zigbee2mqtt/bridge/state:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
 		'externe Availability bleibt ohne Topic-Sonderbehandlung absolut');
 	unlike($rendered, qr{^zigbee2mqtt/bridge/state:\.\* state$}m,
 		'das externe state-Topic erzeugt kein kollidierendes state-Reading');
 	like($rendered, qr{^\$DEVICETOPIC:\.\*}m,
 		'das normale Nutzdaten-State-Topic bleibt unveraendert vorhanden');
+
+	my $bridge = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('sensor', object_id => 'connection_state',
+			state_topic => 'zigbee2mqtt/bridge/state',
+			value_template => '{{ value_json.state }}',
+			availability => [{
+				topic => 'zigbee2mqtt/bridge/state',
+				value_template => '{{ value_json.state }}',
+			}]),
+		io_name => 'mqtt', cid => 'z2m');
+	my ($bridge_rendered, $bridge_references) = render_with_references(
+		$bridge->{reading_lines}, 'zigbee2mqtt/bridge', undef,
+	);
+	my @bridge_lines = grep { /^\$DEVICETOPIC\/state:/ }
+		map { $_->{line} } @$bridge_rendered;
+	is(scalar(@bridge_lines), 1,
+		'ein gemeinsames State- und Availability-Topic erzeugt genau eine Zeile');
+	my $bridge_descriptor = descriptor_from_references($bridge_references, $bridge_lines[0]);
+	ok(ref($bridge_descriptor->{configuration}{availability}) eq 'HASH'
+		&& @{ $bridge_descriptor->{configuration}{readings} || [] } == 1,
+		'die gemeinsame Topic-Runtime enthaelt State-Reading und Availability');
 };
 
 subtest 'reservierte Rollenreadings qualifizieren gleichnamige normale Werte' => sub {
@@ -487,12 +773,18 @@ subtest 'reservierte Rollenreadings qualifizieren gleichnamige normale Werte' =>
 		'das normale State-Reading uebernimmt den aufgeloesten Namen');
 	is($resolved->{semantic_entity}{capabilities}{value}{read}, 'sensor_availability',
 		'SemanticUI verweist ebenfalls auf das qualifizierte normale Reading');
-	my $rendered = join("\n", map { $_->{line} }
-		@{ MQTT2_Discovery::Mapper::render_entries($resolved->{reading_lines}, 'node') });
+	my ($resolved_rendered, $resolved_references) = render_with_references(
+		$resolved->{reading_lines}, 'node', undef,
+	);
+	my $rendered = join("\n", map { $_->{line} } @$resolved_rendered);
 	like($rendered,
-		qr/^\$DEVICETOPIC\/state:\.\* \{ json2nameValue\(\$EVENT, '', \{'availability' => 'sensor_availability'\}, '\^\(\?:sensor_availability\)\$'\) \}$/m,
+		qr/^\$DEVICETOPIC\/state:\.\* \{ MQTT2_DISCOVERY_runtimeRef/m,
 		'das JSON-Feld wird ohne Topic-Sonderregel auf den qualifizierten Namen abgebildet');
-	like($rendered, qr/^\$DEVICETOPIC\/online:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability/m,
+	my ($state_line) = grep { /^\$DEVICETOPIC\/state:/ } map { $_->{line} } @$resolved_rendered;
+	is(descriptor_from_references($resolved_references, $state_line)
+		->{configuration}{readings}[0]{name}, 'sensor_availability',
+		'die Topic-Referenz enthaelt den qualifizierten Zielnamen');
+	like($rendered, qr/^\$DEVICETOPIC\/online:\.\* \{ MQTT2_DISCOVERY_runtimeRef/m,
 		'das berechnete Rollenreading availability bleibt separat erhalten');
 
 	my $button = MQTT2_Discovery::Mapper::map_entity(
@@ -521,11 +813,13 @@ subtest 'deviceweit reserviertes availability gilt auch ohne Entity-Quelle' => s
 	)->[0];
 	is($resolved->{reading_name}, 'sensor_availability',
 		'die IO-Rolle reserviert availability auch ohne Discovery-Availability');
-	my $rendered = join("\n", map { $_->{line} }
-		@{ MQTT2_Discovery::Mapper::render_entries(
-			$resolved->{reading_lines}, 'node', { availability => 1 },
-		) });
-	like($rendered, qr/'availability' => 'sensor_availability'/,
+	my ($reserved_rendered, $reserved_references) = render_with_references(
+		$resolved->{reading_lines}, 'node', { availability => 1 },
+	);
+	my $rendered = join("\n", map { $_->{line} } @$reserved_rendered);
+	my ($reserved_line) = grep { /runtimeRef/ } map { $_->{line} } @$reserved_rendered;
+	is(descriptor_from_references($reserved_references, $reserved_line)
+		->{configuration}{readings}[0]{name}, 'sensor_availability',
 		'gleichnamige Nutzdaten werden auf das qualifizierte Reading abgebildet');
 
 	my $free_json = {
@@ -535,8 +829,9 @@ subtest 'deviceweit reserviertes availability gilt auch ohne Entity-Quelle' => s
 	$rendered = MQTT2_Discovery::Mapper::render_entries(
 		[$free_json], 'node', { availability => 1 },
 	)->[0]{line};
-	like($rendered, qr/["']availability["'] => ["']state_availability["']/,
-		'frei entpacktes JSON kann das technische Reading ebenfalls nicht ueberschreiben');
+	is($rendered,
+		q{$DEVICETOPIC/free:.* { MQTT2_DISCOVERY_jsonReadings($NAME,'free',$EVENT) }},
+		'der kompakte Wrapper schuetzt frei entpacktes JSON ohne sichtbare Mappingliste');
 };
 
 subtest 'Climate bildet optionale Standardkanaele und Templates ab' => sub {
@@ -565,9 +860,14 @@ subtest 'Climate bildet optionale Standardkanaele und Templates ab' => sub {
 		'Ziel-Luftfeuchte wird als Slider angelegt');
 	like($sets, qr/hvac_swing_horizontal_mode:on,off hvac\/swing_horizontal\/set/,
 		'horizontaler Swing wird angelegt');
-	like($sets, qr/^power:on,off \{my %map=.*hvac\/power\/set/ms,
+	my %set_by_name = map { ($_->{name} => $_) } @{ $climate->{set_lines} };
+	my $power_descriptor = runtime_descriptor($climate, $set_by_name{power}{line});
+	is([$power_descriptor->{topic}, $power_descriptor->{mapping}],
+		['hvac/power/set', { off => 'STOP', on => 'START' }],
 		'command-only Power verwendet den kanonischen kurzen Namen');
-	like($sets, qr/^mode:off,heat \{ MQTT2_DISCOVERY_runtimeTemplateChoice\("hvac\/mode\/set", "\{\{ value \| upper \}\}"/m,
+	my $mode_descriptor = runtime_descriptor($climate, $set_by_name{mode}{line});
+	is([$mode_descriptor->{topic}, $mode_descriptor->{template}],
+		['hvac/mode/set', '{{ value | upper }}'],
 		'command-only Mode bleibt kurz und behaelt sein Choice-Template');
 };
 
@@ -581,14 +881,17 @@ is($template->{reading_name}, 'temperature',
 	'einfacher JSON-Pfad verwendet seinen fachlichen Blattnamen direkt');
 unlike($template->{reading_lines}[0]{line}, qr/'temperature'\s*=>/,
 	'identische JSON- und Reading-Namen benoetigen keine Umbenennung');
-unlike($template->{reading_lines}[0]{line}, qr/runtimeReading|e3sg/,
+unlike($template->{reading_lines}[0]{line}, qr/runtimeRef|e3sg/,
 	'einfacher JSON-Pfad benoetigt weder Runtime-Wrapper noch Base64');
 
 my $complex_template = MQTT2_Discovery::Mapper::map_entity(
 	entity => entity('sensor', value_template => '{{ value_json.temperature | round(1) }}'), io_name => 'mqtt', cid => 'client');
 like($complex_template->{reading_lines}[0]{line},
-	qr/MQTT2_DISCOVERY_runtimeReading\("\{\{ value_json\.temperature \| round\(1\) \}\}"/,
-	'komplexes Template verwendet einen lesbaren Runtime-Fallback');
+	qr/MQTT2_DISCOVERY_runtimeRef/,
+	'komplexes Template verwendet eine kompakte Runtime-Referenz');
+is(runtime_descriptor($complex_template, $complex_template->{reading_lines}[0]{line})
+	->{template}, '{{ value_json.temperature | round(1) }}',
+	'das komplexe Template bleibt deklarativ in der Registry erhalten');
 unlike($complex_template->{reading_lines}[0]{line}, qr/e3sg/,
 	'auch der Runtime-Fallback verbirgt das Template nicht in Base64');
 
@@ -605,6 +908,24 @@ like('home/gateway/BTtoMQTT/device:{"temperature":21}', qr/^$single_filter$/,
 	'eine konkrete Nachricht trifft den gerenderten Einsegmentfilter');
 unlike('home/gateway/extra/BTtoMQTT/device:{"temperature":21}', qr/^$single_filter$/,
 	'die Einsegment-Wildcard akzeptiert keine zusaetzliche Topicebene');
+
+my $ems_optional = MQTT2_Discovery::Mapper::map_entity(
+	entity => entity('sensor', state_topic => 'ems-esp/analogsensor_data',
+		value_template => "{{value_json['core_voltage'] if value_json['core_voltage'] is defined}}"),
+	io_name => 'mqtt', cid => 'ems-esp');
+is($ems_optional->{warnings}, [],
+	'das optionale EMS-Analogtemplate ohne else erzeugt keine Mappingwarnung');
+
+my $ems_mode = q!{%if value_json.mode is undefined%}off{%elif value_json.mode=='Manuell'%}heat{%elif value_json.mode=='Tag'%}heat{%elif value_json.mode=='Nacht'%}off{%elif value_json.mode=='aus'%}off{%else%}auto{%endif%}!;
+my $ems_climate = MQTT2_Discovery::Mapper::map_entity(
+	entity => entity('climate', mode_state_template => $ems_mode,
+		availability => [{
+			topic => 'ems-esp/thermostat_data',
+			value_template => "{{'offline' if value_json.mode is undefined else 'online'}}",
+		}]),
+	io_name => 'mqtt', cid => 'ems-esp');
+is($ems_climate->{warnings}, [],
+	'EMS-Klimamodus und Availability erzeugen keine Mappingwarnung');
 
 my $multi_wildcard = MQTT2_Discovery::Mapper::map_entity(
 	entity => entity('sensor', state_topic => 'home/gateway/433toMQTT/#'), io_name => 'mqtt', cid => 'client');
@@ -625,28 +946,34 @@ like($literal_wildcard->{reading_lines}[0]{line}, qr{sensor\\\+backup},
 my $trigger_context = MQTT2_Discovery::Mapper::map_entity(
 	entity => entity('device_automation', state_topic => 'home/gateway/433toMQTT/42', payload => undef,
 		value_template => '{{ trigger.value.raw }}'), io_name => 'mqtt', cid => 'client');
-like($trigger_context->{reading_lines}[0]{line}, qr/MQTT2_DISCOVERY_runtimeTriggerReading/,
+like($trigger_context->{reading_lines}[0]{line}, qr/MQTT2_DISCOVERY_runtimeRef/,
 	'Device-Automation verwendet den eigenen sicheren Triggerkontext');
+is(runtime_descriptor($trigger_context, $trigger_context->{reading_lines}[0]{line})
+	->{runtime}, 'triggerReading', 'die Referenz waehlt den Triggerkontext ausdruecklich');
 
 my $multiline_template = MQTT2_Discovery::Mapper::map_entity(
 	entity => entity('sensor', value_template => "{{ value_json.temperature\n  | round(1) }}"), io_name => 'mqtt', cid => 'client');
-like($multiline_template->{reading_lines}[0]{line}, qr/\\x\{0a\}/,
-	'mehrzeiliges Template wird lesbar escapet statt Base64-kodiert');
+is(runtime_descriptor($multiline_template, $multiline_template->{reading_lines}[0]{line})
+	->{template}, "{{ value_json.temperature\n  | round(1) }}",
+	'mehrzeiliges Template bleibt ohne Textkodierung deklarativ erhalten');
 unlike($multiline_template->{reading_lines}[0]{line}, qr/e3sg/,
 	'mehrzeiliges Template verwendet ebenfalls kein Base64');
 
 my $second_template = MQTT2_Discovery::Mapper::map_entity(
 	entity => entity('sensor', object_id => 'humidity', value_template => '{{ value_json.humidity }}'),
 	io_name => 'mqtt', cid => 'client');
-my $grouped = MQTT2_Discovery::Mapper::render_entries(
-	[$template->{reading_lines}[0], $second_template->{reading_lines}[0]], undef);
+my ($grouped, $grouped_references) = render_with_references(
+	[$template->{reading_lines}[0], $second_template->{reading_lines}[0]], undef, undef,
+);
 is(scalar(@$grouped), 1, 'mehrere einfache JSON-Pfade desselben Topics werden zusammengefasst');
 unlike($grouped->[0]{line}, qr/'temperature'\s*=>/,
 	'gruppierte JSON-Auswertung behaelt auch temperature als direkten Blattnamen');
 unlike($grouped->[0]{line}, qr/'humidity'\s*=>/,
 	'identische JSON- und Reading-Namen werden nicht wiederholt');
-like($grouped->[0]{line}, qr/'\^\(\?:humidity\|temperature\)\$'/,
-	'gruppierte JSON-Auswertung filtert exakt auf die angekuendigten Readings');
+is([map { $_->{name} }
+		@{ descriptor_from_references($grouped_references, $grouped->[0]{line})
+			->{configuration}{readings} }], [qw(humidity temperature)],
+	'gruppierte JSON-Auswertung enthaelt exakt die angekuendigten Readings');
 like($second_template->{reading_lines}[0]{line},
 	qr/\{ json2nameValue\(\$EVENT, '', \{\}, '\^\(\?:humidity\)\$'\) \}$/,
 	'auch reine Eins-zu-eins-Namen begrenzen die ausgewerteten JSON-Felder');
@@ -662,8 +989,8 @@ my $autocreate_template = MQTT2_Discovery::Mapper::map_entity(
 		value_template => '{{ value_json.ENERGY.Power[0] }}', device_class => 'power',
 		json_autocreate => 1), io_name => 'mqtt', cid => 'client');
 is($autocreate_template->{reading_lines}[0]{line},
-	q{node/data:.* { json2nameValue($EVENT,'',$JSONMAP) }},
-	'Autocreate-Modus verwendet FHEMs kurze JSONMAP-Auswertung');
+	q{node/data:.* { MQTT2_DISCOVERY_jsonReadings($NAME,'data',$EVENT) }},
+	'Autocreate-Modus verwendet den kompakten JSON-Wrapper');
 is($autocreate_template->{reading_lines}[0]{name}, 'ENERGY_Power_1',
 	'Autocreate-Modus behaelt den von FHEM abgeflachten Reading-Namen');
 is($autocreate_template->{semantic_entity}{id}, 'energy_power_0',
@@ -675,7 +1002,7 @@ my $autocreate_switch = MQTT2_Discovery::Mapper::map_entity(
 		value_template => '{{ value_json.POWER }}', payload_on => 'ON', payload_off => 'OFF',
 		json_autocreate => 1), io_name => 'mqtt', cid => 'client');
 is($autocreate_switch->{reading_lines}[0]{line},
-	q{node/result:.* { json2nameValue($EVENT,'',$JSONMAP) }},
+	q{node/result:.* { MQTT2_DISCOVERY_jsonReadings($NAME,'result',$EVENT) }},
 	'Autocreate gilt auch fuer native JSON-Aktorzustaende');
 is($autocreate_switch->{semantic_entity}{capabilities}{power}{read}, 'POWER',
 	'SemanticUI liest beim Aktor das rohe JSON-Reading');

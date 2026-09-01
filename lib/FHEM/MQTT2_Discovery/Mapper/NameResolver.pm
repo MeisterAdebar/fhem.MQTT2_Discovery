@@ -5,7 +5,6 @@ package MQTT2_Discovery::Mapper::NameResolver;
 
 use strict;
 use warnings;
-use JSON::PP ();
 use MQTT2_Discovery::Helper qw(safe_name stable_suffix);
 
 
@@ -305,8 +304,8 @@ sub _resolve_reserved_entry_names {
 	return $mappings;
 }
 
-# Wendet die deviceweite Namensaufloesung auf Mappings, Eintraege und Semantik an.
-sub resolve {
+# Wendet die deviceweite Namensaufloesung auf exklusiv besessene Mappings an.
+sub resolve_owned {
 	my ($source, $extra_reserved) = @_;
 	my %source = map { (($_->{entity_key} // '') => $_) }
 		grep { ref($_) eq 'HASH' && defined($_->{entity_key}) } @{ $source || [] };
@@ -314,10 +313,10 @@ sub resolve {
 	my $resolved = _resolved_mapping_names(\%source, $reserved);
 	my @result;
 
-	# Die tiefe JSON-Kopie verhindert, dass das Umbenennen die in der Registry
-	# gespeicherten Original-Mappings veraendert.
+	# Der Aufrufer hat den Mapping-Satz bereits exklusiv uebergeben; dadurch darf
+	# die Aufloesung ohne eine zweite Tiefenkopie direkt auf diesen Daten arbeiten.
 	for my $key (sort keys %source) {
-		my $mapping = JSON::PP->new->decode(JSON::PP->new->encode($source{$key}));
+		my $mapping = $source{$key};
 		my $old = $mapping->{reading_name};
 		my $new = $resolved->{$key} // $old;
 

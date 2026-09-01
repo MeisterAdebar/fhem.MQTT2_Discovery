@@ -33,6 +33,8 @@ subtest 'config und sensors werden in beliebiger Reihenfolge zusammengefuehrt' =
 	my $result = parse_tasmota(\%state, $config_topic, $config);
 	is($result->{status}, 'ok', 'config vervollstaendigt das Device');
 	is($result->{entities}[0]{operation}, 'delete_device', 'Update beginnt mit atomarem Neuaufbau');
+	ok($result->{entities}[0]{internal_rebuild},
+		'technischer Delete-Schritt ist als interner Neuaufbau markiert');
 	my ($switch) = grep { ($_->{component} || '') eq 'switch' } @{ $result->{entities} };
 	ok($switch, 'Relay wird als Switch normalisiert');
 	is($switch->{state_topic}, 'stat/workshop_plug/RESULT', 'Statustopic aus ft/t/tp expandiert');
@@ -136,6 +138,8 @@ subtest 'Sensor- und Device-Delete sowie Validierung' => sub {
 		'Aktoren bleiben beim Sensor-Delete erhalten');
 	my $delete = parse_tasmota(\%state, $config_topic, '');
 	is($delete->{entities}[0]{operation}, 'delete_device', 'leeres config-Topic entfernt das ganze Device');
+	ok(!$delete->{entities}[0]{internal_rebuild},
+		'echtes Discovery-Delete traegt keine interne Neuaufbaumarkierung');
 
 	is(parse_tasmota({}, $config_topic, '{')->{error_class}, 'json', 'ungueltiges JSON wird klassifiziert');
 	is(parse_tasmota({}, $config_topic, '{"ver":2}')->{error_class}, 'version', 'unbekannte Protokollversion wird abgelehnt');

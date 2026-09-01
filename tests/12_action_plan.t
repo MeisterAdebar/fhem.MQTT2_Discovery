@@ -26,15 +26,16 @@ use MQTT2_Discovery::ActionPlan ();
 }
 
 subtest 'Plan beschreibt Seiteneffekte ohne sie auszufuehren' => sub {
+	my $gateway = Local::PlanGateway->new({ device => { readingList => 'old' } });
 	my $plan = MQTT2_Discovery::ActionPlan->new()
 		->set_attribute(
 			device => 'device', attribute => 'readingList', value => 'new',
 			previous_exists => 1, previous_value => 'old',
 		);
-	is($plan->actions, [{
-		type => 'set_attribute', device => 'device', attribute => 'readingList', value => 'new',
-		previous_exists => 1, previous_value => 'old',
-	}], 'Aktionsplan ist vor der Ausfuehrung vollstaendig inspizierbar');
+	is($gateway->{calls}, [], 'die Planung allein loest noch keine Seiteneffekte aus');
+	is($plan->execute($gateway), undef, 'der vorbereitete Plan ist ausfuehrbar');
+	is($gateway->{calls}, [['device', 'readingList', 'new']],
+		'die geplante Aenderung wird erst beim Ausfuehren angewendet');
 };
 
 subtest 'erfolgreicher Plan wird in Reihenfolge ausgefuehrt' => sub {

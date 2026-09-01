@@ -175,11 +175,6 @@ my %DEVICE_ABBREVIATION = (
 	via    => 'via_device',
 );
 
-# Oeffentliche Liste fuer Dokumentation und Tests; die Sortierung ist stabil.
-sub supported_components {
-	return sort keys %SUPPORTED;
-}
-
 # Erzeugt ein einheitlich strukturiertes Parserfehler-Ergebnis fuer den Formatadapter.
 sub _error {
 	my ($class, $message, %extra) = @_;

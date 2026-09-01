@@ -18,13 +18,6 @@ use MQTT2_Discovery::Mapper::Renderer ();
 use MQTT2_Discovery::Mapper::Semantics ();
 
 
-# Unterstuetzte Komponenten werden einmal zentral definiert. Die eigentliche
-# Mappingroutine konzentriert sich danach auf ihre jeweiligen Besonderheiten.
-my %SUPPORTED_COMPONENT = map { $_ => 1 } qw(
-	sensor binary_sensor switch button number select text light cover fan lock
-	climate media_player update device_tracker event device_automation
-);
-
 # Erzeugt die stabile Device-Identitaet aus Herstellerkennung und Verbindungsdaten.
 sub _identity {
 	my ($entity, $io_name) = @_;
@@ -139,12 +132,27 @@ sub _logical_reading_path {
 		return [$component, $fallback, $json_name];
 	}
 
+	# ESPHome und aehnliche Publisher stellen ihrer object_id haeufig die
+	# normalisierte node_id voran. Der Geraeteteil bleibt Kollisionsreserve,
+	# waehrend nur der fachliche Suffix als sichtbarer Readingname dient.
+	if (defined($entity->{node_id}) && !ref($entity->{node_id})
+			&& $entity->{node_id} ne '') {
+		my $node = safe_name($entity->{node_id}, 'node');
+
+		# Nur ein vollstaendiger Segmentprefix darf entfernt werden; bloss
+		# aehnlich beginnende technische IDs bleiben unveraendert.
+		if ($fallback =~ /\A\Q$node\E_(.+)\z/) {
+			return [$component, $node, safe_name($1, $fallback)];
+		}
+
+	}
+
 	return [$component, $fallback];
 }
 
-# Loest Reading- und Set-Namenskollisionen ueber einen ganzen Device-Satz auf.
-sub resolve_mapping_names {
-	return MQTT2_Discovery::Mapper::NameResolver::resolve(@_);
+# Loest Namen direkt auf einem bereits exklusiv besessenen Mapping-Satz auf.
+sub resolve_owned_mapping_names {
+	return MQTT2_Discovery::Mapper::NameResolver::resolve_owned(@_);
 }
 
 # Leitet fuer eine Topicgruppe einen freien, vom Topicende aus lesbaren Readingnamen ab.
@@ -263,7 +271,6 @@ sub collapse_device_automation_readings {
 			(defined($template) && $template ne '' && defined($context)
 				? (template_context => $context) : ()),
 		};
-		$group->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($group, undef);
 		my $anchor = $candidates[0];
 		$insert{"$anchor->{mapping_index}\0$anchor->{entry_index}"} = $group;
 	}
@@ -344,7 +351,6 @@ sub _reading {
 			}
 		}
 	}
-	$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 	return $entry;
 }
 
@@ -396,7 +402,6 @@ sub _publish {
 		kind => 'publish', name => $name, spec => $spec, topic => $topic, template => $template,
 		identity => MQTT2_Discovery::Mapper::Renderer::identity_template($compiled) ? 1 : 0,
 	};
-	$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 	return $entry;
 }
 
@@ -415,7 +420,6 @@ sub _choice {
 		kind => 'choice', name => $name, spec => $spec, topic => $topic,
 		mapping => $mapping, template => $template,
 	};
-	$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 	return $entry;
 }
 
@@ -424,7 +428,6 @@ sub _button {
 	my ($name, $topic, $payload) = @_;
 	return undef if !defined($topic) || ref($topic) || $topic eq '';
 	my $entry = { kind => 'button', name => $name, spec => 'noArg', topic => $topic, payload => $payload };
-	$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 	return $entry;
 }
 
@@ -436,7 +439,6 @@ sub _json_publish {
 		kind => 'json', name => $name, spec => $spec, topic => $topic, key => $key,
 		(ref($constants) eq 'HASH' ? (constants => { %$constants }) : ()),
 	};
-	$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 	return $entry;
 }
 
@@ -449,7 +451,6 @@ sub _json_choice {
 		key => $key, mapping => $mapping,
 		(ref($constants) eq 'HASH' ? (constants => { %$constants }) : ()),
 	};
-	$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 	return $entry;
 }
 
@@ -556,16 +557,6 @@ sub map_model {
 	return _map_canonical_entity(%args, entity => $source_entity);
 }
 
-# Ueberfuehrt eine Legacy-Parser-Entity ueber das kanonische Modell in ein Mapping.
-sub map_entity {
-	my (%args) = @_;
-	my $model = MQTT2_Discovery::Model::from_entity(
-		adapter => 'compatibility', entity => $args{entity},
-	);
-	return { ok => 0, error => 'Entity fehlt' } if !$model;
-	return map_model(%args, model => $model);
-}
-
 # Erzeugt Identitaet, FHEM-Namen, Readings, Sets und Semantik fuer eine Entity.
 sub _map_canonical_entity {
 	my (%args) = @_;
@@ -575,8 +566,6 @@ sub _map_canonical_entity {
 	return { ok => 0, error => 'Delete-Ereignisse werden nicht gemappt' }
 		if ($entity->{operation} || '') ne 'upsert';
 	my $component = $entity->{component} || '';
-	return { ok => 0, unsupported => 1, error => "Nicht unterstuetzte Komponente: $component" }
-		if !$SUPPORTED_COMPONENT{$component};
 
 	# Identitaet, Zielname und Reading-Pfad werden vor den Komponentenregeln
 	# festgelegt, damit alle Zweige dieselben stabilen Namen verwenden.
@@ -618,7 +607,6 @@ sub _map_canonical_entity {
 	if (ref($state_entry) eq 'HASH' && !$state_entry->{error}
 			&& $component eq 'device_automation' && defined($entity->{value_template})) {
 		$state_entry->{template_context} = 'trigger';
-		$state_entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($state_entry, undef);
 	}
 	_add_entry(\@readings, \@warnings, $state_entry, 'state');
 
@@ -1020,12 +1008,11 @@ sub _map_canonical_entity {
 
 	}
 
-	# retain veraendert die gerenderte Topic-Syntax; aktivierte Entities muessen
-	# deshalb nach dem Setzen dieses Flags noch einmal gerendert werden.
+	# Retain wird deklarativ gespeichert und erst beim abschliessenden Rendern
+	# an das Topic angehaengt.
 	if (MQTT2_Discovery::Mapper::Renderer::retain_enabled($entity->{retain})) {
 		for my $entry (@sets) {
 			$entry->{retain} = 1;
-			$entry->{line} = MQTT2_Discovery::Mapper::Renderer::render_entry($entry, undef);
 		}
 
 	}

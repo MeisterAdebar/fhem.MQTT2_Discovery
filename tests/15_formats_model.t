@@ -11,6 +11,7 @@ use lib 'lib/FHEM';
 use MQTT2_Discovery::FormatRegistry ();
 use MQTT2_Discovery::Model ();
 use MQTT2_Discovery::Mapper ();
+use MQTT2_Discovery::Mapper::Renderer ();
 
 my $prefixes = ['homeassistant', 'tasmota/discovery'];
 
@@ -59,8 +60,9 @@ subtest 'Home Assistant normalisiert in Modellversion 1' => sub {
 	is($event->{entity}{kind}, 'switch', 'Geraeteklasse ist normalisiert');
 	is($event->{signals}[0]{topic}, 'node/state/power', 'State-Kanal ist als Signal beschrieben');
 	is($event->{commands}[0]{topic}, 'node/command/power', 'Command-Kanal ist separat beschrieben');
-	is([$event->{capabilities}{power}{read}, $event->{capabilities}{power}{write}],
-		['state', 'command'], 'Capability verbindet Signal und Command ausdruecklich');
+	ok(!exists($event->{entity}{configuration}{state_topic})
+		&& !exists($event->{entity}{configuration}{command_topic}),
+		'Binding-Felder werden nicht zusaetzlich in configuration dupliziert');
 	is([$event->{entity}{configuration}{state_on}, $event->{entity}{configuration}{state_off}],
 		['enabled', 'disabled'],
 		'getrennte Switch-Zustandswerte passieren die kanonische Modellgrenze');
@@ -112,8 +114,22 @@ subtest 'HA-Entity-Name passiert die kanonische Modellgrenze' => sub {
 	ok(!exists($event->{commands}[0]{name}),
 		'das Command-Binding erfindet keinen Namen aus seinem Topic');
 	my $mapping = MQTT2_Discovery::Mapper::map_model(model => $event, io_name => 'mqtt');
-	is($mapping->{set_lines}[0]{line}, 'identify:noArg node/set/not_the_name identify',
+	is(MQTT2_Discovery::Mapper::Renderer::render_entry($mapping->{set_lines}[0]),
+		'identify:noArg node/set/not_the_name identify',
 		'der protokollneutrale Mapper verwendet nur den kanonischen logischen Namen');
+};
+
+subtest 'HA-Root-Entity wird unabhaengig von der Schreibweise erkannt' => sub {
+	my $result = consume(
+		'homeassistant/update/node/node/config',
+		'{"state_topic":"node/update","device":{"identifiers":["node"],"name":"Node"}}',
+	);
+	my $event = $result->{events}[0];
+	is($event->{entity}{root}, 1,
+		'kleingeschriebene object_id und Device-Name bezeichnen dieselbe Root-Entity');
+	my ($legacy, $error) = MQTT2_Discovery::Model::to_entity($event);
+	is($error, undef, 'Root-Entity laesst sich fuer den Mapper projizieren');
+	is($legacy->{_canonical_root}, 1, 'die Mapper-Projektion erhaelt die Root-Markierung');
 };
 
 subtest 'HA-JSON-Light endet als allgemeiner Codecvertrag am Modell' => sub {
@@ -134,7 +150,8 @@ subtest 'HA-JSON-Light endet als allgemeiner Codecvertrag am Modell' => sub {
 		'kanonischer Brightness-Command ist protokollneutral typisiert');
 	delete @{$event->{entity}{configuration}}{qw(command_codec brightness_command_codec)};
 	my $mapping = MQTT2_Discovery::Mapper::map_model(model => $event, io_name => 'mqtt');
-	is([map { $_->{line} } @{ $mapping->{set_lines} }], [
+	is([map { MQTT2_Discovery::Mapper::Renderer::render_entry($_) }
+			@{ $mapping->{set_lines} }], [
 		q{state:ON,OFF node/light/set {"state":"$EVTPART1"}},
 		q{brightness:slider,0,1,255 node/light/set {"brightness":$EVTPART1}},
 	], 'Mapper rendert ausschliesslich aus den kanonischen Bindings');

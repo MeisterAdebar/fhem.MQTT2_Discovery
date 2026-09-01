@@ -6,6 +6,7 @@
 
 use strict;
 use warnings;
+use Encode ();
 use Test2::V0;
 use JSON::PP ();
 use lib 'lib/FHEM', 'tests/lib';
@@ -15,8 +16,9 @@ my $loaded = do './FHEM/10_MQTT2_DISCOVERY.pm';
 die $@ if $@;
 die $! if !defined $loaded;
 
-my $availability_json_map =
-	q{MQTT2_DISCOVERY_runtimeJSONMap($NAME, {"availability" => "state_availability"})};
+my %json_readings = map {
+	($_ => q{MQTT2_DISCOVERY_jsonReadings($NAME,'} . $_ . q{',$EVENT)})
+} qw(info result sensor state uptime);
 
 # Setzt eine vollstaendig isolierte FHEM-Testumgebung mit Discovery-Device auf.
 sub setup {
@@ -29,9 +31,31 @@ sub setup {
 	$main::attr{discovery}{deviceNamePrefix} = 'MQTT2_' if !exists $args{device_name_prefix};
 	$main::attr{discovery}{deviceNamePrefix} = $args{device_name_prefix}
 		if exists($args{device_name_prefix}) && $args{device_name_prefix} ne '';
+	$main::attr{discovery}{createReadings} = $args{create_readings}
+		if exists $args{create_readings};
 	my $activate_error = main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'activate');
 	die $activate_error if $activate_error;
 	return $hash;
+}
+
+# Loest die in einer Attributzeile sichtbare Kurzreferenz aus der persistenten
+# Discovery-Registry auf, damit Tests weiterhin deren deklarativen Inhalt pruefen.
+sub runtime_descriptor_for_line {
+	my ($device, $line) = @_;
+	my ($reference) = defined($line) && !ref($line)
+		? $line =~ /MQTT2_DISCOVERY_runtimeRef\(\$NAME, '(r_[a-f0-9]+)'/ : ();
+	return undef if !defined $reference;
+	my $stored = reading_value('discovery', '.registry');
+	my $registry = eval { JSON::PP->new->decode($stored) };
+	return undef if ref($registry) ne 'HASH' || ref($registry->{devices}) ne 'HASH';
+
+	for my $record (values %{ $registry->{devices} }) {
+		next if ref($record) ne 'HASH' || ($record->{name} || '') ne $device
+			|| ref($record->{runtime_refs}) ne 'HASH';
+		return $record->{runtime_refs}{$reference};
+	}
+
+	return undef;
 }
 
 # Erzeugt einen typischen HA-Schalterpayload fuer wiederverwendbare Integrationstests.
@@ -54,6 +78,8 @@ subtest 'klassischer Switch und Dispatch-Konsum' => sub {
 	like(attr_value('MQTT2_Node_node', 'readingList'), qr/\$DEVICETOPIC\/state/,
 		'readingList verwendet das gemeinsame MQTT2-Devicetopic');
 	like(attr_value('MQTT2_Node_node', 'setList'), qr/power:on,off/, 'setList enthaelt Switch-Setter');
+	ok(!exists($main::defs{MQTT2_Node_node}{READINGS}{power}),
+		'ohne createReadings bleibt das fachliche Reading bis zur ersten State-Nachricht aus');
 	is($main::defs{MQTT2_Node_node}{SEMANTIC_METADATA}{confidence}, 0.95,
 		'neu angelegtes Device liefert Semantic-Metadaten mit hoher Konfidenz');
 	is($main::defs{MQTT2_Node_node}{SEMANTIC_METADATA}{entities}[0]{class}, 'switch',
@@ -65,6 +91,157 @@ subtest 'klassischer Switch und Dispatch-Konsum' => sub {
 
 	my $normal = dispatch_message('mqtt', 'client1', 'node/power/state', '1');
 	is($normal, ['MQTT2_DEVICE', 'MQTT_GENERIC_BRIDGE'], 'normales Topic laeuft an nachfolgende Consumer weiter');
+};
+
+subtest 'EMS-ESP Jinja-Fallback und Unicode-Payload bleiben hinter Referenzen' => sub {
+	setup();
+	my $umlaut = chr(0xdf);
+	my $json = JSON::PP->new->canonical(1)->utf8(1);
+	my $device = {
+		ids => ['ems-esp-boiler'], name => 'EMS ESP Boiler',
+		mf => 'EMS-ESP', mdl => 'Boiler',
+	};
+	my $sensor = $json->encode({
+		name => 'Heating temperature', uniq_id => 'ems_boiler_heatingtemp',
+		stat_t => 'ems-esp/boiler/data',
+		val_tpl => "{{ value_json['heatingtemp'] if value_json['heatingtemp'] is defined else 0 }}",
+		dev => $device,
+	});
+	my $switch = $json->encode({
+		name => 'Boost', uniq_id => 'ems_boiler_boost',
+		stat_t => 'ems-esp/boiler/boost', cmd_t => 'ems-esp/boiler/command',
+		pl_on => "hei${umlaut}", pl_off => 'aus',
+		dev => $device,
+	});
+	dispatch_message('mqtt', 'ems-esp',
+		'homeassistant/sensor/ems-esp-boiler/heatingtemp/config', $sensor);
+	dispatch_message('mqtt', 'ems-esp',
+		'homeassistant/switch/ems-esp-boiler/boost/config', $switch);
+	my $target = 'MQTT2_EMS_ESP_Boiler';
+	my $reading_list = attr_value($target, 'readingList');
+	my ($reading_line) = grep { /runtimeRef/ } split /\n/, $reading_list;
+	like($reading_line, qr/MQTT2_DISCOVERY_runtimeRef\(\$NAME, 'r_[a-f0-9]{16}', \$EVENT\)/,
+		'das bedingte EMS-Template erscheint nur als kurze Referenz');
+	unlike($reading_list, qr/is defined|value_json/,
+		'das Jinja-Template steht nicht mehr sichtbar in readingList');
+	is(reading_value('discovery', 'warningCount'), 0,
+		'das sichere is-defined-Template erzeugt keine Discovery-Warnung');
+	my $reading_descriptor = runtime_descriptor_for_line($target, $reading_line);
+	my $reading_name = $reading_descriptor->{configuration}{readings}[0]{name};
+	my ($reading_reference) = $reading_line =~ /'(r_[a-f0-9]+)'/;
+	is(main::MQTT2_DISCOVERY_runtimeRef(
+			$target, $reading_reference, '{"heatingtemp":55}'),
+		{ $reading_name => '55' },
+		'is defined liefert den vorhandenen EMS-Wert als Reading');
+	is(main::MQTT2_DISCOVERY_runtimeRef($target, $reading_reference, '{}'),
+		{ $reading_name => '0' },
+		'is defined liefert bei fehlendem EMS-Feld den deklarierten Fallback');
+
+	my $set_list = attr_value($target, 'setList');
+	my ($set_line) = grep { /runtimeRef/ } split /\n/, $set_list;
+	like($set_line, qr/MQTT2_DISCOVERY_runtimeRef/,
+		'das Unicode-Mapping erscheint nur als kurze Set-Referenz');
+	ok($set_line !~ /[^\x00-\x7f]/ && $set_line !~ /\\u00df/i,
+		'setList enthaelt weder das Umlautzeichen noch dessen JSON-Escape');
+	my ($set_reference) = $set_line =~ /'(r_[a-f0-9]+)'/;
+	my ($set_name) = $set_line =~ /^([^: ]+)/;
+	my $command = main::MQTT2_DISCOVERY_runtimeRef(
+		$target, $set_reference, "$set_name on",
+	);
+	my $expected = Encode::encode('UTF-8', "ems-esp/boiler/command hei${umlaut}");
+	is(unpack('H*', $command), unpack('H*', $expected),
+		'die Referenz liefert das scharfe s als echte UTF-8-Bytes an MQTT2_DEVICE');
+	ok(!utf8::is_utf8($command), 'der MQTT-Befehl ist ein expliziter Bytestrom');
+};
+
+subtest 'Runtime-Readings liefern Unicode genau einmal als UTF-8-Bytestrom' => sub {
+	setup();
+	my $description = Encode::decode('UTF-8',
+		"Es wird kein aktiver Ger\xC3\xA4tefehler gemeldet.");
+	my $json = JSON::PP->new->canonical(1)->utf8(1);
+	my $state_topic = 'ecovacs/ecovacs-eg/state';
+	my $configuration = $json->encode({
+		name => 'Error description', uniq_id => 'ecovacs_eg_error_description',
+		stat_t => $state_topic, val_tpl => '{{ value_json.errorDescription }}',
+		dev => { ids => ['ecovacs-eg'], name => 'Ecovacs EG' },
+	});
+	dispatch_message('mqtt', 'ecovacs',
+		'homeassistant/sensor/ecovacs-eg/errorDescription/config', $configuration);
+	my ($target) = grep {
+		($main::defs{$_}{TYPE} || '') eq 'MQTT2_DEVICE'
+	} sort keys %main::defs;
+	ok(defined($target), 'UTF-8-Test hat ein MQTT2_DEVICE angelegt');
+	my ($reading_line) = grep { /runtimeRef/ }
+		split /\n/, attr_value($target, 'readingList');
+	my $descriptor = runtime_descriptor_for_line($target, $reading_line);
+	my $reading_name = $descriptor->{configuration}{readings}[0]{name};
+	my ($reference) = $reading_line =~ /'(r_[a-f0-9]+)'/;
+	my $state = $json->encode({ errorDescription => $description });
+	my $result = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $state);
+	my $expected = Encode::encode('UTF-8', $description);
+	is(unpack('H*', $result->{$reading_name}), unpack('H*', $expected),
+		'Topic-Referenz liefert das ae als korrekte UTF-8-Bytes');
+	ok(!utf8::is_utf8($result->{$reading_name}),
+		'Topic-Referenz liefert einen expliziten FHEM-Bytestrom');
+
+	my $already_encoded = main::MQTT2_DISCOVERY_mqttReadingBytes({
+		errorDescription => $expected,
+	});
+	is(unpack('H*', $already_encoded->{errorDescription}), unpack('H*', $expected),
+		'bereits codierte MQTT-Bytes werden nicht doppelt codiert');
+};
+
+subtest 'createReadings legt sichere Namen leer an und erhaelt Werte' => sub {
+	setup(create_readings => 1);
+	my $topic = 'homeassistant/switch/node/power/config';
+	dispatch_message('mqtt', 'client1', $topic, switch_payload());
+	is(reading_value('MQTT2_Node_node', 'power'), '',
+		'angekuendigtes State-Reading wird unmittelbar leer angelegt');
+
+	main::readingsSingleUpdate($main::defs{MQTT2_Node_node}, 'power', '1', 1);
+	dispatch_message('mqtt', 'client1', $topic, switch_payload());
+	is(reading_value('MQTT2_Node_node', 'power'), '1',
+		'erneute Discovery ueberschreibt keinen bereits empfangenen Wert');
+};
+
+subtest 'Sonos2mqtt-Speaker wird als bedienbarer Media-Player angelegt' => sub {
+	setup();
+	my $uuid = 'RINCON_804AF28451D201400';
+	my $topic = "sonos2mqtt/discovery/sonos/$uuid";
+	my $payload = qq|{"device":{"identifiers":["$uuid"],"manufacturer":"Sonos, Inc.","model":"Sonos Era 300","name":"Wohnen","sw_version":"94.1-75110","connections":[["host","192.168.1.141:1400"],["mqtt","sonos/$uuid"],["mac","80:4A:F2:84:51:D2"]]},"device_class":"speaker","icon":"mdi:speaker","name":"Wohnen","state_topic":"sonos/$uuid","command_topic":"sonos/$uuid/control","unique_id":"sonos2mqtt_${uuid}_speaker","availability_topic":"sonos/connected"}|;
+	my $seen = dispatch_message('mqtt', 'sonosbridge', $topic, $payload);
+	is($seen, ['MQTT2_DISCOVERY'], 'native Sonos2mqtt-Discovery wird vom neuen Adapter konsumiert');
+	my $target = 'MQTT2_Wohnen';
+	ok($main::defs{$target}, 'fuer den Sonos-Raum wurde ein MQTT2_DEVICE angelegt');
+	is($main::defs{$target}{DEF}, 'sonosbridge',
+		'MQTT2_SERVER behaelt die Publisher-CID der Sonos2mqtt-Instanz');
+	my $reading_list = attr_value($target, 'readingList');
+	my ($speaker_line) = grep { /^\$DEVICETOPIC:/ } split /\n/, $reading_list;
+	like($speaker_line, qr/MQTT2_DISCOVERY_runtimeRef/,
+		'readingList liest den Transportstatus ueber eine relative kompakte Referenz');
+	my $speaker_descriptor = runtime_descriptor_for_line($target, $speaker_line);
+	ok(grep({ ($_->{name} || '') eq 'transportState' }
+		@{ $speaker_descriptor->{configuration}{readings} || [] }),
+		'die Referenz behaelt das Transportstatus-Reading deklarativ bei');
+	like(attr_value($target, 'readingList'), qr/sonos\/connected/,
+		'readingList bindet die bridgeweite Sonos-Verfuegbarkeit ein');
+	like(attr_value($target, 'setList'),
+		qr/volume:slider,0,1,100 \$DEVICETOPIC\/control \{"command":"volume","input":\$EVTPART1\}/,
+		'setList steuert die Lautstaerke mit dem Sonos2mqtt-JSON-Vertrag');
+	like(attr_value($target, 'setList'),
+		qr/play:noArg \$DEVICETOPIC\/control \{"command":"play"\}/,
+		'setList enthaelt argumentlose Transportaktionen');
+	is($main::defs{$target}{SEMANTIC_METADATA}{entities}[0]{class}, 'media_player',
+		'Device stellt Media-Player-Semantik bereit');
+	is($main::defs{$target}{SEMANTIC_METADATA}{entities}[0]{capabilities}{volume}{write}, 'volume',
+		'semantische Lautstaerke verweist auf den tatsaechlichen Setter');
+	is(reading_value('discovery', 'lastAdapter'), 'sonos2mqtt', 'verwendeter Adapter ist sichtbar');
+	is(reading_value('discovery', 'discoveredDevices'), 1, 'ein Sonos-Device wurde erkannt');
+	is(reading_value('discovery', 'discoveredEntities'), 1, 'eine Media-Player-Entity wurde erkannt');
+
+	my $normal = dispatch_message('mqtt', 'sonosbridge', "sonos/$uuid", '{"transportState":"PLAYING"}');
+	is($normal, ['MQTT2_DEVICE', 'MQTT_GENERIC_BRIDGE'],
+		'normales Sonos-State-Topic bleibt bei den nachfolgenden Consumern');
 };
 
 subtest 'MQTT2_CLIENT trennt mehrere Discovery-Geraete trotz gemeinsamer Transport-CID' => sub {
@@ -132,15 +309,15 @@ subtest 'native Tasmota-Discovery fuehrt config und sensors zusammen' => sub {
 		'Relay-Status ist enthalten');
 	my ($result_line) = grep { /^stat\/workshop_plug\/RESULT:/ }
 		split /\n/, attr_value('MQTT2_Workshop_Plug', 'readingList');
-	is($result_line, q!stat/workshop_plug/RESULT:.* { json2nameValue($EVENT,'',!
-		. $availability_json_map . q!) }!,
+	is($result_line, q!stat/workshop_plug/RESULT:.* { !
+		. $json_readings{result} . q! }!,
 		'Tasmota-RESULT verwendet ebenfalls die kurze JSON-Auswertung');
 	like(attr_value('MQTT2_Workshop_Plug', 'readingList'), qr{tele/workshop_plug/SENSOR},
 		'Telemetriesensoren sind enthalten');
 	my ($sensor_line) = grep { /^tele\/workshop_plug\/SENSOR:/ }
 		split /\n/, attr_value('MQTT2_Workshop_Plug', 'readingList');
-	is($sensor_line, q!tele/workshop_plug/SENSOR:.* { json2nameValue($EVENT,'',!
-		. $availability_json_map . q!) }!,
+	is($sensor_line, q!tele/workshop_plug/SENSOR:.* { !
+		. $json_readings{sensor} . q! }!,
 		'Tasmota-SENSOR verwendet dieselbe kurze JSON-Auswertung wie MQTT2-Autocreate');
 	is(scalar(() = attr_value('MQTT2_Workshop_Plug', 'readingList') =~ /tele\/workshop_plug\/SENSOR/g), 1,
 		'alle Tasmota-Telemetriewerte teilen sich eine JSON-Auswertung');
@@ -148,6 +325,90 @@ subtest 'native Tasmota-Discovery fuehrt config und sensors zusammen' => sub {
 		'Relay-Befehl verwendet exakt den Reading-Namen');
 	is(reading_value('discovery', 'discoveredDevices'), 1, 'Tasmota ergibt ein Device');
 	is(reading_value('discovery', 'discoveredEntities'), 3, 'Relay und zwei Sensoren sind registriert');
+};
+
+subtest 'extraJsonReadings wechselt ohne neue Discovery zwischen offen und angekuendigt' => sub {
+	my $hash = setup();
+	my $config = '{"dn":"Strict Plug","fn":["Power"],"mac":"AABBCCDDEE01",'
+		. '"state":["OFF","ON"],"t":"strict_plug","ft":"%prefix%/%topic%/",'
+		. '"tp":["cmnd","stat","tele"],"rl":[1],"so":{"4":0},"ver":1}';
+	dispatch_message('mqtt', 'tasmota',
+		'tasmota/discovery/AABBCCDDEE01/config', $config);
+	my $target = 'MQTT2_Strict_Plug';
+	my $inclusive = attr_value($target, 'readingList');
+	like($inclusive, qr/MQTT2_DISCOVERY_jsonReadings/,
+		'der Default include erzeugt weiterhin offene Tasmota-JSON-Readings');
+	like($inclusive, qr{^stat/strict_plug/POWER:\.\* POWER$}m,
+		'das explizit angekuendigte Power-Reading ist im Default enthalten');
+
+	is(main::MQTT2_DISCOVERY_Attr(
+			'set', 'discovery', 'extraJsonReadings', 'ignore',
+		), undef, 'der restriktive JSON-Modus wird akzeptiert');
+	$main::attr{discovery}{extraJsonReadings} = 'ignore';
+	main::MQTT2_DISCOVERY_process_queue($hash);
+	my $strict = attr_value($target, 'readingList');
+	unlike($strict, qr/MQTT2_DISCOVERY_jsonReadings/,
+		'ignore entfernt alle offenen JSON-Sammelhandler');
+	unlike($strict, qr{^tele/strict_plug/(?:STATE|SENSOR|INFO|UPTIME):}m,
+		'ignore entfernt nicht konkret angekuendigte Tasmota-Zusatzfelder');
+	my ($strict_result_line) = grep { /^stat\/strict_plug\/RESULT:/ }
+		split /\n/, $strict;
+	my $strict_result = runtime_descriptor_for_line($target, $strict_result_line);
+	is([map { $_->{name} } @{ $strict_result->{configuration}{readings} || [] }], ['POWER'],
+		'RESULT wertet im restriktiven Modus nur das angekuendigte POWER-Feld aus');
+	like($strict, qr{^stat/strict_plug/POWER:\.\* POWER$}m,
+		'ignore behaelt das explizit angekuendigte Power-Feld');
+	like($strict, qr{^tele/strict_plug/LWT:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
+		'ignore behaelt die angekuendigte Availability-Auswertung');
+
+	# Die Rueckkehr zu include rendert die offenen Felder aus der Registry neu;
+	# es wird bewusst keine zweite Discovery-Nachricht gesendet.
+	is(main::MQTT2_DISCOVERY_Attr(
+			'set', 'discovery', 'extraJsonReadings', 'include',
+		), undef, 'der inklusive Defaultmodus kann wiederhergestellt werden');
+	$main::attr{discovery}{extraJsonReadings} = 'include';
+	main::MQTT2_DISCOVERY_process_queue($hash);
+	like(attr_value($target, 'readingList'), qr/MQTT2_DISCOVERY_jsonReadings/,
+		'die Registry stellt die offenen JSON-Felder ohne neue Discovery wieder her');
+};
+
+subtest 'konservativer Tasmota-Merge vermeidet doppelte JSON-Sammelhandler' => sub {
+	setup();
+	my $target = 'ExistingTasmota';
+	is(main::CommandDefine(undef, "$target MQTT2_DEVICE tasmota mqtt"), undef,
+		'vorhandenes Tasmota-Device wird mit derselben Transport-CID registriert');
+	my @manual = (
+		q!tele/tasmota_44768C/STATE:.* { json2nameValue($EVENT,'',$JSONMAP) }!,
+		q!tele/tasmota_44768C/SENSOR:.* { json2nameValue($EVENT,'',$JSONMAP) }!,
+		q!tele/tasmota_44768C/INFO.:.* { json2nameValue($EVENT,'',$JSONMAP) }!,
+		q!tele/tasmota_44768C/UPTIME:.* { json2nameValue($EVENT,'',$JSONMAP) }!,
+		q!stat/tasmota_44768C/RESULT:.* { json2nameValue($EVENT,'',$JSONMAP) }!,
+	);
+	$main::attr{$target}{readingList} = join("\n", @manual);
+	my $config = '{"dn":"Existing Tasmota","mac":"AABBCC44768C","state":["OFF","ON"],"t":"tasmota_44768C","ft":"%prefix%/%topic%/","tp":["cmnd","stat","tele"],"rl":[1],"so":{"4":0},"ver":1}';
+
+	is(dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/AABBCC44768C/config', $config),
+		['MQTT2_DISCOVERY'], 'Tasmota-Discovery wird fuer das Bestandsdevice konsumiert');
+	my $reading_list = attr_value($target, 'readingList');
+
+	for my $line (@manual) {
+		is(scalar(grep { $_ eq $line } split /\n/, $reading_list), 1,
+			"manueller JSON-Sammelhandler bleibt genau einmal erhalten: $line");
+	}
+
+	my @overlapping = grep {
+		m{^(?:tele/tasmota_44768C/(?:STATE|SENSOR|INFO.|UPTIME)|stat/tasmota_44768C/RESULT):}
+	} split /\n/, $reading_list;
+	is(scalar(@overlapping), scalar(@manual),
+		'Discovery fuegt fuer die bereits abgedeckten Topics keine zweite JSON-Auswertung hinzu');
+	unlike(join("\n", @overlapping), qr/MQTT2_DISCOVERY_jsonReadings/,
+		'die konservativ verdraengten JSON-Auswertungen umgehen die manuellen Regeln nicht');
+	like($reading_list, qr{^tele/tasmota_44768C/LWT:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
+		'unabhaengige Discovery-Availability bleibt trotz manueller JSON-Topics aktiv');
+	like(reading_value('discovery', 'conflicts'), qr/(?:^|,)STATE(?:,|$)/,
+		'der verdraengte STATE-Sammelhandler wird als Konflikt gemeldet');
+	like(reading_value('discovery', 'conflicts'), qr/(?:^|,)INFO(?:,|$)/,
+		'die verdraengte INFO-Sequenz wird als Konflikt gemeldet');
 };
 
 subtest 'native Tasmota-Klassen werden bis readingList und setList abgebildet' => sub {
@@ -169,8 +430,8 @@ subtest 'native Tasmota-Klassen werden bis readingList und setList abgebildet' =
 	like($set_list, qr{shutter_tilt:slider,0,1,90\s+cmnd/all_classes/ShutterTilt1}, 'Shutter-Tilt wird schreibbar');
 
 	my ($result_line) = grep { m{^stat/all_classes/RESULT:} } split /\n/, $reading_list;
-	is($result_line, q!stat/all_classes/RESULT:.* { json2nameValue($EVENT,'',!
-		. $availability_json_map . q!) }!,
+	is($result_line, q!stat/all_classes/RESULT:.* { !
+		. $json_readings{result} . q! }!,
 		'alle JSON-Zustaende aus RESULT teilen sich die Autocreate-Auswertung');
 	is(scalar(() = $reading_list =~ m{stat/all_classes/RESULT}g), 1,
 		'RESULT wird trotz vieler Tasmota-Komponenten nur einmal ausgewertet');
@@ -227,26 +488,21 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 	my $reading_list = attr_value('MQTT2_SchwimmbadEntfeuchter', 'readingList');
 	my @expected = (
 		q{tele/tasmota_CF9A44/LWT:.* LWT},
-		q!tele/tasmota_CF9A44/STATE:.* { json2nameValue($EVENT,'',!
-			. $availability_json_map . q!) }!,
-		q!tele/tasmota_CF9A44/SENSOR:.* { json2nameValue($EVENT,'',!
-			. $availability_json_map . q!) }!,
-		q!tele/tasmota_CF9A44/INFO(?:1|2|3):.* { $EVENT =~ m,^..Info(?:1|2|3)..(.+).$, ?  json2nameValue($1,'',!
-			. $availability_json_map . q!) : json2nameValue($EVENT,'',!
-			. $availability_json_map . q!) }!,
-		q!tele/tasmota_CF9A44/UPTIME:.* { json2nameValue($EVENT,'',!
-			. $availability_json_map . q!) }!,
+		q!tele/tasmota_CF9A44/STATE:.* { ! . $json_readings{state} . q! }!,
+		q!tele/tasmota_CF9A44/SENSOR:.* { ! . $json_readings{sensor} . q! }!,
+		q!tele/tasmota_CF9A44/INFO(?:1|2|3):.* { $EVENT =~ m,^..Info(?:1|2|3)..(.+).$, ?  MQTT2_DISCOVERY_jsonReadings($NAME,'info',$1) : !
+			. $json_readings{info} . q! }!,
+		q!tele/tasmota_CF9A44/UPTIME:.* { ! . $json_readings{uptime} . q! }!,
 		q{stat/tasmota_CF9A44/POWER1:.* POWER1},
 		q{stat/tasmota_CF9A44/POWER2:.* POWER2},
-		q!stat/tasmota_CF9A44/RESULT:.* { json2nameValue($EVENT,'',!
-			. $availability_json_map . q!) }!,
+		q!stat/tasmota_CF9A44/RESULT:.* { ! . $json_readings{result} . q! }!,
 	);
 	for my $line (@expected) {
 		is(scalar(grep { $_ eq $line } split /\n/, $reading_list), 1,
 			"readingList enthaelt genau einmal: $line");
 	}
 	like($reading_list,
-		qr{^tele/tasmota_CF9A44/LWT:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability}m,
+		qr{^tele/tasmota_CF9A44/LWT:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
 		'Tasmota-LWT speist zusaetzlich die allgemeine Availability-Auswertung');
 	my $set_list = attr_value('MQTT2_SchwimmbadEntfeuchter', 'setList');
 	like($set_list, qr{^POWER1:ON,OFF\s+cmnd/tasmota_CF9A44/POWER1$}m,
@@ -397,6 +653,54 @@ subtest 'HomeButtons Number-Defaults und Device-Automation' => sub {
 		'Number und Trigger werden beide registriert');
 };
 
+subtest 'Device-Automationen teilen sich topicweise das Reading action' => sub {
+	setup();
+	my $base = 'zigbee2mqtt/remote';
+	my $device = '"dev":{"ids":["remote"],"name":"REMOTE"}';
+	my %triggers = (
+		action_arrow_left_click => 'arrow_left_click',
+		action_arrow_left_hold => 'arrow_left_hold',
+		action_arrow_right_click => 'arrow_right_click',
+	);
+
+	# Einzelne Discovery-Entities bleiben registriert, obwohl sie dasselbe Laufzeitreading speisen.
+	for my $object_id (sort keys %triggers) {
+		dispatch_message('mqtt', 'z2m',
+			"homeassistant/device_automation/remote/$object_id/config",
+			qq({"atype":"trigger","t":"$base/action","pl":"$triggers{$object_id}","type":"action","stype":"$object_id",$device}),
+		);
+	}
+
+	my $reading_list = attr_value('MQTT2_REMOTE', 'readingList');
+	my @action_lines = grep { / action$/ } split /\r?\n/, $reading_list;
+	is(scalar(@action_lines), 1, 'alle drei Payloadvarianten erzeugen nur eine readingList-Zeile');
+	like($action_lines[0], qr/:\(\?:arrow_left_click\|arrow_left_hold\|arrow_right_click\)\$ action$/,
+		'das gemeinsame Reading action filtert alle angekuendigten Payloads exakt');
+	unlike($reading_list, qr/action_arrow_(?:left|right)/,
+		'payloadspezifische Entity-Namen erscheinen nicht mehr als eigene Readings');
+	is(reading_value('discovery', 'discoveredEntities'), 3,
+		'die drei Discovery-Entities bleiben getrennt in der Registry erhalten');
+
+	dispatch_message('mqtt', 'z2m',
+		'homeassistant/device_automation/remote/action_arrow_right_click/config', '');
+	$reading_list = attr_value('MQTT2_REMOTE', 'readingList');
+	@action_lines = grep { / action$/ } split /\r?\n/, $reading_list;
+	is(scalar(@action_lines), 1, 'nach dem Loeschen einer Entity bleibt genau eine gemeinsame Zeile');
+	like($action_lines[0], qr/:\(\?:arrow_left_click\|arrow_left_hold\)\$ action$/,
+		'die abschliessende Pruefung entfernt nur die geloeschte Payloadvariante');
+	unlike($action_lines[0], qr/arrow_right_click/,
+		'die geloeschte Payload wird nicht mehr akzeptiert');
+	is(reading_value('discovery', 'discoveredEntities'), 2,
+		'die Registry entfernt ebenfalls nur die geloeschte Entity');
+
+	dispatch_message('mqtt', 'z2m',
+		'homeassistant/device_automation/remote/action_arrow_left_hold/config', '');
+	$reading_list = attr_value('MQTT2_REMOTE', 'readingList');
+	@action_lines = grep { / action$/ } split /\r?\n/, $reading_list;
+	like($action_lines[0], qr/:arrow_left_click\$ action$/,
+		'auch die letzte verbleibende Entity behaelt den stabilen Namen action');
+};
+
 subtest 'externes Availability-Topic verhindert PAC-devicetopic nicht' => sub {
 	setup();
 	my $base = 'pac-1b844c';
@@ -411,13 +715,13 @@ subtest 'externes Availability-Topic verhindert PAC-devicetopic nicht' => sub {
 	is(attr_value('MQTT2_pac_1b844c', 'devicetopic'), $base,
 		'gemeinsame PAC-Topicbasis wird als devicetopic gesetzt');
 	my $reading_list = attr_value('MQTT2_pac_1b844c', 'readingList');
-	like($reading_list, qr/^pac\/status:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability/m,
+	like($reading_list, qr/^pac\/status:\.\* \{ MQTT2_DISCOVERY_runtimeRef/m,
 		'externes Availability-Topic bleibt vollstaendig in der HA-Verfuegbarkeitsauswertung');
 	like($reading_list, qr/^\$DEVICETOPIC\/sensor\/pac_outside_temperature\/state:\.\*/m,
 		'PAC-State-Topic verwendet DEVICETOPIC ohne CID-Praefix');
 	like(attr_value('MQTT2_pac_1b844c', 'setList'),
-		qr/^pac_mild_dry_switch:ON,OFF \$DEVICETOPIC\/switch\/pac_mild_dry_switch\/command$/m,
-		'PAC-Setter verwendet die direkten HA-Payloads und DEVICETOPIC');
+		qr/^mild_dry_switch:ON,OFF \$DEVICETOPIC\/switch\/pac_mild_dry_switch\/command$/m,
+		'PAC-Setter entfernt den node_id-Prefix und verwendet weiterhin DEVICETOPIC');
 };
 
 subtest 'ESPHome-PAC behaelt bestehende Setter und ergaenzt Climate vollstaendig' => sub {
@@ -526,10 +830,10 @@ subtest 'Device-Discovery ist atomar abbildbar' => sub {
 	my @commands = @{ command_log() }[$before .. $#{ command_log() }];
 	is($seen, ['MQTT2_DISCOVERY'], 'Device-Discovery konsumiert');
 	is(reading_value('discovery', 'discoveredEntities'), 2, 'beide Komponenten registriert');
-	like(attr_value('MQTT2_Node_node', 'readingList'), qr/json2nameValue/,
-		'einfaches Template verwendet die lesbare FHEM-JSON-Auswertung');
-	unlike(attr_value('MQTT2_Node_node', 'readingList'), qr/runtimeReading|e3sg/,
-		'einfaches Template erzeugt keinen kryptischen Runtime-Aufruf');
+	like(attr_value('MQTT2_Node_node', 'readingList'), qr/runtimeRef/,
+		'einfaches Template verwendet die kompakte Topic-Referenz');
+	unlike(attr_value('MQTT2_Node_node', 'readingList'), qr/e3sg/,
+		'einfaches Template erzeugt keinen kryptisch codierten Runtime-Aufruf');
 	is(scalar(grep { /^attr MQTT2_Node_node readingList / } @commands), 1,
 		'mehrere Komponenten schreiben readingList gemeinsam genau einmal');
 	is(scalar(grep { /^attr MQTT2_Node_node setList / } @commands), 1,
@@ -567,15 +871,26 @@ subtest 'HA-JSON-Entities erhalten kurze Namen und tiefstes gemeinsames Deviceto
 	is(attr_value($name, 'devicetopic'), 'zigbee2mqtt/WZ_LIGHTSTRIP_LICHT',
 		'das tiefste gemeinsame segmentgenaue Nutzdaten-Prefix wird verwendet');
 	my $reading_list = attr_value($name, 'readingList');
-	like($reading_list,
-		qr/^\$DEVICETOPIC:\.\* \{ json2nameValue\(\$EVENT, '', \{'availability' => 'state_availability'\}, '\^\(\?:brightness\|effect\|effect_speed\|linkquality\|state\)\$'\) \}$/m,
+	my ($state_line) = grep { /^\$DEVICETOPIC:/ } split /\n/, $reading_list;
+	like($state_line, qr/MQTT2_DISCOVERY_runtimeRef/,
+		'gemeinsames State-JSON verwendet eine kompakte Registry-Referenz');
+	my $state_descriptor = runtime_descriptor_for_line($name, $state_line);
+	is($state_descriptor->{operation}, 'topic',
+		'die Referenz behaelt die gemeinsame Topic-Auswertung');
+	my %state_names = map { (($_->{name} || '') => 1) }
+		@{ $state_descriptor->{configuration}{readings} || [] };
+	ok($state_names{brightness} && $state_names{state},
 		'gemeinsames State-JSON trennt freie Nutzdaten von der technischen Availability');
-	like($reading_list,
-		qr/^\$DEVICETOPIC\/availability:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability/m,
+	my ($device_availability) = grep { /^\$DEVICETOPIC\/availability:/ } split /\n/, $reading_list;
+	like($device_availability, qr/MQTT2_DISCOVERY_runtimeRef/,
 		'geraeteeigene Availability bleibt relativ und speist die HA-Auswertung');
-	like($reading_list,
-		qr/^zigbee2mqtt\/bridge\/state:\.\* \{ MQTT2_DISCOVERY_runtimeAvailability/m,
+	is(runtime_descriptor_for_line($name, $device_availability)->{operation}, 'availability',
+		'geraeteeigene Availability verweist auf den sicheren Availability-Vertrag');
+	my ($bridge_availability) = grep { /^zigbee2mqtt\/bridge\/state:/ } split /\n/, $reading_list;
+	like($bridge_availability, qr/MQTT2_DISCOVERY_runtimeRef/,
 		'externe Bridge-Availability bleibt absolut und speist dieselbe Auswertung');
+	is(runtime_descriptor_for_line($name, $bridge_availability)->{operation}, 'availability',
+		'externe Bridge-Availability verweist auf denselben sicheren Vertragstyp');
 	unlike($reading_list, qr/^zigbee2mqtt\/bridge\/state:\.\* state$/m,
 		'Bridge-State ueberschreibt kein fachliches state-Reading');
 	unlike($reading_list, qr/WZ_LIGHTSTRIP_LICHT_(?:brightness|effect|effect_speed|linkquality)/i,
@@ -588,6 +903,35 @@ subtest 'HA-JSON-Entities erhalten kurze Namen und tiefstes gemeinsames Deviceto
 		'JSON-Light-Brightness verwendet den deklarierten Wertebereich');
 	like($set_list, qr/^effect:blink,breathe \$DEVICETOPIC\/set\/effect$/m,
 		'separate HA-Commands verwenden kurze Namen und korrekt relative Topics');
+};
+
+subtest 'geraeteeigene Availability belegt ein einzelnes Zigbee2MQTT-State-Topic als Devicetopic' => sub {
+	setup();
+
+	my $payload = '{"availability":['
+		. '{"topic":"zigbee2mqtt/bridge/state","value_template":"{{ value_json.state }}"},'
+		. '{"topic":"zigbee2mqtt/TK_TUER_BAD/availability","value_template":"{{ value_json.state }}"}],'
+		. '"availability_mode":"all","device":{"identifiers":["zigbee2mqtt_0x00158d0007e78871"],'
+		. '"name":"TK_TUER_BAD"},"device_class":"door","object_id":"tk_tuer_bad_contact",'
+		. '"payload_off":true,"payload_on":false,"state_topic":"zigbee2mqtt/TK_TUER_BAD",'
+		. '"unique_id":"0x00158d0007e78871_contact_zigbee2mqtt",'
+		. '"value_template":"{{ value_json[\\"contact\\"] }}"}';
+
+	is(dispatch_message('mqtt', 'z2m',
+		'homeassistant/binary_sensor/0x00158d0007e78871/contact/config', $payload),
+		['MQTT2_DISCOVERY'], 'gemeldete Zigbee2MQTT-Discovery wird konsumiert');
+	my $name = 'MQTT2_TK_TUER_BAD';
+	is(attr_value($name, 'devicetopic'), 'zigbee2mqtt/TK_TUER_BAD',
+		'das einzelne State-Topic wird als belegter Geraetestamm verwendet');
+	my $reading_list = attr_value($name, 'readingList');
+	like($reading_list, qr/^\$DEVICETOPIC:\.\*/m,
+		'Geraetezustand wird direkt relativ zum Devicetopic gerendert');
+	like($reading_list, qr/^\$DEVICETOPIC\/availability:\.\*/m,
+		'geraeteeigene Availability bleibt relativ zum Devicetopic');
+	like($reading_list, qr/^zigbee2mqtt\/bridge\/state:\.\*/m,
+		'Bridge-Availability bleibt als externes Topic absolut');
+	unlike($reading_list, qr/^\$DEVICETOPIC\/bridge\/state:/m,
+		'Bridge-Availability verkuerzt den Geraetestamm nicht');
 };
 
 subtest 'Zigbee2MQTT-Bridge verwendet JSON-Pfade hinter lower als kurze Namen' => sub {
@@ -606,6 +950,10 @@ subtest 'Zigbee2MQTT-Bridge verwendet JSON-Pfade hinter lower als kurze Namen' =
 			'homeassistant/sensor/zigbee2mqtt_bridge/zigbee2mqtt_bridge_version/config',
 			qq({"name":"Version","unique_id":"zigbee2mqtt_bridge_version","state_topic":"zigbee2mqtt/bridge/info","value_template":"{{ value_json.version }}",$device}),
 		],
+		[
+			'homeassistant/binary_sensor/zigbee2mqtt_bridge/zigbee2mqtt_bridge_connection_state/config',
+			qq({"name":"Connection state","unique_id":"zigbee2mqtt_bridge_connection_state","state_topic":"zigbee2mqtt/bridge/state","value_template":"{{ value_json.state }}","availability":[{"topic":"zigbee2mqtt/bridge/state","value_template":"{{ value_json.state }}"}],"payload_on":"online","payload_off":"offline",$device}),
+		],
 	);
 
 	# Alle Entities muessen vor der gemeinsamen Namensaufloesung im selben
@@ -617,15 +965,23 @@ subtest 'Zigbee2MQTT-Bridge verwendet JSON-Pfade hinter lower als kurze Namen' =
 
 	my $name = 'MQTT2_Zigbee2MQTT_Bridge';
 	my $reading_list = attr_value($name, 'readingList');
-	like($reading_list,
-		qr/runtimeReading\("\{\{ value_json\.log_level \| lower \}\}", \$EVENT, ['"]log_level['"]\)/,
-		'log_level bleibt trotz lower der kurze Readingname');
-	like($reading_list,
-		qr/runtimeReading\("\{\{ value_json\.permit_join \| lower \}\}", \$EVENT, ['"]permit_join['"]\)/,
-		'permit_join bleibt trotz lower der kurze Readingname');
-	like($reading_list,
-		qr/^\$DEVICETOPIC\/info:\.\* \{ json2nameValue\(\$EVENT, '', \{'availability' => 'state_availability'\}, '\^\(\?:version\)\$'\) \}$/m,
-		'das einfache Bridge-Info-Reading filtert den umfangreichen Payload auf version');
+	my @info_lines = grep { /^\$DEVICETOPIC\/info:/ } split /\n/, $reading_list;
+	is(scalar(@info_lines), 1, 'Bridge-Info wird in genau einer readingList-Zeile ausgewertet');
+	like($info_lines[0], qr/MQTT2_DISCOVERY_runtimeRef/,
+		'Bridge-Info verwendet die kompakte topicweite Runtime-Referenz');
+	my $info_descriptor = runtime_descriptor_for_line($name, $info_lines[0]);
+	is([map { $_->{name} } @{ $info_descriptor->{configuration}{readings} || [] }],
+		[qw(log_level permit_join version)],
+		'alle angekuendigten Bridge-Info-Werte bleiben in der gemeinsamen Referenz');
+	unlike($info_lines[0], qr/json2nameValue/,
+		'der umfangreiche Bridge-Info-Payload durchlaeuft nicht den fehlerhaften JSON-Autocreate-Parser');
+	my @state_lines = grep { /^\$DEVICETOPIC\/state:/ } split /\n/, $reading_list;
+	is(scalar(@state_lines), 1, 'Bridge-State wird trotz Reading und Availability nur einmal ausgewertet');
+	like($state_lines[0], qr/MQTT2_DISCOVERY_runtimeRef/,
+		'Bridge-State verwendet eine kompakte gemeinsame Referenz');
+	my $bridge_state_descriptor = runtime_descriptor_for_line($name, $state_lines[0]);
+	ok(ref($bridge_state_descriptor->{configuration}{availability}) eq 'HASH',
+		'Bridge-State verbindet fachliches Reading und Availability atomar');
 	my $set_list = attr_value($name, 'setList');
 	like($set_list, qr/^log_level:error,warning,info,debug /m,
 		'Select-Setter verwendet log_level ohne technischen Device-Prefix');
@@ -651,11 +1007,12 @@ JSON
 	dispatch_message('mqtt', 'collision', 'homeassistant/device/collision/config', $payload);
 
 	my $reading_list = attr_value('MQTT2_Collision', 'readingList');
-	like($reading_list, qr/runtimeReading\("\{\{ value_json\.battery \}\}", \$EVENT, ['"]sensor_battery['"]\)/,
-		'Sensor-Pfad erhaelt bei einer Kollision den qualifizierten Namen');
-	like($reading_list, qr/runtimeReading\("\{\{ value_json\.battery \}\}", \$EVENT, ['"]device_battery['"]\)/,
-		'Device-Pfad erhaelt bei einer Kollision ebenfalls den qualifizierten Namen');
-	unlike($reading_list, qr/["']battery["']\s*\)/,
+	my $collision_descriptor = runtime_descriptor_for_line('MQTT2_Collision', $reading_list);
+	my @collision_names = map { $_->{name} }
+		@{ $collision_descriptor->{configuration}{readings} || [] };
+	is(\@collision_names, [qw(device_battery sensor_battery)],
+		'beide kollidierenden Pfade erhalten in der Referenz qualifizierte Namen');
+	ok(!grep({ $_ eq 'battery' } @collision_names),
 		'kein kollidierendes unqualifiziertes battery-Reading bleibt uebrig');
 	is([sort map { $_->{id} } @{ $main::defs{MQTT2_Collision}{SEMANTIC_METADATA}{entities} }],
 		[qw(device_battery sensor_battery)],
@@ -671,16 +1028,13 @@ JSON
 
 	my $reading_list = attr_value('MQTT2_Person1_iPhone', 'readingList');
 	my $set_list = attr_value('MQTT2_Person1_iPhone', 'setList');
-	like($reading_list, qr/^\$DEVICETOPIC\/state:\.\* \{ json2nameValue/m,
-		'gemeinsames FindMy-State-JSON wird in readingList aufgenommen');
-	like($reading_list,
-		qr/json2nameValue\(\$EVENT, '', \{'availability' => 'state_availability'\}, '\^\(\?:battery\|locationOld\|name\)\$'\)/,
-		'freie JSON-Namen schuetzen das deviceweite Availability-Reading');
-	unlike($reading_list, qr/'(?:battery|locationOld|name)'\s*=>/,
-		'identische JSON- und Reading-Namen werden nicht wiederholt');
-	like($reading_list, qr/\^\(\?:battery\|locationOld\|name\)/,
-		'FindMy-State filtert zusaetzliche Payload-Felder aus');
-	unlike($reading_list, qr/runtimeReading/, 'einfache FindMy-Templates benoetigen keinen Runtime-Fallback');
+	like($reading_list, qr/^\$DEVICETOPIC\/state:\.\* \{ MQTT2_DISCOVERY_runtimeRef/m,
+		'gemeinsames FindMy-State-JSON wird als Referenz in readingList aufgenommen');
+	my $findmy_descriptor = runtime_descriptor_for_line('MQTT2_Person1_iPhone', $reading_list);
+	is([map { $_->{name} } @{ $findmy_descriptor->{configuration}{readings} || [] }],
+		[qw(battery locationOld name)],
+		'freie JSON-Namen bleiben hinter der Referenz erhalten');
+	unlike($reading_list, qr/json2nameValue/, 'explizite FindMy-Pfade verwenden keinen JSON-Autocreate-Parser');
 	like($set_list, qr/^Locate:noArg \$DEVICETOPIC\/locate 1$/m,
 		'Locate-Setter verwendet den ausdruecklichen HA-Namen');
 	like($set_list, qr/^message \$DEVICETOPIC\/message$/m, 'Message-Setter verwendet den kurzen Namen');
@@ -715,8 +1069,8 @@ subtest 'manuelles Reading gewinnt auch gegen gruppierte JSON-Auswertung' => sub
 	setup();
 	my $sensor = '{"stat_t":"node/data","val_tpl":"{{ value_json.temperature }}","uniq_id":"node_temperature","dev":{"ids":["node"],"name":"Node node"}}';
 	dispatch_message('mqtt', 'c', 'homeassistant/sensor/node/temperature/config', $sensor);
-	like(attr_value('MQTT2_Node_node', 'readingList'), qr/json2nameValue/,
-		'Ausgangszustand verwendet die gruppierbare JSON-Auswertung');
+	like(attr_value('MQTT2_Node_node', 'readingList'), qr/runtimeRef/,
+		'Ausgangszustand verwendet die kompakte Topic-Referenz');
 	$main::attr{MQTT2_Node_node}{readingList} .= "\nmanual/topic:.* temperature";
 	dispatch_message('mqtt', 'c', 'homeassistant/sensor/node/temperature/config', $sensor);
 	is(attr_value('MQTT2_Node_node', 'readingList'), 'manual/topic:.* temperature',
@@ -773,43 +1127,79 @@ subtest 'zwei IODevs mit getrennten Prefixen' => sub {
 };
 
 subtest 'Runtime-Template und Command-Payload' => sub {
-	my $reading = main::MQTT2_DISCOVERY_runtimeReading('{{ value_json.temperature | round(1) }}', '{"temperature":23.46}', 'temperature');
+	my $reading = main::MQTT2_Discovery_runtime(
+		'reading', '{{ value_json.temperature | round(1) }}', '{"temperature":23.46}', 'temperature',
+	);
 	is($reading, { temperature => '23.5' }, 'lesbares Runtime-Reading wertet ein komplexes Template sicher aus');
-	is(main::MQTT2_DISCOVERY_runtimeTriggerReading(
+	is(main::MQTT2_Discovery_runtime('triggerReading',
 			'{{ trigger.value.raw }}', '{"value":42,"raw":"11427,1042,407"}', 'rf_event'),
 		{ rf_event => '11427,1042,407' }, 'Triggerkontext stellt den dekodierten JSON-Wert bereit');
-	is(main::MQTT2_DISCOVERY_runtimeTriggerReading(
+	is(main::MQTT2_Discovery_runtime('triggerReading',
 			'{{ trigger.payload }}', 'PRESS', 'rf_event'),
 		{ rf_event => 'PRESS' }, 'Triggerkontext behaelt das rohe MQTT-Payload');
-	is(main::MQTT2_DISCOVERY_runtimeTriggerReading(
+	is(main::MQTT2_Discovery_runtime('triggerReading',
 			'{{ trigger.value.raw }}', '{"value":42}', 'rf_event'),
-		{}, 'fehlender Triggerpfad erzeugt kein Reading');
-	is(main::MQTT2_DISCOVERY_runtimeReading('e3sgdmFsdWVfanNvbi50ZW1wZXJhdHVyZSB9fQ==', '{"temperature":23.5}', 'temperature'),
-		{}, 'Base64 wird nicht mehr als Runtime-Template akzeptiert');
-	my $command = main::MQTT2_DISCOVERY_runtimeTemplatePublish('node/set', '{{ value }}', 'level 42');
+		undef, 'fehlender Triggerpfad erzeugt kein Reading');
+	my $trigger_filter = {
+		match_all => 0, payloads => [qw(OFF ON)],
+	};
+	is(main::MQTT2_Discovery_runtime('triggerReading',
+			'{{ trigger.value_json.action }}', '{"action":"ON"}', 'action', $trigger_filter),
+		{ action => 'ON' }, 'gruppierter Trigger filtert den bereits gerenderten Templatewert');
+	is(main::MQTT2_Discovery_runtime('triggerReading',
+			'{{ trigger.value_json.action }}', '{"action":"HOLD"}', 'action', $trigger_filter),
+		undef, 'nicht angekuendigter Templatewert erzeugt kein Reading');
+	is(main::MQTT2_Discovery_runtime('reading',
+			'e3sgdmFsdWVfanNvbi50ZW1wZXJhdHVyZSB9fQ==', '{"temperature":23.5}', 'temperature'),
+		undef, 'Base64 wird nicht mehr als Runtime-Template akzeptiert');
+	my $topic_configuration = {
+		readings => [
+			{ name => 'log_level', template => '{{ value_json.log_level | lower }}' },
+			{ name => 'version', template => '{{ value_json.version }}' },
+		],
+	};
+	my $bridge_info = JSON::PP->new->canonical(1)->encode({
+		log_level => 'INFO', version => '2.6.1',
+		config_schema => { description => q{topic 'zigbee2mqtt/my_bulb' payload '{"state": "ON"}'} },
+	});
+	is(main::MQTT2_Discovery_runtime('topic', 'RuntimeTopic', $bridge_info, $topic_configuration),
+		{ log_level => 'info', version => '2.6.1' },
+		'Topic-Runtime liest Bridge-Info trotz escapeter JSON-Beispiele ohne Parserfehler');
+	my $command = main::MQTT2_Discovery_runtime('templatePublish', 'node/set', '{{ value }}', 'level 42');
 	is($command, 'node/set 42', 'Command-Wrapper trennt Set-Namen vom Wert');
-	is(main::MQTT2_DISCOVERY_runtimeChoice('node/set', { eco => 'ECO' }, 'mode eco'),
+	is(main::MQTT2_Discovery_runtime('choice', 'node/set', { eco => 'ECO' }, 'mode eco'),
 		'node/set ECO', 'Choice-Wrapper verwendet ein sichtbares Mapping');
-	is(main::MQTT2_DISCOVERY_runtimeTemplateChoice(
+	is(main::MQTT2_Discovery_runtime('templateChoice',
 			'node/set', '{{ value | lower }}', { eco => 'ECO' }, 'mode eco'),
 		'node/set eco', 'Choice-Template verarbeitet erst das sichtbare Mapping und dann das Template');
-	is(main::MQTT2_DISCOVERY_runtimePublish('node/set', 'PRESS'),
+	is(main::MQTT2_Discovery_runtime('publish', 'node/set', 'PRESS'),
 		'node/set PRESS', 'Publish-Wrapper verwendet Klartextargumente');
-	is(main::MQTT2_DISCOVERY_runtimeJSONPublish('node/set', 'brightness', 'brightness 128'),
+	is(main::MQTT2_Discovery_runtime('jsonPublish', 'node/set', 'brightness', 'brightness 128'),
 		'node/set {"brightness":128}', 'JSON-Command wird kanonisch und ohne Stringverkettungs-Injection erzeugt');
-	is(main::MQTT2_DISCOVERY_runtimeJSONChoice(
+	is(main::MQTT2_Discovery_runtime('jsonChoice',
 			'node/set', 'state', { on => 'ON', off => 'OFF' }, 'state on'),
 		'node/set {"state":"ON"}', 'JSON-Choice codiert nur den erlaubten gemappten Stringwert');
+	is(main::MQTT2_Discovery_runtime('jsonPublish',
+			'node/set', 'input', 'volume 42', { command => 'volume' }),
+		'node/set {"command":"volume","input":42}',
+		'JSON-Command verbindet validierte Konstantfelder mit dem numerischen Wert');
+	is(main::MQTT2_Discovery_runtime('jsonChoice',
+			'node/set', 'state', { on => 'ON' }, 'state on', { source => 'test' }),
+		'node/set {"source":"test","state":"ON"}',
+		'JSON-Choice behaelt optionale validierte Konstantfelder');
+	is(main::MQTT2_Discovery_runtime('jsonPublish',
+			'node/set', 'input', 'volume 42', { input => 'collision' }), undef,
+		'dynamisches JSON-Feld kann nicht durch eine Konstante ueberschrieben werden');
 
-	is(main::MQTT2_DISCOVERY_runtimeTemplatePublish('x', 'x', 'state value'), undef,
+	is(main::MQTT2_Discovery_runtime('templatePublish', 'x', 'x', 'state value'), undef,
 		'Template-Publish lehnt ein ungueltiges Klartext-Template ab');
-	is(main::MQTT2_DISCOVERY_runtimeChoice('x', 'x', 'state on'), undef,
+	is(main::MQTT2_Discovery_runtime('choice', 'x', 'x', 'state on'), undef,
 		'Choice-Publish lehnt ein ungueltiges Mapping ab');
-	is(main::MQTT2_DISCOVERY_runtimeTemplateChoice('x', 'x', { on => 'ON' }, 'state on'), undef,
+	is(main::MQTT2_Discovery_runtime('templateChoice', 'x', 'x', { on => 'ON' }, 'state on'), undef,
 		'Choice-Template lehnt ein ungueltiges Template ab');
-	is(main::MQTT2_DISCOVERY_runtimeJSONPublish('x', 'key', 'brightness invalid'), undef,
+	is(main::MQTT2_Discovery_runtime('jsonPublish', 'x', 'key', 'brightness invalid'), undef,
 		'JSON-Publish lehnt einen nichtnumerischen Wert ab');
-	is(main::MQTT2_DISCOVERY_runtimeJSONChoice(
+	is(main::MQTT2_Discovery_runtime('jsonChoice',
 			'x', 'state', { on => 'ON' }, 'state invalid'), undef,
 		'JSON-Choice lehnt einen nicht deklarierten Auswahlwert ab');
 	my $json_map = main::MQTT2_DISCOVERY_runtimeJSONMap(
@@ -827,6 +1217,39 @@ subtest 'Runtime-Template und Command-Payload' => sub {
 			'JSONMapRuntime', { availability => 'state_availability' }), {
 		state => 'state_availability', availability => 'state_availability',
 	}, 'der Runtime-Wrapper liest jsonMap ueber den von MQTT2_DEVICE bereitgestellten Devicenamen');
+	{
+		no warnings qw(once redefine);
+		local *main::json2nameValue = sub {
+			my ($event, $prefix, $mapping) = @_;
+			return { event => $event, prefix => $prefix, mapping => $mapping };
+		};
+		$main::defs{JSONMapRuntime}{helper}{mqtt2_discovery_availability_reading} = 'availability';
+		is(main::MQTT2_DISCOVERY_jsonReadings(
+				'JSONMapRuntime', 'STATE', '{"availability":"payload"}'), {
+			event => '{"availability":"payload"}', prefix => '', mapping => {
+				state => 'state_availability', availability => 'state_availability',
+			},
+		}, 'der kompakte Wrapper qualifiziert den Defaultnamen anhand des Topic-Pfads');
+
+		$main::defs{JSONMapRuntime}{JSONMAP} = { state => 'deviceAvailability' };
+		$main::defs{JSONMapRuntime}{helper}{mqtt2_discovery_availability_reading}
+			= 'deviceAvailability';
+		is(main::MQTT2_DISCOVERY_jsonReadings(
+				'JSONMapRuntime', 'UPTIME', '{"deviceAvailability":"payload"}'), {
+			event => '{"deviceAvailability":"payload"}', prefix => '', mapping => {
+				state => 'uptime_deviceAvailability',
+				deviceAvailability => 'uptime_deviceAvailability',
+			},
+		}, 'ein frei gewaehlter Availability-Name wird ebenso verbindlich reserviert');
+		is(main::MQTT2_DISCOVERY_jsonReadings(
+				'JSONMapRuntime', 'UPTIME', '{}',
+				{ deviceAvailability => 'announced_availability' }), {
+			event => '{}', prefix => '', mapping => {
+				state => 'announced_availability',
+				deviceAvailability => 'announced_availability',
+			},
+		}, 'explizite Discovery-Zuordnungen behalten vor dem Reservierungsschutz Vorrang');
+	}
 };
 
 subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
@@ -852,41 +1275,94 @@ subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
 	};
 	my $configuration = sub {
 		my ($reading) = @_;
-		return JSON::PP->new->canonical(1)->encode({
+		return {
 			sources => [{
 				reading => $reading, template => '{{ value_json.state }}',
 				available => 'online', unavailable => 'offline',
 			}],
 			policies => [$policy],
-		});
+		};
 	};
 
-	my $device_online = main::MQTT2_DISCOVERY_runtimeAvailability(
+	my $device_online = main::MQTT2_Discovery_runtime('availability',
 		$device, '{"state":"online"}', $configuration->($source_device));
 	is($device_online, {
 		$source_device => 'online', $policy_all => 'unknown', availability => 'unknown',
 	}, 'all bleibt unknown, solange die zweite Quelle noch unbekannt ist');
 	$apply->($device_online);
-	my $bridge_online = main::MQTT2_DISCOVERY_runtimeAvailability(
+	my $bridge_online = main::MQTT2_Discovery_runtime('availability',
 		$device, '{"state":"online"}', $configuration->($source_bridge));
 	is($bridge_online, {
 		$source_bridge => 'online', $policy_all => 'online', availability => 'online',
 	}, 'all wird erst bei zwei verfuegbaren Quellen online');
 	$apply->($bridge_online);
-	my $bridge_offline = main::MQTT2_DISCOVERY_runtimeAvailability(
+	my $bridge_offline = main::MQTT2_Discovery_runtime('availability',
 		$device, '{"state":"offline"}', $configuration->($source_bridge));
 	is($bridge_offline->{availability}, 'offline',
 		'all wird bei einer ausgefallenen Quelle wieder offline');
 	$main::defs{$device}{READINGS}{'.availability_io'} = { VAL => 'offline' };
-	my $broker_guard = main::MQTT2_DISCOVERY_runtimeAvailability(
+	my $broker_guard = main::MQTT2_Discovery_runtime('availability',
 		$device, '{"state":"online"}', $configuration->($source_bridge));
 	is($broker_guard->{ $source_bridge }, 'online',
 		'Quellzustand wird trotz getrennter Brokerverbindung weiter ausgewertet');
 	is($broker_guard->{availability}, 'offline',
 		'getrennte Brokerverbindung verhindert ein sichtbares Online-Ergebnis');
 	delete $main::defs{$device}{READINGS}{'.availability_io'};
+	my $source_common = '.availability_common';
+	my $source_supported = '.availability_supported';
+	my $source_optional = '.availability_optional';
+	my $policy_supported = '.availability_policy_supported';
+	my $policy_optional = '.availability_policy_optional';
+	$main::defs{$device}{READINGS}{$source_common} = { VAL => 'online' };
+	my $field_configuration = {
+		sources => [
+			{
+				reading => $source_supported,
+				template => q!{{'online' if value_json['supported'] is defined else 'offline'}}!,
+				available => 'online', unavailable => 'offline',
+			},
+			{
+				reading => $source_optional,
+				template => q!{{'online' if value_json['optional'] is defined else 'offline'}}!,
+				available => 'online', unavailable => 'offline',
+			},
+		],
+		policies => [
+			{
+				reading => $policy_supported, mode => 'all',
+				sources => [$source_common, $source_supported],
+			},
+			{
+				reading => $policy_optional, mode => 'all',
+				sources => [$source_common, $source_optional],
+			},
+		],
+	};
+	my $partially_supported = main::MQTT2_Discovery_runtime('availability',
+		$device, '{"supported":1}', $field_configuration,
+	);
+	is([$partially_supported->{$policy_supported},
+			$partially_supported->{$policy_optional},
+			$partially_supported->{availability}], [qw(online offline online)],
+		'eine fehlende optionale Entity setzt ein erreichbares Sammeldevice nicht offline');
+	my $unsupported = main::MQTT2_Discovery_runtime('availability',
+		$device, '{}', $field_configuration,
+	);
+	is([$unsupported->{$policy_supported}, $unsupported->{$policy_optional},
+			$unsupported->{availability}], [qw(offline offline offline)],
+		'erst ausschliesslich ausgefallene Entity-Regeln setzen das Sammeldevice offline');
 
-	my $any_configuration = JSON::PP->new->canonical(1)->encode({
+	my $custom_configuration = $configuration->($source_device);
+	$custom_configuration->{reading} = 'MQTT2DiscoveryAvailability';
+	my $custom = main::MQTT2_Discovery_runtime(
+		'availability', $device, '{"state":"online"}', $custom_configuration,
+	);
+	is($custom->{MQTT2DiscoveryAvailability}, 'online',
+		'die Runtime schreibt die Gesamtverfuegbarkeit in den konfigurierten Namen');
+	ok(!exists($custom->{availability}),
+		'die Runtime erzeugt bei festem Namen kein zusaetzliches Standardreading');
+
+	my $any_configuration = {
 		sources => [{
 			reading => '.availability_any_a', available => 'up', unavailable => 'down',
 		}],
@@ -894,12 +1370,12 @@ subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
 			reading => '.availability_policy_any', mode => 'any',
 			sources => ['.availability_any_a', '.availability_any_b'],
 		}],
-	});
-	my $any = main::MQTT2_DISCOVERY_runtimeAvailability($device, 'up', $any_configuration);
+	};
+	my $any = main::MQTT2_Discovery_runtime('availability', $device, 'up', $any_configuration);
 	is($any->{availability}, 'online',
 		'any wird bereits durch eine einzelne verfuegbare Quelle online');
 
-	my $latest_configuration = JSON::PP->new->canonical(1)->encode({
+	my $latest_configuration = {
 		sources => [{
 			reading => '.availability_latest', available => 'up', unavailable => 'down',
 		}],
@@ -907,13 +1383,13 @@ subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
 			reading => '.availability_policy_latest', mode => 'latest',
 			sources => ['.availability_latest', '.availability_other'],
 		}],
-	});
-	my $latest = main::MQTT2_DISCOVERY_runtimeAvailability(
-		$device, 'down', $latest_configuration);
+	};
+	my $latest = main::MQTT2_Discovery_runtime(
+		'availability', $device, 'down', $latest_configuration);
 	is($latest->{availability}, 'offline',
 		'latest uebernimmt den Zustand der zuletzt empfangenen Quelle');
-	is(main::MQTT2_DISCOVERY_runtimeAvailability(
-			$device, 'unbekannt', $latest_configuration), {},
+	is(main::MQTT2_Discovery_runtime(
+			'availability', $device, 'unbekannt', $latest_configuration), {},
 		'nicht deklarierte Payloads veraendern keine Availability-Readings');
 };
 
@@ -925,8 +1401,8 @@ subtest 'OpenMQTTGateway-typische HA-Discovery' => sub {
 	like(attr_value('MQTT2_OMG_DEVELOPMENT', 'readingList'),
 		qr{\$DEVICETOPIC\(\?:/\.\*\)\?:\.\*},
 		'RF-Sensor-Wildcard wird unter dem gemeinsamen Devicetopic wirksam');
-	unlike(attr_value('MQTT2_OMG_DEVELOPMENT', 'readingList'), qr/runtimeReading/,
-		'einfaches OMG-is_defined-Template verwendet die kompakte JSON-Auswertung');
+	like(attr_value('MQTT2_OMG_DEVELOPMENT', 'readingList'), qr/runtimeRef/,
+		'einfaches OMG-is_defined-Template verwendet die kompakte Topic-Referenz');
 	is(reading_value('discovery', 'warningCount'), 0, 'OMG-is_defined erzeugt keine Warnung');
 
 	my $rtl_sensor = '{"stat_t":"+/+/RTL_433toMQTT/Oregon-THGR810/1/169","name":"temperature","uniq_id":"Oregon-THGR810-1-169-temperature_C","val_tpl":"{{ value_json.temperature_C | is_defined }}","unit_of_meas":"C","dev_cla":"temperature","state_class":"measurement","device":{"ids":["Oregon-THGR810-1-169"],"name":"Oregon-THGR810-1-169","mdl":"Oregon-THGR810","via_device":"OpenMQTTGateway"}}';
@@ -937,8 +1413,15 @@ subtest 'OpenMQTTGateway-typische HA-Discovery' => sub {
 
 	my $rf_trigger = '{"atype":"trigger","p":"device_automation","type":"Received","stype":"RF-15524904","device":{"ids":["246F287AF0C4"],"name":"OMG_DEVELOPMENT","mf":"OMG_community"},"val_tpl":"{{ trigger.value.raw }}","topic":"home/OMG_DEVELOPMENT/433toMQTT/15524904"}';
 	dispatch_message('mqtt', 'omg', 'homeassistant/device_automation/246F287AF0C4/15524904/config', $rf_trigger);
-	like(attr_value('MQTT2_OMG_DEVELOPMENT', 'readingList'), qr/MQTT2_DISCOVERY_runtimeTriggerReading/,
-		'OMG-RF-Device-Trigger wird mit Triggerkontext integriert');
+	my $omg_reading_list = attr_value('MQTT2_OMG_DEVELOPMENT', 'readingList');
+	my ($trigger_line) = grep { /\/15524904:/ } split /\n/, $omg_reading_list;
+	like($trigger_line, qr/MQTT2_DISCOVERY_runtimeRef/,
+		'OMG-RF-Device-Trigger verwendet eine kompakte Referenz');
+	my $trigger_descriptor = runtime_descriptor_for_line('MQTT2_OMG_DEVELOPMENT', $trigger_line);
+	is($trigger_descriptor->{runtime}, 'triggerReading',
+		'OMG-RF-Device-Trigger bleibt im sicheren Triggerkontext');
+	is($trigger_descriptor->{filter}{match_all}, 1,
+		'die unbedingte Trigger-Variante bleibt in der Referenz erhalten');
 };
 
 subtest 'uebernommenes Bestandsdevice erhaelt keine impliziten Semantic-Metadaten' => sub {
@@ -958,6 +1441,75 @@ subtest 'unsicheres Template erzeugt kein leeres Device' => sub {
 	like(reading_value('discovery', 'lastWarning'), qr/keine sicher abbildbare Funktion/, 'Ablehnung wird sichtbar gemeldet');
 };
 
+subtest 'Zigbee2MQTT-Firmware-Update wird vollstaendig integriert' => sub {
+	setup();
+	my $value_template = q!{"latest_version":"{{ value_json['update']['latest_version'] }}","installed_version":"{{ value_json['update']['installed_version'] }}","update_percentage":{{ value_json['update'].get('progress', 'null') }},"in_progress":{{ (value_json['update']['state'] == 'updating')|lower }}}!;
+	my $payload = JSON::PP->new->canonical(1)->encode({
+		availability => [
+			{ topic => 'zigbee2mqtt/bridge/state', value_template => '{{ value_json.state }}' },
+			{ topic => 'zigbee2mqtt/WZ_LIGHTSTRIP_LICHT/availability', value_template => '{{ value_json.state }}' },
+		],
+		availability_mode => 'all',
+		command_topic => 'zigbee2mqtt/bridge/request/device/ota_update/update',
+		default_entity_id => 'update.wz_lightstrip_licht',
+		device => {
+			hw_version => 0,
+			identifiers => ['zigbee2mqtt_0x001788010c570283'],
+			manufacturer => 'Philips',
+			model => 'Hue white and color ambiance LightStrip plus',
+			model_id => '8718699703424',
+			name => 'WZ_LIGHTSTRIP_LICHT',
+			sw_version => '1.163.1',
+			via_device => 'zigbee2mqtt_bridge_0x983268fffe1c1485',
+		},
+		device_class => 'firmware', entity_category => 'config', name => undef,
+		object_id => 'wz_lightstrip_licht',
+		origin => { name => 'Zigbee2MQTT', sw => '2.13.0', url => 'https://www.zigbee2mqtt.io' },
+		payload_install => '{"id":"0x001788010c570283"}',
+		state_topic => 'zigbee2mqtt/WZ_LIGHTSTRIP_LICHT',
+		unique_id => '0x001788010c570283_update_zigbee2mqtt',
+		value_template => $value_template,
+	});
+	my $topic = 'homeassistant/update/0x001788010c570283/update/config';
+	is(dispatch_message('mqtt', 'zigbee2mqtt', $topic, $payload), ['MQTT2_DISCOVERY'],
+		'Update-Discovery wird konsumiert');
+	my $target = 'MQTT2_WZ_LIGHTSTRIP_LICHT';
+	ok($main::defs{$target}, 'Update wird dem vorhandenen Zigbee2MQTT-Geraet zugeordnet');
+	is(reading_value('discovery', 'lastError'), 'none',
+		'die Update-Komponente erzeugt keinen Parserfehler');
+	is(reading_value('discovery', 'warningCount'), 0,
+		'das vollstaendige Zigbee2MQTT-Template erzeugt keine Warnung');
+
+	my $reading_list = attr_value($target, 'readingList');
+	my ($state_line) = grep {
+		my $candidate = runtime_descriptor_for_line($target, $_);
+		ref($candidate) eq 'HASH' && ($candidate->{operation} || '') eq 'topic';
+	} grep { /WZ_LIGHTSTRIP_LICHT/ && /MQTT2_DISCOVERY_runtimeRef/ }
+		split /\n/, $reading_list;
+	ok(defined($state_line), 'Update-State-Topic wird in readingList aufgenommen');
+	my $descriptor = runtime_descriptor_for_line($target, $state_line);
+	is($descriptor->{operation}, 'topic',
+		'das komplexe Update-Template bleibt als sichere Topic-Referenz gespeichert');
+	is($descriptor->{configuration}{readings}[0]{template}, $value_template,
+		'die Referenz behaelt das originale Zigbee2MQTT-Template');
+	my ($reference) = $state_line =~ /'(r_[a-f0-9]+)'/;
+	my $state = '{"update":{"latest_version":"1.164.0","installed_version":"1.163.1","progress":42,"state":"updating"}}';
+	my $reading_name = $descriptor->{configuration}{readings}[0]{name};
+	is($reading_name, 'update',
+		'die Root-Update-Entity wiederholt den Zigbee2MQTT-Devicenamen nicht als Reading');
+	is(main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $state), {
+		$reading_name => '{"latest_version":"1.164.0","installed_version":"1.163.1","update_percentage":42,"in_progress":true}',
+	}, 'Update-State wird zur Laufzeit als gueltiges JSON ausgewertet');
+
+	my $set_list = attr_value($target, 'setList');
+	like($set_list,
+		qr/^install:noArg .*bridge\/request\/device\/ota_update\/update \{"id":"0x001788010c570283"\}$/m,
+		'install sendet exakt payload_install an das OTA-Command-Topic');
+	is($main::defs{$target}{SEMANTIC_METADATA}{entities}[0]{class}, 'update',
+		'semantische Metadaten kennzeichnen die Firmware-Update-Entity');
+	is($main::defs{$target}{SEMANTIC_METADATA}{entities}[0]{capabilities}{install}{write}, 'install',
+		'semantische Installationsaktion verweist auf den FHEM-Setter');
+};
 unlike(join("\n", @{ command_log() }), qr/(?:^|\s)save(?:\s|$)/, 'kein Integrationspfad ruft save auf');
 
 done_testing;
