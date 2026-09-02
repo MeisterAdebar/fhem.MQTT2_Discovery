@@ -590,11 +590,11 @@ sub _map_canonical_entity {
 			? $normalised_state_name : $reading_name;
 	my (@readings, @sets, @warnings, @set_state);
 
-	# Number-Entities ohne Grenzen erhalten einen vollstaendigen Standardbereich,
+	# Jeder fehlende Number-Wert erhaelt unabhaengig seinen Home-Assistant-Default,
 	# weil FHEMs Slider keine teilweise definierte Skala darstellen kann.
 	if ($component eq 'number') {
-		my $all_missing = !defined($entity->{min}) && !defined($entity->{max}) && !defined($entity->{step});
-		@{$entity}{qw(min max step)} = (0, 100, 1) if $all_missing;
+		$entity->{min} = 0 if !defined($entity->{min});
+		$entity->{max} = 100 if !defined($entity->{max});
 		$entity->{step} = 1 if !defined($entity->{step});
 	}
 
@@ -1026,6 +1026,7 @@ sub _map_canonical_entity {
 		ok              => 1,
 		entity_key      => $entity->{entity_key},
 		discovery_topic => $entity->{discovery_topic},
+		source_layout   => $entity->{_canonical_layout},
 		identity        => $identity,
 		strong_identity => (ref($device->{identifiers}) eq 'ARRAY' && @{ $device->{identifiers} })
 			|| (ref($device->{connections}) eq 'ARRAY' && @{ $device->{connections} }) ? 1 : 0,

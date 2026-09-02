@@ -653,6 +653,29 @@ subtest 'HomeButtons Number-Defaults und Device-Automation' => sub {
 		'Number und Trigger werden beide registriert');
 };
 
+subtest 'ESPresense Number-Grenzen verwenden unabhaengige HA-Defaults' => sub {
+	setup();
+	my $base = 'espresense/rooms/sz';
+	my $device = '"dev":{"ids":["espresense_sz"],"name":"espresense_sz"}';
+
+	# Beide ESPresense-Konfigurationswerte liefern nur den vom Standard abweichenden Schritt.
+	for my $name (qw(absorption max_distance)) {
+		dispatch_message('mqtt', 'espresense_xxx',
+			"homeassistant/number/espresense_xxx/$name/config",
+			qq({"~":"$base","name":"$name","stat_t":"~/$name","cmd_t":"~/$name/set","step":"0.1","entity_category":"config",$device}));
+	}
+
+	my $set_list = attr_value('MQTT2_espresense_sz', 'setList');
+	like($set_list,
+		qr/^absorption:slider,0,0\.1,100 \$DEVICETOPIC\/absorption\/set$/m,
+		'Absorption erhaelt trotz fehlender Grenzen einen Setter');
+	like($set_list,
+		qr/^max_distance:slider,0,0\.1,100 \$DEVICETOPIC\/max_distance\/set$/m,
+		'Max Distance erhaelt trotz fehlender Grenzen einen Setter');
+	is(reading_value('discovery', 'errorCount'), 0,
+		'beide unvollstaendigen Number-Bereiche werden ohne Discovery-Fehler verarbeitet');
+};
+
 subtest 'Device-Automationen teilen sich topicweise das Reading action' => sub {
 	setup();
 	my $base = 'zigbee2mqtt/remote';
@@ -786,6 +809,68 @@ subtest 'ESPHome-PAC behaelt bestehende Setter und ergaenzt Climate vollstaendig
 		'vertikale Lamellenposition behaelt alle entdeckten Optionen');
 	is(reading_value('discovery', 'discoveredEntities'), 3,
 		'Select, Switch und Climate bleiben intern drei Discovery-Entities');
+};
+
+subtest 'Device-Discovery verdraengt funktional gleiche klassische PAC-Entities' => sub {
+	my $discovery = setup();
+	my $id = 'dc1ed51b844c';
+	my $base = 'pac-1b844c';
+	my $device = qq("dev":{"ids":["$id"],"name":"Klima.Essen"});
+
+	dispatch_message('mqtt', $base,
+		"homeassistant/climate/$base/config",
+		qq({"name":"pac","uniq_id":"$id-climate-old","mode_stat_t":"$base/state/mode","mode_cmd_t":"$base/command/mode","modes":["auto","cool","heat"],$device}));
+	dispatch_message('mqtt', $base,
+		"homeassistant/switch/$base/power/config",
+		qq({"name":"Power","uniq_id":"$id-switch-old","stat_t":"$base/state/power","cmd_t":"$base/command/power","pl_on":"on","pl_off":"off",$device}));
+	dispatch_message('mqtt', $base,
+		"homeassistant/sensor/$base/humidity/config",
+		qq({"name":"Humidity","uniq_id":"$id-humidity","stat_t":"$base/state/humidity",$device}));
+
+	my $device_discovery = qq({"device":{"identifiers":["$id"],"name":"Klima.Essen"},"components":{)
+		. qq("climate":{"platform":"climate","name":"Climate","unique_id":"$id-climate-new","mode_state_topic":"$base/state/mode","mode_command_topic":"$base/command/mode","modes":["auto","cool","heat"]},)
+		. qq("power":{"platform":"switch","name":"Power","unique_id":"$id-switch-new","state_topic":"$base/state/power","command_topic":"$base/command/power","payload_on":"on","payload_off":"off"}}});
+	dispatch_message('mqtt', $base,
+		"homeassistant/device/$base/config", $device_discovery);
+
+	my $name = 'MQTT2_Klima.Essen';
+	my $reading_list = attr_value($name, 'readingList');
+	my $set_list = attr_value($name, 'setList');
+	is(scalar(() = $reading_list =~ m{\$DEVICETOPIC/state/mode}g), 1,
+		'das gemeinsame Climate-State-Topic wird nur einmal gerendert');
+	is(scalar(() = $reading_list =~ m{\$DEVICETOPIC/state/power}g), 1,
+		'das gemeinsame Power-State-Topic wird nur einmal gerendert');
+	is(scalar(() = $set_list =~ m{\$DEVICETOPIC/command/mode}g), 1,
+		'der gemeinsame Climate-Setter wird nur einmal gerendert');
+	is(scalar(() = $set_list =~ m{\$DEVICETOPIC/command/power}g), 1,
+		'der gemeinsame Power-Setter wird nur einmal gerendert');
+	like($reading_list, qr{\$DEVICETOPIC/state/humidity},
+		'eine nur klassisch angekuendigte Zusatz-Entity bleibt erhalten');
+	unlike($reading_list, qr/(?:climate|pac_1b844c)_mode/,
+		'ohne Doppelkollision bleibt der kurze Readingname mode erhalten');
+
+	# Persistierte Registry-Mappings aus der Vorversion besitzen noch keine Layout-Markierung.
+	my ($record) = values %{ $discovery->{helper}{registry}{devices} };
+
+	for my $mapping (values %{ $record->{entities} }) {
+		delete $mapping->{source_layout};
+	}
+
+	is(main::MQTT2_DISCOVERY_Set(
+		$discovery, 'discovery', 'rebuildDevice', $name,
+	), undef, 'Neuaufbau erkennt Device-Discovery auch in einer alten Registry');
+	$reading_list = attr_value($name, 'readingList');
+	is(scalar(() = $reading_list =~ m{\$DEVICETOPIC/state/mode}g), 1,
+		'auch die alte Registry rendert das Climate-State-Topic nur einmal');
+
+	# Nach einer echten Device-Tombstone werden die weiterhin bekannten Einzel-Entities wieder sichtbar.
+	dispatch_message('mqtt', $base, "homeassistant/device/$base/config", '');
+	$reading_list = attr_value($name, 'readingList');
+	$set_list = attr_value($name, 'setList');
+	is(scalar(() = $reading_list =~ m{\$DEVICETOPIC/state/mode}g), 1,
+		'die klassische Climate-Entity wird nach der Device-Loeschung wieder verwendet');
+	is(scalar(() = $set_list =~ m{\$DEVICETOPIC/command/power}g), 1,
+		'die klassische Power-Entity wird nach der Device-Loeschung wieder verwendet');
 };
 
 subtest 'mehrere Entities gruppieren sich und Updates bleiben idempotent' => sub {

@@ -1,0 +1,4 @@
+[hook "precommit"]
+	cmdline = "perl \"%root%\\tools\\tortoisegit_pre_commit.pl\""
+	wait = true
+	show = false

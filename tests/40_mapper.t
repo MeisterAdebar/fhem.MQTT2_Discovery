@@ -468,6 +468,13 @@ subtest 'Validierung und Determinismus' => sub {
 		'fehlendes Number-step verwendet den HA-Default 1');
 	is($default_step->{semantic_entity}{capabilities}{value}{step}, 1,
 		'Number-Default steht auch in den Semantic-Metadaten');
+	my $default_range = MQTT2_Discovery::Mapper::map_entity(
+		entity => entity('number', min => undef, max => undef, step => '0.1'), io_name => 'mqtt', cid => 'c');
+	is($default_range->{set_lines}[0]{line}, 'number:slider,0,0.1,100 node/number/set',
+		'fehlende Number-Grenzen verwenden unabhaengig die HA-Defaults 0 und 100');
+	is($default_range->{semantic_entity}{capabilities}{value},
+		{ read => 'number', write => 'number', min => 0, max => 100, step => 0.1 },
+		'vollstaendige Number-Defaults stehen auch in den Semantic-Metadaten');
 	my $first = MQTT2_Discovery::Mapper::map_entity(entity => entity('switch'), io_name => 'mqtt', cid => 'c');
 	my $second = MQTT2_Discovery::Mapper::map_entity(entity => entity('switch'), io_name => 'mqtt', cid => 'c');
 	is($first, $second, 'gleiches Modell erzeugt deterministisch dasselbe Mapping');

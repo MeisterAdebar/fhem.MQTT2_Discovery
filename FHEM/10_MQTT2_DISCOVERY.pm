@@ -23,7 +23,7 @@ use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
 use vars qw(%defs %attr %modules $readingFnAttributes);
 
-our $MQTT2_DISCOVERY_VERSION = '0.9.6';
+our $MQTT2_DISCOVERY_VERSION = '0.9.7';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
 our $MQTT2_DISCOVERY_AVAILABILITY_REFRESH_DELAY = 60;
 our $MQTT2_DISCOVERY_AVAILABILITY_RETRY_DELAY = 10;
@@ -2125,6 +2125,76 @@ sub MQTT2_DISCOVERY_prepare_device_mappings($$$) {
 	return $prepared;
 }
 
+# Erkennt atomare Home-Assistant-Device-Discovery auch in aelteren Registry-Eintraegen.
+sub MQTT2_DISCOVERY_is_device_discovery_mapping($) {
+	my ($mapping) = @_;
+	return 0 if ref($mapping) ne 'HASH';
+	return 1 if ($mapping->{source_layout} || '') eq 'device';
+	my $topic = $mapping->{discovery_topic};
+	return defined($topic) && !ref($topic)
+		&& $topic =~ m{(?:^|/)device/[^/]+/config\z} ? 1 : 0;
+}
+
+# Beschreibt nur die funktionalen MQTT-Bindings eines Mappings, nicht dessen Anzeigenamen.
+sub MQTT2_DISCOVERY_mapping_function_signature($) {
+	my ($mapping) = @_;
+	return undef if ref($mapping) ne 'HASH';
+	my @readings;
+	my @sets;
+
+	# Availability ist geraeteweit und darf eine sonst identische Funktion nicht unterscheiden.
+	for my $entry (@{ $mapping->{reading_lines} || [] }) {
+		next if ref($entry) ne 'HASH' || ($entry->{role} || '') eq 'availability';
+		my %binding = map { exists($entry->{$_}) ? ($_ => $entry->{$_}) : () }
+			qw(kind topic template payload json_key key_prefix parts unwrap_single_property);
+		push @readings, \%binding;
+	}
+
+	# Set-Namen und Optionslisten duerfen sich bei einer Publisher-Migration aendern;
+	# Topic, Operation und feste Payloadstruktur identifizieren die Funktion weiterhin.
+	for my $entry (@{ $mapping->{set_lines} || [] }) {
+		next if ref($entry) ne 'HASH';
+		my %binding = map { exists($entry->{$_}) ? ($_ => $entry->{$_}) : () }
+			qw(kind topic template payload key constants);
+		push @sets, \%binding;
+	}
+	return undef if !@readings && !@sets;
+	my $json = JSON::PP->new->canonical(1);
+	my @reading_signatures = sort map { $json->encode($_) } @readings;
+	my @set_signatures = sort map { $json->encode($_) } @sets;
+	return $json->encode({
+		component => $mapping->{metadata}{component} || '',
+		readings => \@reading_signatures,
+		sets => \@set_signatures,
+	});
+}
+
+# Bevorzugt bei paralleler alter und neuer HA-Ankuendigung die atomare Device-Komponente.
+sub MQTT2_DISCOVERY_prefer_device_discovery_mappings($) {
+	my ($mappings) = @_;
+	my @source = grep { ref($_) eq 'HASH' } @{ $mappings || [] };
+	my %device_signatures;
+
+	# Zuerst werden alle von Device-Discovery bereits vollstaendig beschriebenen Funktionen erfasst.
+	for my $mapping (@source) {
+		next if !MQTT2_DISCOVERY_is_device_discovery_mapping($mapping);
+		my $signature = MQTT2_DISCOVERY_mapping_function_signature($mapping);
+		$device_signatures{$signature} = 1 if defined($signature);
+	}
+	return \@source if !keys %device_signatures;
+	my @preferred;
+
+	# Klassische Einzel-Entities bleiben erhalten, sofern keine funktional gleiche
+	# atomare Komponente fuer dasselbe Registry-Device vorliegt.
+	for my $mapping (@source) {
+		my $signature = MQTT2_DISCOVERY_mapping_function_signature($mapping);
+		next if !MQTT2_DISCOVERY_is_device_discovery_mapping($mapping)
+			&& defined($signature) && $device_signatures{$signature};
+		push @preferred, $mapping;
+	}
+	return \@preferred;
+}
+
 # Rendert und setzt alle verwalteten Attribute eines Zieldevices als atomaren Plan.
 sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	my ($hash, $record, $options) = @_;
@@ -2148,9 +2218,18 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	# Namen werden ueber alle Entities des Devices gemeinsam aufgeloest, bevor
 	# eine einzige readingList- oder setList-Zeile gerendert wird.
 	my $reserved_readings = { $availability_reading => 1 };
-	my $prepared_mappings = MQTT2_DISCOVERY_prepare_device_mappings([
+	my $all_mappings = [
 		map { $record->{entities}{$_} } sort keys %{ $record->{entities} }
-	], $availability_reading, $include_extra_json);
+	];
+	my $preferred_mappings = MQTT2_DISCOVERY_prefer_device_discovery_mappings(
+		$all_mappings,
+	);
+	MQTT2_DISCOVERY_log($hash, 3, 'suppressed equivalent legacy mappings='
+		. (scalar(@$all_mappings) - scalar(@$preferred_mappings)) . "; target=$name")
+		if @$preferred_mappings < @$all_mappings;
+	my $prepared_mappings = MQTT2_DISCOVERY_prepare_device_mappings(
+		$preferred_mappings, $availability_reading, $include_extra_json,
+	);
 	my $resolved_mappings = MQTT2_Discovery::Mapper::resolve_owned_mapping_names(
 		$prepared_mappings, $reserved_readings,
 	);

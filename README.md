@@ -332,12 +332,30 @@ Discovery-Ablauf unveraendert funktionsfaehig.
 `device_automation`-Discoveries werden als eingehende, auf Topic und optionales
 Payload gefilterte Readings abgebildet. Sie stellen Ereignisse des physischen
 Geraets dar und werden deshalb nicht in SemanticUI angezeigt.
-Bei MQTT-`number` gilt fuer ein fehlendes `step` der Home-Assistant-Default `1`.
+Bei MQTT-`number` gelten fuer fehlende Werte unabhaengig voneinander die
+Home-Assistant-Defaults `min=0`, `max=100` und `step=1`.
 MQTT-`text` kennzeichnet seine schreibbare Semantic-Capability als Texteingabe
 und uebergibt eine vorhandene maximale Laenge an SemanticUI.
 Das Home-Assistant-Feld `retain` (Kurzform `ret`) wird fuer ausgehende Befehle
 uebernommen. Dadurch erreichen retained Sollwerte auch schlafende MQTT-Geraete wie
 HomeButtons beim naechsten Aufwachen.
+
+## TortoiseGit-Commits und CHANGED
+
+Die repositoryweite [`.tgitconfig`](.tgitconfig) bindet
+`tools/tortoisegit_pre_commit.pl` als TortoiseGit-Pre-Commit-Hook ein. TortoiseGit
+haengt die Parameter `PATH`, `MESSAGEFILE` und `CWD` beim Aufruf automatisch an und
+uebergibt dem Hook nach dem Klick auf **Commit** die endgueltige Nachricht. Der Hook
+erzeugt daraus `CHANGED`, staged die Datei und laesst sie dadurch in denselben Commit
+wie die ausgewaehlten Aenderungen eingehen. Jeder Versuch beginnt bei der in `HEAD`
+gespeicherten `CHANGED`, sodass eine nach einem abgebrochenen Versuch geaenderte
+Commit-Nachricht keinen veralteten Eintrag hinterlaesst.
+
+TortoiseGit fragt beim ersten Verwenden der repositoryweiten Hook-Konfiguration aus
+Sicherheitsgruenden nach einer Bestaetigung. Der Hook muss aktiviert und **Wait for
+the script to finish** eingeschaltet bleiben. Die lokale Perl-Installation muss ueber
+`perl` erreichbar sein. Technische Commits koennen die bestehende Markierung
+`[skip-changed]` verwenden.
 
 ## Logging
 
