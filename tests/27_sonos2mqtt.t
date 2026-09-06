@@ -18,6 +18,7 @@ use MQTT2_Discovery::Template ();
 
 my $uuid = 'RINCON_804AF28451D201400';
 my $topic = "sonos2mqtt/discovery/sonos/$uuid";
+my $legacy_topic = "homeassistant/music_player/$uuid/sonos/config";
 
 # Erzeugt das aktuelle Sonos2mqtt-Discovery-Payload mit gezielt ueberschreibbaren Feldern.
 sub sonos_payload {
@@ -42,6 +43,18 @@ sub sonos_payload {
 		%extra,
 	};
 	return JSON::PP->new->canonical(1)->encode($payload);
+}
+
+# Bildet den dokumentierten alten Payload mit dessen zusaetzlichen HA-Feldern ab.
+sub legacy_sonos_payload {
+	my (%extra) = @_;
+	my $mqtt_prefix = $extra{mqtt_prefix} // 'sonos';
+	return sonos_payload(
+		device => { identifiers => [$uuid], manufacturer => 'Sonos', name => 'Wohnen' },
+		available_commands => [qw(play pause stop toggle next previous volume mute unmute notify)],
+		json_attributes => JSON::PP::true, json_attributes_topic => "$mqtt_prefix/$uuid",
+		payload_available => '2', %extra,
+	);
 }
 
 # Fuehrt eine Nachricht ueber die reale Format-Registry bis zum kanonischen Modell.
@@ -97,6 +110,75 @@ subtest 'Speaker wird kanonischer Media-Player' => sub {
 			$event->{availability}[0]{value_template}, value => "$input",
 		);
 		is($rendered->{value}, "$expected", "Connected-Zustand $input wird korrekt normalisiert");
+	}
+};
+
+subtest 'Alte Sonos-Topics werden vor HA erkannt und beachten konfigurierte Prefixe' => sub {
+	ok(MQTT2_Discovery::Parser::Sonos2mqtt::matches(topic => $legacy_topic),
+		'alter Standardpfad wird auch ohne explizite Prefixliste erkannt');
+	my $result = consume($legacy_topic, legacy_sonos_payload(), ['homeassistant']);
+	is([$result->{status}, $result->{adapter}], ['ok', 'sonos2mqtt'],
+		'altes Format verwendet den Sonos-Adapter auch bei ausschliesslichem HA-Prefix');
+	is(consume($legacy_topic, legacy_sonos_payload(), ['sonos2mqtt'])->{status}, 'next',
+		'nicht konfiguriertes HA-Prefix wird nicht beansprucht');
+	my $custom = consume("haus/ha/music_player/$uuid/sonos/config",
+		legacy_sonos_payload(mqtt_prefix => 'audio/sonos'), ['haus', 'haus/ha']);
+	is([$custom->{status}, $custom->{adapter}], ['ok', 'sonos2mqtt'],
+		'verschachtelte Discovery- und MQTT-Prefixe werden unabhaengig aufgeloest');
+	is($custom->{events}[0]{source}{prefix}, 'haus/ha', 'passender langer Discovery-Prefix bleibt erhalten');
+	is($custom->{events}[0]{entity}{node_id}, 'audio/sonos', 'MQTT-Prefix stammt aus dem State-Topic');
+
+	# Aehnliche Topics duerfen weder andere Komponenten noch fremde Player uebernehmen.
+	for my $foreign ("homeassistant/sensor/$uuid/sonos/config",
+		"homeassistant/music_player/$uuid/other/config", "$legacy_topic/extra", "sonos/$uuid") {
+		ok(!MQTT2_Discovery::Parser::Sonos2mqtt::matches(
+			topic => $foreign, prefixes => ['homeassistant', 'sonos2mqtt']),
+			"fremdes Topic bleibt unbelegt: $foreign");
+	}
+
+	my $sensor = consume("homeassistant/sensor/$uuid/sonos/config", '{"state_topic":"sensor/state"}');
+	is([$sensor->{status}, $sensor->{adapter}], ['ok', 'homeassistant'],
+		'normale HA-Entity erreicht weiterhin ihren Adapter');
+};
+
+subtest 'Beide Sonos-Formate erzeugen dieselben Funktionen und dieselbe Geraeteidentitaet' => sub {
+	my $current = consume($topic, sonos_payload())->{events}[0];
+	my $legacy = consume($legacy_topic, legacy_sonos_payload())->{events}[0];
+	is(MQTT2_Discovery::Model::validate($legacy), undef, 'altes Format erzeugt ein gueltiges Modell');
+	is($legacy->{source}{key}, "$legacy_topic|", 'altes Discovery-Topic bleibt der Loeschschluessel');
+
+	# Beide Protokollvarianten muessen dieselben Lese- und Schreibvertraege liefern.
+	for my $field (qw(entity signals commands availability)) {
+		is($legacy->{$field}, $current->{$field}, "$field wird ohne zweite Implementierung identisch normalisiert");
+	}
+
+	my $current_mapping = MQTT2_Discovery::Mapper::map_model(model => $current, io_name => 'mqtt');
+	my $legacy_mapping = MQTT2_Discovery::Mapper::map_model(model => $legacy, io_name => 'mqtt');
+	is($legacy_mapping->{identity}, $current_mapping->{identity},
+		'derselbe RINCON bleibt unabhaengig von Format und Discovery-Topic dasselbe Geraet');
+};
+
+subtest 'Alte Sonos-Loeschungen und fehlerhafte Payloads bleiben beim Sonos-Adapter' => sub {
+	my $delete = consume($legacy_topic, '');
+	is([$delete->{status}, $delete->{adapter}, $delete->{events}[0]{operation}, $delete->{events}[0]{source}{key}],
+		['ok', 'sonos2mqtt', 'delete', "$legacy_topic|"],
+		'leerer Payload entfernt die alte Quelle ohne Kenntnis des MQTT-Prefixes');
+
+	# Fehlerhafte Sonos-Konfigurationen duerfen nicht als HA-Fehler oder gueltiger Speaker enden.
+	for my $case (
+		['{', 'json'], ['[]', 'schema'],
+		[legacy_sonos_payload(device => { identifiers => ['other'] }), 'schema'],
+		[legacy_sonos_payload(device_class => 'switch'), 'schema'],
+		[legacy_sonos_payload(state_topic => undef), 'schema'],
+		[legacy_sonos_payload(state_topic => "sonos/other"), 'schema'],
+		[legacy_sonos_payload(state_topic => $uuid), 'schema'],
+		[legacy_sonos_payload(state_topic => "sonos/+/$uuid"), 'schema'],
+		[legacy_sonos_payload(command_topic => 'sonos/other/control'), 'schema'],
+		[legacy_sonos_payload(availability_topic => 'other/connected'), 'schema'],
+	) {
+		my $result = consume($legacy_topic, $case->[0]);
+		is([$result->{status}, $result->{adapter}, $result->{error_class}],
+			['error', 'sonos2mqtt', $case->[1]], 'ungueltiger alter Payload wird eindeutig abgelehnt');
 	}
 };
 

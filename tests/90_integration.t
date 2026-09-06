@@ -244,6 +244,70 @@ subtest 'Sonos2mqtt-Speaker wird als bedienbarer Media-Player angelegt' => sub {
 		'normales Sonos-State-Topic bleibt bei den nachfolgenden Consumern');
 };
 
+subtest 'Alte Sonos-Discovery funktioniert ueber SERVER und CLIENT bis zur Laufzeit und Loeschung' => sub {
+	# Beide Transportarten muessen auch mit einem eigenen HA-Discovery-Prefix funktionieren.
+	for my $io_type (qw(MQTT2_SERVER MQTT2_CLIENT)) {
+		my $hash = setup(type => $io_type, prefixes => 'haus/ha,sonos2mqtt');
+		$main::attr{discovery}{availabilityReading} = 'sonosStatus';
+		my $uuid = 'RINCON_804AF28451D201400';
+		my $legacy_topic = "haus/ha/music_player/$uuid/sonos/config";
+		my $current_topic = "sonos2mqtt/discovery/sonos/$uuid";
+		my $payload = qq|{"device":{"identifiers":["$uuid"],"manufacturer":"Sonos","name":"Wohnen"},"device_class":"speaker","name":"Wohnen","state_topic":"sonos/$uuid","command_topic":"sonos/$uuid/control","unique_id":"sonos2mqtt_${uuid}_speaker","availability_topic":"sonos/connected","payload_available":"2","json_attributes":true,"json_attributes_topic":"sonos/$uuid","available_commands":["play","pause","volume","mute","unmute"]}|;
+		is(dispatch_message('mqtt', 'sonosbridge', $legacy_topic, $payload), ['MQTT2_DISCOVERY'],
+			"$io_type: alte Discovery wird konsumiert");
+		my $target = 'MQTT2_Wohnen';
+		ok($main::defs{$target}, "$io_type: Speaker wurde angelegt");
+		is(reading_value('discovery', 'lastAdapter'), 'sonos2mqtt', 'Sonos-Adapter ist zustaendig');
+		is(reading_value('discovery', 'errorCount'), 0, 'keine Unsupported-Meldung vom HA-Parser');
+		my $reading_list = attr_value($target, 'readingList');
+		my $set_list = attr_value($target, 'setList');
+		my ($speaker_line) = grep { /^\$DEVICETOPIC:/ } split /\n/, $reading_list;
+		my ($reference) = $speaker_line =~ /'(r_[a-f0-9]+)'/;
+		my $state = '{"transportState":"PLAYING","volume":{"Master":23},"mute":{"Master":false}}';
+		is(main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $state),
+			{ transportState => 'PLAYING', volume => '23', mute => 'false' },
+			'gemeinsame Runtime liest Transportstatus, Lautstaerke und Mute');
+		like($set_list, qr/^play:noArg \$DEVICETOPIC\/control \{"command":"play"\}$/m,
+			'Transportbefehl verwendet das richtige Command-Topic und JSON');
+		like($set_list, qr/^volume:slider,0,1,100 \$DEVICETOPIC\/control \{"command":"volume","input":\$EVTPART1\}$/m,
+			'Lautstaerke verwendet denselben numerischen Setter wie das neue Format');
+		my ($mute_line) = grep { /^mute:/ } split /\n/, $set_list;
+		my ($mute_ref) = $mute_line =~ /'(r_[a-f0-9]+)'/;
+		is(main::MQTT2_DISCOVERY_runtimeRef($target, $mute_ref, 'mute off'),
+			qq|sonos/$uuid/control {"command":"unmute"}|, 'Mute-Auswahl wird korrekt codiert');
+		my ($availability_line) = grep { /^sonos\/connected:/ } split /\n/, $reading_list;
+		my ($availability_ref) = $availability_line =~ /'(r_[a-f0-9]+)'/;
+
+		# Die alte payload_available-Angabe fuehrt zur selben dreistufigen Bridge-Auswertung.
+		for my $case ([0, 'offline'], [1, 'offline'], [2, 'online']) {
+			my $updates = main::MQTT2_DISCOVERY_runtimeRef($target, $availability_ref, "$case->[0]");
+			is($updates->{sonosStatus}, $case->[1],
+				'Availability wird unter dem konfigurierten Readingnamen ausgewertet');
+		}
+
+		dispatch_message('mqtt', 'sonosbridge', $legacy_topic, $payload);
+		is(attr_value($target, 'readingList'), $reading_list, 'erneute alte Discovery erzeugt keine Reading-Duplikate');
+		is(attr_value($target, 'setList'), $set_list, 'erneute alte Discovery behaelt stabile Sets');
+
+		# Nach dem Verwerfen der Laufzeitcaches muss die persistierte Registry ausreichen.
+		delete $hash->{helper}{registry};
+		delete $main::defs{$target}{helper}{mqtt2_discovery_runtime_refs};
+		is(main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $state),
+			{ transportState => 'PLAYING', volume => '23', mute => 'false' },
+			'Reading-Referenz wird aus der gespeicherten Registry wiederhergestellt');
+
+		# Beide Quellen duerfen dasselbe Geraet verwalten; Loeschungen bleiben Topic-bezogen.
+		dispatch_message('mqtt', 'sonosbridge', $current_topic, $payload);
+		is(reading_value('discovery', 'discoveredDevices'), 1, 'Formatwechsel legt kein zweites Device an');
+		dispatch_message('mqtt', 'sonosbridge', $legacy_topic, '');
+		is(reading_value('discovery', 'discoveredEntities'), 1, 'alte Loeschmeldung erhaelt die neue Quelle');
+		ok($main::defs{$target}, 'Speaker bleibt unter demselben Namen vorhanden');
+		is(attr_value($target, 'setList'), $set_list, 'neue Quelle bietet weiterhin dieselben Befehle');
+		dispatch_message('mqtt', 'sonosbridge', $current_topic, '');
+		is(reading_value('discovery', 'discoveredEntities'), 0, 'beide Quellen wurden vollstaendig entfernt');
+	}
+};
+
 subtest 'MQTT2_CLIENT trennt mehrere Discovery-Geraete trotz gemeinsamer Transport-CID' => sub {
 	setup(type => 'MQTT2_CLIENT');
 	is(dispatch_message(

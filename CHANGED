@@ -1,6 +1,10 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 22b30fb5b3bb183210a1402d89fc44864d9bf624a236cb735b38f9cea9277333
+# Msg-SHA256: e95ef0ee7290cdcb183e64c19df923434c9244aa61d5d97cd00f8d3ef3d37e6a
+- change: MQTT2_DISCOVERY: - Altes Sonos2mqtt-Discovery-Format im bestehenden
+  Adapter unterstuetzt
+  - Redundanten commit-msg-Hook fuer CHANGED entfernt. CHANGED wird nun durch
+    Tortoise Hook erstellt
 - change: MQTT2_DISCOVERY: - Doppelte klassische HA-Entities bei paralleler
   Device-Discovery unterdrueckt
   - Fehlende Number-Grenzen mit Home-Assistant-Defaults ergaenzt

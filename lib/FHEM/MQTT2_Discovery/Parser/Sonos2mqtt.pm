@@ -20,22 +20,26 @@ sub _topic_parts {
 	return if !defined($topic) || ref($topic);
 	my @prefixes = grep {
 		defined($_) && !ref($_) && $_ ne ''
-	} @{ ref($prefixes) eq 'ARRAY' ? $prefixes : ['sonos2mqtt'] };
+	} @{ ref($prefixes) eq 'ARRAY' ? $prefixes : ['homeassistant', 'sonos2mqtt'] };
 
 	# Laengere Prefixe haben Vorrang, damit verschachtelte Konfigurationen nicht
 	# versehentlich von einem kuerzeren gemeinsamen Anfang beansprucht werden.
 	for my $prefix (sort { length($b) <=> length($a) } @prefixes) {
-		my $start = "$prefix/discovery/";
+		my $start = "$prefix/";
 		next if index($topic, $start) != 0;
 		my $rest = substr($topic, length($start));
-		next if $rest !~ m{^([A-Za-z0-9_.-]+)/([A-Za-z0-9_-]+)$};
-		return ($prefix, $1, $2);
+		# Das alte HA-aehnliche Format enthaelt keinen MQTT-Prefix; dieser wird
+		# erst aus dem Payload gelesen. Das feste sonos-Segment grenzt es ab.
+		return ($prefix, undef, $1)
+			if $rest =~ m{\Amusic_player/([A-Za-z0-9_-]+)/sonos/config\z};
+		return ($prefix, $1, $2)
+			if $rest =~ m{\Adiscovery/([A-Za-z0-9_.-]+)/([A-Za-z0-9_-]+)\z};
 	}
 
 	return;
 }
 
-# Erkennt ausschliesslich die aktuelle Sonos2mqtt-Discovery-Topicform.
+# Erkennt beide Sonos2mqtt-Discovery-Topicformen vor dem allgemeinen HA-Adapter.
 sub matches {
 	my (%args) = @_;
 	my @parts = _topic_parts($args{topic}, $args{prefixes});
@@ -56,7 +60,7 @@ sub _command_payload {
 	return JSON::PP->new->canonical(1)->encode({ command => $command });
 }
 
-# Normalisiert eine aktuelle Sonos2mqtt-Speaker-Discovery in eine Media-Player-Entity.
+# Normalisiert beide Sonos2mqtt-Speaker-Formate in dieselbe Media-Player-Entity.
 sub parse {
 	my (%args) = @_;
 	my $topic = $args{topic};
@@ -98,6 +102,14 @@ sub parse {
 	my $state_topic = _topic_value($decoded, 'state_topic');
 	my $command_topic = _topic_value($decoded, 'command_topic');
 	my $availability_topic = _topic_value($decoded, 'availability_topic');
+	# Nur beim alten Format fehlt der MQTT-Prefix im Discovery-Topic. Der
+	# State-Pfad muss denselben RINCON tragen und darf keine Wildcards enthalten.
+	if (!defined($mqtt_prefix)) {
+		return _error('schema', 'Sonos2mqtt state_topic passt nicht zum Discovery-Topic', topic => $topic)
+			if !defined($state_topic) || $state_topic !~ m{\A([^+#\x00]+)/\Q$uuid\E\z};
+		$mqtt_prefix = $1;
+	}
+
 	return _error('schema', 'Sonos2mqtt state_topic passt nicht zum Discovery-Topic', topic => $topic)
 		if !defined($state_topic) || $state_topic ne "$mqtt_prefix/$uuid";
 	return _error('schema', 'Sonos2mqtt command_topic passt nicht zum Lautsprecher', topic => $topic)

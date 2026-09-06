@@ -23,7 +23,7 @@ use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
 use vars qw(%defs %attr %modules $readingFnAttributes);
 
-our $MQTT2_DISCOVERY_VERSION = '0.9.7';
+our $MQTT2_DISCOVERY_VERSION = '0.9.8';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
 our $MQTT2_DISCOVERY_AVAILABILITY_REFRESH_DELAY = 60;
 our $MQTT2_DISCOVERY_AVAILABILITY_RETRY_DELAY = 10;
