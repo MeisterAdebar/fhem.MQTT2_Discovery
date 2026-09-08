@@ -1,7 +1,7 @@
 # MQTT2_DISCOVERY
 
 `MQTT2_DISCOVERY` verarbeitet Home-Assistant-MQTT-Discovery sowie die nativen
-Discovery-Protokolle von Tasmota und Sonos2mqtt in FHEM. Daraus erzeugt es
+Discovery-Protokolle von Tasmota, Sonos2mqtt und Shelly Gen2+ in FHEM. Daraus erzeugt es
 konservativ verwaltete `MQTT2_DEVICE`-Definitionen.
 
 ## Architektur und Discovery-Formate
@@ -59,6 +59,8 @@ Moduls an. Nach einem Modulupdate ist `shutdown restart` erforderlich.
 
 - `discoveryPrefixes`: kommaseparierte Prefixe, Default
   `homeassistant,tasmota/discovery,sonos2mqtt`
+- `shellyDiscovery`: native Shelly-Erkennung unabhaengig von `discoveryPrefixes`, Default `1`.
+  Mit `0` werden keine neuen Shelly-Abfragen gestartet; bestehende Device-Bindings bleiben nutzbar.
 - `deviceNamePrefix`: optionaler Prefix fuer neu angelegte Device-Namen. Ohne das
   Attribut wird nichts vorangestellt, beispielsweise entsteht der Name `Node`.
   Mit `attr mqttDiscovery deviceNamePrefix Tasmota_` wird daraus `Tasmota_Node`.
@@ -133,6 +135,72 @@ oder geloescht wird. `errorCount`, `lastError`, `lastErrorAdapter` und
 `warningCount`, `lastWarning`, `lastWarningAdapter` und `lastWarningTopic`
 weiterhin bestehende Teilabbildungen. Eine erfolgreiche Nachricht eines anderen
 Geraets verdeckt einen vorhandenen Fehler nicht.
+
+## Native Shelly-Discovery (Gen2, Gen3 und Gen4)
+
+Das Modul erkennt Shelly-Geraete mit Originalfirmware direkt
+ueber MQTT. Home Assistant und ein Discovery-Skript auf dem Shelly werden nicht
+benoetigt. Der Shelly 1 Gen4 wird mit Relais, Schalteingang, Geraetetemperatur,
+WLAN-Signalstaerke und Laufzeit abgebildet, soweit diese Komponenten Werte melden.
+
+Am Shelly muessen MQTT und MQTT-RPC aktiviert sein. Fuer laufende Werte muss
+mindestens **RPC status notifications over MQTT** (`rpc_ntf`) oder
+**Generic status update over MQTT** (`status_ntf`) aktiviert sein. Fuer die
+automatische Suche per `announce` wird zusaetzlich **MQTT Control** benoetigt.
+Das Modul aendert keine dieser Shelly-Einstellungen selbst.
+
+Beim Aktivieren, nach dem FHEM-Start und nach einer erneuten Brokerverbindung
+fordert das Modul mit `announce` auf `shellies/command` die Geraeteinformationen
+an. Native Online-Meldungen und noch unbekannte RPC-Ereignisse koennen die
+Erkennung ebenfalls starten. Die Suche laesst sich manuell wiederholen:
+
+```text
+set mqttDiscovery discoverShelly
+```
+
+Ein individuelles Topic-Prefix kann direkt angegeben werden. Das funktioniert
+auch bei deaktiviertem MQTT Control und fuer bereits verbundene Geraete, die
+gerade keine Ereignisse senden:
+
+```text
+set mqttDiscovery discoverShelly shelly1g4-aabbccddeeff
+set mqttDiscovery discoverShelly haus/werkstatt/licht
+```
+
+Der Adapter fragt `Shelly.GetDeviceInfo`, `Shelly.GetConfig` und `Shelly.GetStatus`
+nacheinander ab. Erst ein vollstaendiger, validierter Antwortsatz wird in das
+gemeinsame Modell uebernommen. Antworten sind pro Instanz, Geraet und Abfrage
+getrennt; alte oder unpassende Request-IDs werden ignoriert. Nach dem Anwenden
+der Device-Bindings folgt eine weitere Statusabfrage fuer die Initialwerte.
+Die Abfragen und Schaltbefehle werden ohne MQTT-Retain gesendet.
+
+Bei eingeschraenkten Broker-ACLs oder `MQTT2_CLIENT subscriptions` muessen
+`shellies/announce`, die jeweiligen Shelly-Topics und
+`mqtt2_discovery/<Discovery-Devicename>/shelly/#` empfangbar sein. Publishes auf
+`shellies/command` und `<Shelly-Prefix>/rpc` muessen erlaubt sein.
+Auch `ignoreRegexp` darf diese Nachrichten nicht ausfiltern.
+
+Unterstuetzter Umfang:
+
+- `switch:<id>`: ein oder mehrere Relais, beispielsweise `switch_0` mit
+  `set <Shelly-Device> switch_0 on` beziehungsweise `off`.
+- `input:<id>`: Schalteingaenge, vorhandene Analog-Prozentwerte und Zaehler.
+- Gemeldete Relaismesswerte: Temperatur, Leistung, Spannung, Strom, Frequenz,
+  bezogene und zurueckgespeiste Energie in Wh.
+- Temperatur- und Feuchtesensoren, Batteriestand, WLAN-RSSI und Laufzeit,
+  sofern als unterstuetzte Komponente im Snapshot vorhanden.
+- Erreichbarkeit ueber `<prefix>/online` und die initiale Statusantwort.
+
+Relais- und Eingangszustaende werden als `true`/`false` gelesen; die semantische
+Oberflaeche ordnet sie `on`/`off` zu. Komponentenstatus und RPC-Teilstatus lesen
+dieselben Readings, ohne fehlende Werte anderer Komponenten zu ueberschreiben.
+Komponenten bekommen stabile Namen wie `switch_0_temperature` oder `input_0`.
+
+Protokollgrundlagen: [Shelly MQTT](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Mqtt/),
+[RPC-Rahmen](https://shelly-api-docs.shelly.cloud/gen2/General/RPCProtocol/) und
+[Komponentenabfragen](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Shelly/).
+Die lokale Testabdeckung steht in `tests/28_shelly.t`; ein Hardwaretest ist darin
+nicht enthalten.
 
 ## Home-Assistant Discovery
 

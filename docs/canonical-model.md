@@ -171,7 +171,10 @@ Template-Compiler verarbeitet. Nicht unterstuetzte Ausdruecke erzeugen eine
 Warnung oder verhindern die unsichere Teilabbildung.
 
 Native Protokolle koennen zusaetzliche generische Signale liefern. Derzeit sind
-`payload`, `json_flatten` und `json_sequence` definiert. Dadurch kann der
+`payload`, `template`, `json_flatten` und `json_sequence` definiert. `template`
+beschreibt einen alternativen Transportkanal fuer denselben Readingnamen und
+verwendet den vorhandenen sicheren Template-Compiler. Shelly nutzt dies fuer
+Komponentenstatus und RPC-Statusmeldungen. Dadurch kann der
 Tasmota-Adapter seine vollstaendige Standard-Telemetrie beschreiben, ohne dass
 das Modell oder der allgemeine Mapper Tasmota-Payloads oder Tasmota-Topicbasen
 kennen muss.
@@ -188,6 +191,19 @@ Payload zusammenzufuehren. Der Mapper kennt dadurch weder Sonos-Kommandonamen
 noch Sonos-Topics.
 
 ## Neuer Formatadapter
+
+Der Shelly-Adapter benoetigt neben eingehenden Nachrichten lesende MQTT-Abfragen.
+Er liefert diese als `requests => [{ topic => ..., payload => ... }]`;
+`after_apply` enthaelt Abfragen fuer Initialwerte, die erst nach erfolgreichem
+Device-Apply gesendet werden. Das Gateway uebergibt sie ohne Retain an die
+MQTT-WriteFn. Bei asynchroner Verarbeitung warten Initialabfragen bis zum Ende
+des Batches. Adapter erzeugen dabei weiterhin keine FHEM-Attributzeilen.
+
+Die Registry uebergibt `claims` den vorhandenen Adapterzustand ausschliesslich
+zum Lesen. Native Shelly-Laufzeitmeldungen werden zur Erkennung beobachtet und
+an nachfolgende MQTT-Parser weitergereicht; nur instanzeigene Antworten auf
+Discovery-Abfragen werden konsumiert. Das gemeinsame `shellies/announce`-Topic
+wird in der Queue zusaetzlich nach Geraete-ID getrennt.
 
 Ein Adapter implementiert mindestens:
 

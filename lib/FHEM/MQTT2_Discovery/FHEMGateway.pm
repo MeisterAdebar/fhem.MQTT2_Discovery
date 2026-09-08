@@ -139,6 +139,25 @@ sub set_attribute {
 	return $callback->("$device $attribute");
 }
 
+# Sendet ein einzelnes MQTT-Publish ueber das gebundene IODev ohne Retain und ohne FHEM-Kommandoparser.
+sub can_publish_mqtt {
+	my ($self) = @_;
+	return ref($self->{callbacks}{publish_mqtt}) eq 'CODE' || defined(&main::CallFn) ? 1 : 0;
+}
+
+# Uebergibt validierte Topic- und Payloadwerte direkt an die MQTT-WriteFn.
+sub publish_mqtt {
+	my ($self, $iodev, $topic, $payload) = @_;
+	return 'Ungueltiges MQTT-Publish' if ref($iodev) ne 'HASH' || !defined($topic)
+		|| ref($topic) || $topic eq '' || $topic =~ /[\s\x00-\x1f+#]/ || $topic =~ /:r$/
+		|| !defined($payload) || ref($payload);
+	my $callback = $self->_callback(publish_mqtt => sub {
+		return 'FHEM WriteFn ist nicht verfuegbar' if !defined(&main::CallFn);
+		return main::CallFn($_[0]{NAME}, 'WriteFn', $_[0], 'publish', "$_[1] $_[2]");
+	});
+	return $callback->($iodev, $topic, $payload);
+}
+
 # Legt ein MQTT2_DEVICE mit Client-ID und IODev ueber FHEMs Define-Schnittstelle an.
 sub define_mqtt2_device {
 	my ($self, $name, $cid, $io_name) = @_;

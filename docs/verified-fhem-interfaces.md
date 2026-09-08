@@ -15,3 +15,14 @@ Geprueft wurde am 18.08.2026 der taeglich aktualisierte Read-only-Mirror `fhem/f
 - `json2nameValue()` verbindet verschachtelte Objektschluessel mit Unterstrichen und nummeriert JSON-Arrays ab `1`. Ein Template-Pfad `ENERGY.Power[0]` entspricht deshalb dem Rohreading `ENERGY_Power_1`.
 
 Diese Beobachtungen sind in `tests/90_integration.t` als lokale Vertragstests festgeschrieben. FHEM-Kernmodule werden von diesem Projekt weder kopiert noch veraendert.
+
+Ergaenzend am 08.09.2026 fuer native Shelly-Abfragen geprueft:
+
+- Beide MQTT-IODev-WriteFn akzeptieren `($iodev, 'publish', '<topic> <payload>')`.
+  Der Gateway verwendet dafuer `CallFn($iodev->{NAME}, 'WriteFn', ...)` und keinen
+  FHEM-Kommandostring. Ohne `:r` am Topic wird kein Retain angefordert.
+- Der lokale Vertragstest in `tests/28_shelly.t` prueft die Argumente der
+  Gateway-Grenze und simuliert Antworten ueber beide MQTT-Dispatchpfade.
+
+Quellen: [MQTT2_CLIENT](https://raw.githubusercontent.com/fhem/fhem-mirror/master/fhem/FHEM/00_MQTT2_CLIENT.pm)
+und [MQTT2_SERVER](https://raw.githubusercontent.com/fhem/fhem-mirror/master/fhem/FHEM/00_MQTT2_SERVER.pm).

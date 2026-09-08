@@ -525,6 +525,9 @@ sub _add_supplemental_signals {
 		# flaches JSON oder eine nummerierte JSON-Sequenz gerendert wird.
 		if (($type || '') eq 'payload') {
 			_add_entry($list, $warnings, _reading($topic, undef, $name), "Zusatzsignal $name");
+		} elsif (($type || '') eq 'template') {
+			# Alternative Transportkanaele verwenden denselben sicheren Template-Compiler.
+			_add_entry($list, $warnings, _reading($topic, $signal->{template}, $name), "Zusatzsignal $name");
 		} elsif (($type || '') eq 'json_flatten') {
 			_add_entry($list, $warnings, {
 				kind => 'json_autocreate', topic => $topic, name => $name,

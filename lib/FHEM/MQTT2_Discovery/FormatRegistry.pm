@@ -8,10 +8,12 @@ use warnings;
 use MQTT2_Discovery::Format::Sonos2mqtt ();
 use MQTT2_Discovery::Format::Tasmota ();
 use MQTT2_Discovery::Format::HomeAssistant ();
+use MQTT2_Discovery::Format::Shelly ();
 
 
 # Spezifische Formate stehen vor dem allgemeineren HA-Discovery-Adapter.
 my @ADAPTERS = (
+	'MQTT2_Discovery::Format::Shelly',
 	'MQTT2_Discovery::Format::Sonos2mqtt',
 	'MQTT2_Discovery::Format::Tasmota',
 	'MQTT2_Discovery::Format::HomeAssistant',
@@ -41,9 +43,9 @@ sub consume {
 			error => 'Formatadapter implementiert id, claims oder consume nicht vollstaendig',
 		} if !$claims || !$id_method || !$consume;
 
-		# Nur der erste Adapter, der das Topic beansprucht, darf es verarbeiten.
-		next if !$claims->(%args);
+		# Die Erkennung darf den bestehenden Adapterzustand ausschliesslich lesen.
 		my $id = $id_method->();
+		next if !$claims->(%args, state => $states->{$id} || {});
 		my $state = $states->{$id} ||= {};
 		my $result = $consume->(%args, state => $state);
 		return {

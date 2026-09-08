@@ -23,7 +23,7 @@ use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
 use vars qw(%defs %attr %modules $readingFnAttributes);
 
-our $MQTT2_DISCOVERY_VERSION = '0.9.8';
+our $MQTT2_DISCOVERY_VERSION = '0.9.9';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
 our $MQTT2_DISCOVERY_AVAILABILITY_REFRESH_DELAY = 60;
 our $MQTT2_DISCOVERY_AVAILABILITY_RETRY_DELAY = 10;
@@ -120,8 +120,8 @@ sub MQTT2_DISCOVERY_Initialize($) {
 	# zugehoerigen Commandref-Anker stehen in der eingebetteten HTML-Dokumentation.
 	$hash->{FW_deviceOverview} = 1;
 	# Match bleibt absichtlich prefixunabhaengig, da Prefixe je IODev konfiguriert sind.
-	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors)|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
-	$hash->{AttrList} = 'discoveryPrefixes deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
+	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors|announce|online|events/rpc)|mqtt2_discovery/[^/\\x00]+/shelly/[a-f0-9]{16}/(?:info|config|status)/rpc|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
+	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
 	$modules{MQTT2_DISCOVERY}{defptr} ||= {};
 }
 
@@ -183,6 +183,7 @@ sub MQTT2_DISCOVERY_Define($$) {
 	MQTT2_DISCOVERY_sync_io_availability($hash) if $main::init_done;
 	MQTT2_DISCOVERY_log($hash, 2, "defined for $iodev->{TYPE} $io_name; version=$MQTT2_DISCOVERY_VERSION");
 	MQTT2_DISCOVERY_check_ignore_regexp($hash);
+	MQTT2_DISCOVERY_start_shelly($hash);
 	return undef;
 }
 
@@ -243,7 +244,7 @@ sub MQTT2_DISCOVERY_Attr(@) {
 		} elsif ($attribute eq 'availabilityReading') {
 			return 'availabilityReading muss mit einem Buchstaben oder Unterstrich beginnen und darf nur Buchstaben, Ziffern, Punkte, Unterstriche und Bindestriche enthalten'
 				if $value !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/;
-		} elsif ($attribute eq 'autoCreate' || $attribute eq 'autoDelete'
+		} elsif ($attribute eq 'shellyDiscovery' || $attribute eq 'autoCreate' || $attribute eq 'autoDelete'
 				|| $attribute eq 'createReadings') {
 			return "$attribute muss 0 oder 1 sein" if $value !~ /^(?:0|1)$/;
 		} elsif ($attribute eq 'deviceNamePrefix') {
@@ -447,7 +448,7 @@ sub MQTT2_DISCOVERY_Set($@) {
 	my $command = shift @arguments;
 	MQTT2_DISCOVERY_log($hash, 3, 'set ' . (defined($command) ? $command : '<missing>'));
 	MQTT2_DISCOVERY_log($hash, 4, 'set arguments=[' . join(', ', @arguments) . ']') if @arguments;
-	return 'Unknown argument ?, choose one of activate:noArg deactivate:noArg rebuildDevice rescan:noArg'
+	return 'Unknown argument ?, choose one of activate:noArg deactivate:noArg rebuildDevice rescan:noArg discoverShelly'
 		if !defined $command;
 	return MQTT2_DISCOVERY_activate($hash) if $command eq 'activate' && !@arguments;
 	return MQTT2_DISCOVERY_deactivate($hash) if $command eq 'deactivate' && !@arguments;
@@ -457,7 +458,75 @@ sub MQTT2_DISCOVERY_Set($@) {
 		&& (@arguments == 1
 			|| (@arguments == 2 && $arguments[1] eq 'clearReadings'));
 	return MQTT2_DISCOVERY_rescan($hash) if $command eq 'rescan' && !@arguments;
-	return "Unknown argument $command, choose one of activate:noArg deactivate:noArg rebuildDevice rescan:noArg";
+	return MQTT2_DISCOVERY_discover_shelly($hash, $arguments[0])
+		if $command eq 'discoverShelly' && @arguments <= 1;
+	return "Unknown argument $command, choose one of activate:noArg deactivate:noArg rebuildDevice rescan:noArg discoverShelly";
+}
+
+# Liefert den instanzlokalen Antwortpfad und die getrennt schaltbare native Erkennung.
+sub MQTT2_DISCOVERY_shelly_args($) {
+	my ($hash) = @_;
+	return (
+		shelly_enabled => MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'shellyDiscovery', 1),
+		reply_prefix => "mqtt2_discovery/$hash->{NAME}/shelly",
+	);
+}
+
+# Fuehrt deklarierte MQTT-Abfragen aus; Konfigurations- und Geraetebefehle entstehen hier nicht.
+sub MQTT2_DISCOVERY_send_requests($$) {
+	my ($hash, $requests) = @_;
+	return undef if ref($requests) ne 'ARRAY' || !@$requests;
+	return 'MQTT2_DISCOVERY ist deaktiviert' if MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'disable', 0);
+	return 'Shelly-Discovery ist deaktiviert' if !MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'shellyDiscovery', 1);
+	return 'MQTT-IODev ist nicht verbunden' if !MQTT2_DISCOVERY_iodev_available($hash);
+
+	for my $request (@$requests) {
+		my $error = MQTT2_DISCOVERY_gateway($hash)->publish_mqtt(
+			$hash->{IODev}, $request->{topic}, $request->{payload},
+		);
+		return $error if defined($error) && $error ne '';
+	}
+
+	return undef;
+}
+
+# Fordert native Announcements oder einen gezielten Snapshot fuer einen individuellen Prefix an.
+sub MQTT2_DISCOVERY_discover_shelly($;$) {
+	my ($hash, $prefix) = @_;
+	return 'MQTT2_DISCOVERY muss aktiv sein' if MQTT2_DISCOVERY_state($hash) ne 'active';
+	return 'Shelly-Discovery ist deaktiviert' if !MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'shellyDiscovery', 1);
+	my $requests = [{ topic => 'shellies/command', payload => 'announce' }];
+
+	# Ein expliziter Prefix wird direkt abgefragt und benoetigt MQTT Control nicht.
+	if (defined($prefix)) {
+		my $result = MQTT2_Discovery::Format::Shelly::begin(
+			MQTT2_DISCOVERY_shelly_args($hash), mqtt_prefix => $prefix, force => 1,
+			state => ($hash->{helper}{formats}{shelly} ||= {}),
+		);
+		return $result->{error} if $result->{status} ne 'ok';
+		$requests = $result->{requests};
+	}
+	my $error = MQTT2_DISCOVERY_send_requests($hash, $requests);
+	MQTT2_DISCOVERY_reading($hash, 'lastShellyDiscovery', $error || 'requested');
+	return $error;
+}
+
+# Startet native Erkennung einmal pro aktiver Brokerverbindung, auch nach einem FHEM-Neustart.
+sub MQTT2_DISCOVERY_start_shelly($) {
+	my ($hash) = @_;
+	return if !$main::init_done;
+	# Ein Verbindungsabbruch gibt den naechsten Start wieder frei.
+	if (MQTT2_DISCOVERY_state($hash) ne 'active' || !MQTT2_DISCOVERY_iodev_available($hash)) {
+		delete $hash->{helper}{shelly_started};
+		return;
+	}
+	return if $hash->{helper}{shelly_started}
+		|| !MQTT2_DISCOVERY_gateway($hash)->can_publish_mqtt()
+		|| !MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'shellyDiscovery', 1);
+	my $error = MQTT2_DISCOVERY_discover_shelly($hash);
+	$hash->{helper}{shelly_started} = 1 if !$error;
+	MQTT2_DISCOVERY_log($hash, 2, "Shelly discovery failed: $error") if $error;
+	return;
 }
 
 # Ersetzt devicetopic, readingList und setList eines verwalteten Zieldevices vollstaendig.
@@ -582,6 +651,7 @@ sub MQTT2_DISCOVERY_activate($) {
 	MQTT2_DISCOVERY_reading($hash, 'state', MQTT2_DISCOVERY_state($hash));
 	MQTT2_DISCOVERY_check_ignore_regexp($hash);
 	MQTT2_DISCOVERY_log($hash, 2, 'activated; clientOrder=' . join(' ', @order));
+	MQTT2_DISCOVERY_start_shelly($hash);
 	return undef;
 }
 
@@ -720,17 +790,23 @@ sub MQTT2_DISCOVERY_Parse($$) {
 	my ($iodev, $message) = @_;
 	my $config = $modules{MQTT2_DISCOVERY}{defptr}{ $iodev->{NAME} };
 	return '[NEXT]' if !$config;
+	$message =~ s/^autocreate=[^\0]+\0//s;
+	my ($cid, $topic, $payload) = split /\0/, $message, 3;
+	return '[NEXT]' if !defined($topic) || !defined($payload);
+	my @shelly = MQTT2_Discovery::Format::Shelly::route(
+		MQTT2_DISCOVERY_shelly_args($config), topic => $topic, payload => $payload,
+		state => $config->{helper}{formats}{shelly} || {},
+	);
+	my $native_topic = $topic =~ m{/(?:announce|online|events/rpc|(?:info|config|status)/rpc)$};
+	return '[NEXT]' if $native_topic && !@shelly;
 
 	# Auch deaktivierte Discovery-Nachrichten werden konsumiert, damit
 	# MQTT2_DEVICE daraus keine unerwuenschten Fremd-Devices autocreated.
 	if (MQTT2_DISCOVERY_gateway($config)->attr_value($config->{NAME}, 'disable', 0)) {
 		MQTT2_DISCOVERY_log($config, 4, 'disabled; consuming discovery message without processing');
-		return '';
+		return @shelly && $shelly[0] ne 'reply' ? '[NEXT]' : '';
 	}
-	$message =~ s/^autocreate=[^\0]+\0//s;
-	my ($cid, $topic, $payload) = split /\0/, $message, 3;
-	return '[NEXT]' if !defined($topic) || !defined($payload);
-	return '[NEXT]' if !grep { MQTT2_Discovery::DevicePlanner::topic_has_prefix($topic, $_) }
+	return '[NEXT]' if !@shelly && !grep { MQTT2_Discovery::DevicePlanner::topic_has_prefix($topic, $_) }
 		@{ MQTT2_DISCOVERY_prefixes($config) };
 
 	# MQTT2_SERVER kann beim Start viele retained Configs in einem einzigen
@@ -738,11 +814,12 @@ sub MQTT2_DISCOVERY_Parse($$) {
 	# dabei FHEMs Event-Loop nicht fuer den gesamten Schub blockieren.
 	if (MQTT2_DISCOVERY_gateway($config)->can_schedule()) {
 		MQTT2_DISCOVERY_enqueue($config, $cid, $topic, $payload);
-		return '';
+		return @shelly && $shelly[0] ne 'reply' ? '[NEXT]' : '';
 	}
 
 	# Isolierte Testumgebungen ohne FHEM-Timer bleiben synchron nutzbar.
 	my $status = MQTT2_DISCOVERY_process($config, $cid, $topic, $payload);
+	return '[NEXT]' if @shelly && $shelly[0] ne 'reply';
 	return '[NEXT]' if $status eq 'next';
 	# Ein definierter Leerstring stoppt im aktuellen Dispatch die Parserkette ohne Device-Event.
 	return '';
@@ -1171,6 +1248,7 @@ sub MQTT2_DISCOVERY_Notify($$) {
 	if ($device_name eq $io_name) {
 		MQTT2_DISCOVERY_sync_io_availability($hash);
 		MQTT2_DISCOVERY_resume_availability_refreshes($hash);
+		MQTT2_DISCOVERY_start_shelly($hash);
 		return undef;
 	}
 	my $lifecycle = grep { $_ eq 'INITIALIZED' || $_ eq 'REREADCFG' } @$events;
@@ -1210,6 +1288,7 @@ sub MQTT2_DISCOVERY_Notify($$) {
 	# INITIALIZED folgt beim Start auf das statefile; REREADCFG wird unmittelbar
 	# vor der Rueckkehr in den Eventloop ausgeloest und darf denselben Start planen.
 	return undef if !$lifecycle;
+	MQTT2_DISCOVERY_start_shelly($hash);
 	my $queue = $hash->{helper}{queue};
 	return undef if ref($queue) ne 'HASH' || !$queue->{waiting_for_init};
 
@@ -1221,11 +1300,17 @@ sub MQTT2_DISCOVERY_Notify($$) {
 sub MQTT2_DISCOVERY_enqueue($$$$) {
 	my ($hash, $cid, $topic, $payload) = @_;
 	my $queue = $hash->{helper}{queue} ||= { order => [], messages => {}, scheduled => 0 };
+	my $queue_key = $topic;
+	# Das gemeinsame Announce-Topic traegt mehrere Geraete und darf sie nicht gegenseitig ersetzen.
+	if ($topic eq 'shellies/announce') {
+		my $info = eval { decode_json($payload) };
+		$queue_key .= "\0$info->{id}" if MQTT2_Discovery::Parser::Shelly::valid_info($info);
+	}
 
 	# Fuer ein Config-Topic ist nur der zuletzt empfangene Stand relevant. Das
 	# begrenzt zugleich die Arbeit bei schnellen Wiederholungen/Reconnects.
-	push @{ $queue->{order} }, $topic if !exists $queue->{messages}{$topic};
-	$queue->{messages}{$topic} = [$cid, $topic, $payload];
+	push @{ $queue->{order} }, $queue_key if !exists $queue->{messages}{$queue_key};
+	$queue->{messages}{$queue_key} = [$cid, $topic, $payload];
 	return if $queue->{scheduled};
 
 	# Vor dem Einlesen des statefile bleibt die Arbeit ausschliesslich gespeichert;
@@ -1344,6 +1429,9 @@ sub MQTT2_DISCOVERY_process_queue($) {
 		MQTT2_DISCOVERY_persist_registry($hash);
 		MQTT2_DISCOVERY_update_counts($hash);
 		$queue->{scheduled} = 0;
+		# Initialwerte werden erst angefordert, wenn alle Reading-Bindings des Batches vorhanden sind.
+		my $request_error = MQTT2_DISCOVERY_send_requests($hash, $batch->{after_apply});
+		MQTT2_DISCOVERY_reading($hash, 'lastError', $request_error) if $request_error;
 		delete $queue->{batch};
 	}
 	return;
@@ -1354,6 +1442,11 @@ sub MQTT2_DISCOVERY_clear_queue($) {
 	my ($hash) = @_;
 	MQTT2_DISCOVERY_gateway($hash)->cancel_timer($hash, 'MQTT2_DISCOVERY_process_queue');
 	delete $hash->{helper}{queue} if ref($hash->{helper}) eq 'HASH';
+	delete $hash->{helper}{shelly_started};
+	# Antworten abgebrochener Abfragen duerfen nach einer Reaktivierung keinen alten Snapshot anwenden.
+	if (ref($hash->{helper}{formats}{shelly}) eq 'HASH') {
+		$hash->{helper}{formats}{shelly} = { sequence => $hash->{helper}{formats}{shelly}{sequence} || 0 };
+	}
 	return;
 }
 
@@ -1418,6 +1511,10 @@ sub MQTT2_DISCOVERY_process($$$$;$) {
 		# Parser- oder Apply-Fehler bleiben ihrem Topic und Adapter zugeordnet, damit
 		# eine spaetere erfolgreiche Wiederholung genau diesen Eintrag loeschen kann.
 		if ($status eq 'error') {
+			# Ein fehlgeschlagener Apply darf die native Wiedererkennung nicht dauerhaft sperren.
+			if (($hash->{helper}{process_adapter} || '') eq 'shelly') {
+				delete $_->{complete} for values %{ $hash->{helper}{formats}{shelly}{devices} || {} };
+			}
 			MQTT2_DISCOVERY_record_issue(
 				$hash, 'error', $topic,
 				$hash->{helper}{process_adapter}
@@ -1466,6 +1563,7 @@ sub MQTT2_DISCOVERY_process_inner($$$$;$) {
 	my $prefixes = MQTT2_DISCOVERY_prefixes($hash);
 	my $parsed = MQTT2_Discovery::FormatRegistry::consume(
 		topic => $topic, payload => $payload, prefixes => $prefixes,
+		MQTT2_DISCOVERY_shelly_args($hash), cid => $cid,
 		states => ($hash->{helper}{formats} ||= {}),
 		(ref($hash->{helper}{format_adapters}) eq 'ARRAY'
 			? (adapters => $hash->{helper}{format_adapters}) : ()),
@@ -1491,6 +1589,14 @@ sub MQTT2_DISCOVERY_process_inner($$$$;$) {
 		MQTT2_DISCOVERY_log($hash, 1, "parser error for topic=$topic: $error");
 		return 'error';
 	}
+	my $request_error = MQTT2_DISCOVERY_send_requests($hash, $parsed->{requests});
+	# Netzwerkfehler bleiben sichtbar; ohne vollstaendigen Snapshot wird keine Registry kopiert.
+	if ($request_error) {
+		MQTT2_DISCOVERY_reading($hash, 'lastError', $request_error);
+		return 'error';
+	}
+	return 'consumed' if ($parsed->{adapter} || '') eq 'shelly' && !@{ $parsed->{events} || [] };
+	$cid = $parsed->{cid} if defined($parsed->{cid});
 
 	# Die Registry wird als Transaktionsentwurf kopiert. Erst nach erfolgreichem
 	# Mapping und Attribut-Apply ersetzt sie den bisher sichtbaren Stand.
@@ -1617,6 +1723,13 @@ sub MQTT2_DISCOVERY_process_inner($$$$;$) {
 		$hash->{helper}{registry} = $registry;
 		MQTT2_DISCOVERY_persist_registry($hash);
 		MQTT2_DISCOVERY_update_counts($hash);
+		my $error = MQTT2_DISCOVERY_send_requests($hash, $parsed->{after_apply});
+		if ($error) {
+			MQTT2_DISCOVERY_reading($hash, 'lastError', $error);
+			return 'error';
+		}
+	} else {
+		push @{ $batch->{after_apply} ||= [] }, @{ $parsed->{after_apply} || [] };
 	}
 
 	# Parser- und Mapping-Warnungen degradieren das Ergebnis, verhindern aber nicht
@@ -1977,7 +2090,7 @@ sub MQTT2_DISCOVERY_finish_batch($$) {
 	$hash->{helper}{registry} = $registry;
 	MQTT2_DISCOVERY_persist_registry($hash);
 	MQTT2_DISCOVERY_update_counts($hash);
-	return undef;
+	return MQTT2_DISCOVERY_send_requests($hash, delete $batch->{after_apply});
 }
 
 # Rendert ein einzelnes Batch-Ziel und fuehrt danach die geschuetzte autoDelete-Entscheidung aus.
@@ -3099,14 +3212,14 @@ MQTT2_DISCOVERY - native Home-Assistant-MQTT-Discovery fuer FHEM
 Das Modul fuehrt kein C<save> aus und wertet Discovery-Payloads nicht als Perl-Code aus.
 
 =item device
-=item summary Native Home Assistant MQTT and Tasmota discovery for MQTT2_DEVICE
-=item summary_DE Native Home-Assistant-MQTT- und Tasmota-Discovery fuer MQTT2_DEVICE
+=item summary Home Assistant MQTT, Tasmota, Sonos2mqtt and Shelly discovery for MQTT2_DEVICE
+=item summary_DE Home-Assistant-MQTT-, Tasmota-, Sonos2mqtt- und Shelly-Discovery fuer MQTT2_DEVICE
 
 =begin html
 
 <a id="MQTT2_DISCOVERY"></a>
 <h3>MQTT2_DISCOVERY</h3>
-<p>Processes Home Assistant MQTT Discovery and native Tasmota Discovery messages
+<p>Processes Home Assistant MQTT Discovery and native Tasmota, Sonos2mqtt and Shelly Gen2/Gen3/Gen4 messages
 and creates conservatively managed <code>MQTT2_DEVICE</code> devices.</p>
 
 <a id="MQTT2_DISCOVERY-define"></a>
@@ -3170,12 +3283,29 @@ Syntax: <code>set &lt;name&gt; rebuildDevice &lt;MQTT2_DEVICE&gt; [clearReadings
 Processes matching retained discovery messages from an <code>MQTT2_SERVER</code>
 again. An <code>MQTT2_CLIENT</code> has no local retained-message cache.<br>
 Syntax: <code>set &lt;name&gt; rescan</code>
+</li><br>
+<li><a id="MQTT2_DISCOVERY-set-discoverShelly"></a><b>discoverShelly [mqtt-prefix]</b><br>
+Requests native Shelly Gen2/Gen3/Gen4 discovery. Without an argument, broadcasts
+<code>announce</code>; an explicit MQTT prefix starts read-only RPC queries directly.
+MQTT-RPC and either RPC status notifications or generic MQTT status updates must
+be enabled on the Shelly. Broadcast discovery additionally requires MQTT Control.
+The module supports relays, switch inputs and reported measurements; Gen1,
+covers, dimmers, RGB, virtual/BTHome components and button events are not supported.
+After changing a device profile, repeat the query. No Shelly settings are changed.<br>
+Syntax: <code>set &lt;name&gt; discoverShelly [mqtt-prefix]</code>
 </li>
 </ul>
 
 <a id="MQTT2_DISCOVERY-attr"></a>
 <h4>Attributes</h4>
 <ul>
+<li><a id="MQTT2_DISCOVERY-attr-shellyDiscovery"></a><b>shellyDiscovery</b><br>
+Enables native Shelly discovery independently of <code>discoveryPrefixes</code>.
+Default: <code>1</code>. Activation, startup and broker reconnect request native
+announcements. Allow device topics and <code>mqtt2_discovery/&lt;name&gt;/shelly/#</code>
+in MQTT subscriptions and broker ACLs. Set to <code>0</code> to stop new discovery;
+existing device bindings remain usable.
+</li><br>
 <li><a id="MQTT2_DISCOVERY-attr-discoveryPrefixes"></a><b>discoveryPrefixes</b><br>
 Comma-separated discovery topic prefixes. Default: <code>homeassistant,tasmota/discovery,sonos2mqtt</code>.<br>
 Example: <code>attr &lt;name&gt; discoveryPrefixes homeassistant,tasmota/discovery,sonos2mqtt</code>
@@ -3252,7 +3382,7 @@ Syntax: <code>attr &lt;name&gt; disable &lt;0|1&gt;</code>
 
 <a id="MQTT2_DISCOVERY"></a>
 <h3>MQTT2_DISCOVERY</h3>
-<p>Verarbeitet Home-Assistant-MQTT-Discovery und das native Tasmota-Discovery-Protokoll
+<p>Verarbeitet Home-Assistant-MQTT-Discovery sowie native Tasmota-, Sonos2mqtt- und Shelly-Gen2/Gen3/Gen4-Nachrichten
 und erzeugt daraus konservativ verwaltete <code>MQTT2_DEVICE</code>-Devices.</p>
 
 <a id="MQTT2_DISCOVERY-define"></a>
@@ -3321,12 +3451,31 @@ Syntax: <code>set &lt;name&gt; rebuildDevice &lt;MQTT2_DEVICE&gt; [clearReadings
 Verarbeitet passende retained Discovery-Nachrichten aus dem lokalen Cache eines
 <code>MQTT2_SERVER</code> erneut. Ein <code>MQTT2_CLIENT</code> besitzt keinen solchen Cache.<br>
 Syntax: <code>set &lt;name&gt; rescan</code>
+</li><br>
+<li><a id="MQTT2_DISCOVERY-set-discoverShelly"></a><b>discoverShelly [mqtt-prefix]</b><br>
+Fordert native Discovery fuer Shelly Gen2/Gen3/Gen4 an. Ohne Argument wird
+<code>announce</code> gesendet; ein konkreter MQTT-Prefix startet direkt lesende
+RPC-Abfragen. MQTT-RPC und mindestens RPC-Statusmeldungen oder generische
+MQTT-Statusupdates muessen am Shelly aktiviert sein. Die Broadcast-Suche benoetigt
+zusaetzlich MQTT Control. Unterstuetzt werden Relais, Schalteingaenge und gemeldete
+Messwerte; Gen1, Cover, Dimmer, RGB, virtuelle/BTHome-Komponenten und Tasterereignisse
+werden nicht unterstuetzt. Nach einem Profilwechsel die Abfrage wiederholen.
+Shelly-Einstellungen werden nicht veraendert.<br>
+Syntax: <code>set &lt;name&gt; discoverShelly [mqtt-prefix]</code>
 </li>
 </ul>
 
 <a id="MQTT2_DISCOVERY-attr"></a>
 <h4>Attribute</h4>
 <ul>
+<li><a id="MQTT2_DISCOVERY-attr-shellyDiscovery"></a><b>shellyDiscovery</b><br>
+Aktiviert native Shelly-Erkennung unabhaengig von <code>discoveryPrefixes</code>.
+Default: <code>1</code>. Aktivierung, Start und Broker-Reconnect fordern native
+Announcements an. Geraetetopics und <code>mqtt2_discovery/&lt;name&gt;/shelly/#</code>
+muessen durch MQTT-Subscriptions und Broker-ACLs zugelassen sein.
+Mit <code>0</code> werden neue Discovery-Abfragen unterbunden; bestehende
+Device-Bindings bleiben nutzbar.
+</li><br>
 <li><a id="MQTT2_DISCOVERY-attr-discoveryPrefixes"></a><b>discoveryPrefixes</b><br>
 Kommaseparierte Discovery-Topic-Prefixe. Default: <code>homeassistant,tasmota/discovery,sonos2mqtt</code>.<br>
 Beispiel: <code>attr &lt;name&gt; discoveryPrefixes homeassistant,tasmota/discovery,sonos2mqtt</code>

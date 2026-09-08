@@ -118,6 +118,8 @@ is(read_raw($git_log), "add -- CHANGED\nadd -- CHANGED\n",
 	'CHANGED wird bei jedem Versuch gezielt gestaged');
 
 my $configuration = read_raw('.tgitconfig');
+# Die Inhaltspruefung gilt fuer Linux- und Windows-Checkouts mit denselben Hook-Einstellungen.
+$configuration =~ s/\r\n/\n/g;
 like($configuration, qr/^\[hook "precommit"\]$/m,
 	'repositoryweiter TortoiseGit-Pre-Commit-Hook ist konfiguriert');
 like(
