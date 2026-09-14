@@ -1,6 +1,12 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: ea8a563c9df7ba762d72a83ba1e37fe532c4d636284f691ecb7e996177e96c4f
+# Msg-SHA256: 9b6010cd62c4631d18fbc281c162595bc9ebf2b18568249fc2b724ae16e68172
+- change: MQTT2_DISCOVERY: - Shelly-CCT-Leuchten um Ein/Aus, Helligkeit und
+  Farbtemperatur erweitert.
+  - Gekoppelte BLU-/BTHome-Sensoren sowie Taster- und Drehereignisse
+    eingebunden.
+  - Seitenweise Komponentenabfragen und gefilterte Ereignisarrays ergaenzt.
+  - Manuelle JSON-Auswertung bei konservativer Geraeteuebernahme geschuetzt.
 - change: MQTT2_DISCOVERY: - Native Shelly-Erkennung fuer Gen2+ ueber MQTT-RPC
   ergaenzt.
   - discoverShelly und shellyDiscovery sowie automatische Suche bei Start und

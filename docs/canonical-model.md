@@ -174,7 +174,13 @@ Native Protokolle koennen zusaetzliche generische Signale liefern. Derzeit sind
 `payload`, `template`, `json_flatten` und `json_sequence` definiert. `template`
 beschreibt einen alternativen Transportkanal fuer denselben Readingnamen und
 verwendet den vorhandenen sicheren Template-Compiler. Shelly nutzt dies fuer
-Komponentenstatus und RPC-Statusmeldungen. Dadurch kann der
+Komponentenstatus und RPC-Statusmeldungen. Ein solches Template-Signal kann
+zusaetzlich `items => { path => ['params', 'events'],
+match => { component => 'bthomedevice:200' } }` deklarieren. Dann wird das
+Template fuer jedes passende Objekt dieses JSON-Arrays ausgewertet; der letzte
+vorhandene Wert pro Reading gewinnt. Fehlende Arraypfade oder Felder erzeugen
+keine Reading-Aenderung. Der Mapper und die Runtime kennen dabei keine
+Shelly-spezifischen Feldnamen. Dadurch kann der
 Tasmota-Adapter seine vollstaendige Standard-Telemetrie beschreiben, ohne dass
 das Modell oder der allgemeine Mapper Tasmota-Payloads oder Tasmota-Topicbasen
 kennen muss.

@@ -191,6 +191,50 @@ Unterstuetzter Umfang:
   sofern als unterstuetzte Komponente im Snapshot vorhanden.
 - Erreichbarkeit ueber `<prefix>/online` und die initiale Statusantwort.
 
+- `cct:<id>`: CCT-Leuchten wie die Shelly Duo Bulb Gen3, mit Ein/Aus,
+  Helligkeit von 0 bis 100 Prozent und Farbtemperatur in Kelvin. Beispielsweise:
+  `set <Shelly-Device> cct_0 on`,
+  `set <Shelly-Device> cct_0_brightness 50` und
+  `set <Shelly-Device> cct_0_ct 4600`.
+  Der erlaubte Kelvinbereich folgt `ct_range`; bei der Duo Bulb Gen3 gilt ohne
+  Angabe der dokumentierte Standard 2700 bis 6500 K. Andere CCT-Geraete ohne
+  verlaesslichen Bereich erhalten nur ein lesbares Farbtemperatur-Reading.
+  Ungueltige Zahlen und Werte ausserhalb des Bereichs werden nicht gesendet.
+- Bereits am Shelly gekoppelte `bthomedevice:<id>`- und
+  `bthomesensor:<id>`-Komponenten: Sensorwerte, Batterie, Bluetooth-RSSI,
+  Paketnummer und Zeitstempel, soweit vom Geraet geliefert. Die Readings gehoeren
+  zum Shelly-Gateway, beispielsweise `bthomesensor_201` oder
+  `bthomedevice_200_battery`. Sensorwerte behalten ihre native Darstellung;
+  fuer unbekannte Sensorarten werden keine Einheiten oder Geraeteklassen geraten.
+  Noch unbekannte Werte schlafender Sensoren verhindern ihre Einrichtung nicht.
+- BLU-Ereignisse aus `NotifyEvent`: pro gekoppelter Komponente entstehen
+  `..._event`, `..._idx`, `..._channel` und `..._ts`, sofern die Nachricht
+  diese Felder enthaelt. Damit sind unter anderem Einfach-, Doppel- und
+  Langdruck sowie Drehereignisse lesbar. Bei mehreren Ereignissen derselben
+  Komponente in einer Nachricht enthalten die Readings den letzten passenden Wert.
+
+Die BLU-Erkennung liest alle Seiten von `Shelly.GetComponents`, bevor sie einen
+Snapshot anwendet. Fehlerhafte oder widerspruechliche Seiten ersetzen keine
+bestehende Abbildung. Nach dem Anlernen oder Entfernen von BLU-Komponenten am
+Shelly die Suche mit `set mqttDiscovery discoverShelly <mqtt-prefix>` wiederholen.
+Das Modul koppelt keine Bluetooth-Geraete selbst und benoetigt keine Installation
+eines Shelly-Skripts. Eigene MQTT-Formate beliebiger BLU-Skripte werden nicht
+automatisch erkannt. Fuer Tasterereignisse muessen RPC-Statusmeldungen
+(`rpc_ntf`) aktiviert sein; generische Komponentenstatusmeldungen allein reichen
+dafuer nicht.
+
+Bei bestehenden Devices erhaelt `existingDevice conservative` manuelle
+`readingList`-Regeln, auch `json2nameValue($EVENT)`, sowie vorhandene Readingwerte
+und `userReadings`. Fehlende Discovery-Eintraege koennen ergaenzt werden.
+Ein manueller JSON-Sammelhandler hat fuer dasselbe Topic Vorrang; Discovery
+meldet dabei die nicht uebernommenen Bindings als Konflikt. Mit
+`existingDevice ignore` werden unverwaltete Bestandsdevices nicht uebernommen.
+`rebuildDevice` funktioniert nur fuer bereits verwaltete Devices und ersetzt
+auch manuelle Listenregeln. `clearReadings` loescht zusaetzlich sichtbare
+BLU-Readings; sie kommen nur zurueck, wenn die neuen Regeln passende Nachrichten
+auswerten. Die expliziten BLU-Bindings bleiben auch bei
+`extraJsonReadings ignore` erhalten.
+
 Relais- und Eingangszustaende werden als `true`/`false` gelesen; die semantische
 Oberflaeche ordnet sie `on`/`off` zu. Komponentenstatus und RPC-Teilstatus lesen
 dieselben Readings, ohne fehlende Werte anderer Komponenten zu ueberschreiben.
@@ -198,8 +242,12 @@ Komponenten bekommen stabile Namen wie `switch_0_temperature` oder `input_0`.
 
 Protokollgrundlagen: [Shelly MQTT](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Mqtt/),
 [RPC-Rahmen](https://shelly-api-docs.shelly.cloud/gen2/General/RPCProtocol/) und
-[Komponentenabfragen](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Shelly/).
-Die lokale Testabdeckung steht in `tests/28_shelly.t`; ein Hardwaretest ist darin
+[Komponentenabfragen](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Shelly/),
+[CCT](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/CCT/),
+[BTHomeDevice](https://shelly-api-docs.shelly.cloud/gen2/DynamicComponents/BTHome/BTHomeDevice/) und
+[BTHomeSensor](https://shelly-api-docs.shelly.cloud/gen2/DynamicComponents/BTHome/BTHomeSensor/).
+Die lokale Testabdeckung steht in `tests/28_shelly.t` und
+`tests/29_shelly_cct_blu.t`; ein Hardwaretest ist darin
 nicht enthalten.
 
 ## Home-Assistant Discovery

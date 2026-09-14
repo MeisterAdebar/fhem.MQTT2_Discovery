@@ -26,7 +26,7 @@ sub route {
 	return if exists($args{shelly_enabled}) && !$args{shelly_enabled};
 	my $topic = $args{topic} // '';
 	my $reply = $args{reply_prefix} // 'mqtt2_discovery/shelly';
-	return ('reply', $1, $2) if $topic =~ m{\A\Q$reply\E/([a-f0-9]{16})/(info|config|status)/rpc\z};
+	return ('reply', $1, $2) if $topic =~ m{\A\Q$reply\E/([a-f0-9]{16})/(info|config|status|components)/rpc\z};
 	my $data;
 
 	# Announce enthaelt die Generation; Gen1 bleibt beim normalen MQTT2_DEVICE-Parser.
@@ -70,13 +70,18 @@ sub claims {
 # Erzeugt ausschliesslich lesende RPC-Anfragen mit einer pro Versuch eindeutigen ID.
 sub _request {
 	my ($state, $entry, $part) = @_;
-	my %methods = (info => 'Shelly.GetDeviceInfo', config => 'Shelly.GetConfig', status => 'Shelly.GetStatus');
+	my %methods = (info => 'Shelly.GetDeviceInfo', config => 'Shelly.GetConfig',
+		status => 'Shelly.GetStatus', components => 'Shelly.GetComponents');
 	my $request_id = ++$state->{sequence};
 	$entry->{pending} = { part => $part, id => $request_id };
 	return {
 		topic => "$entry->{prefix}/rpc",
 		payload => JSON::PP->new->canonical(1)->encode({
 			id => $request_id, src => "$entry->{reply}/$part", method => $methods{$part},
+			($part eq 'components' ? (params => {
+				offset => $entry->{components_offset} || 0,
+				include => ['config', 'status'], dynamic_only => JSON::PP::true,
+			}) : ()),
 		}),
 	};
 }
@@ -154,18 +159,69 @@ sub consume {
 		$entry->{config}{sys}{device}{name} = $result->{sys}{device}{name}
 			if ref($result->{sys}) eq 'HASH' && ref($result->{sys}{device}) eq 'HASH';
 
-		for my $component (grep { /\A(?:input|switch):\d+\z/ } keys %$result) {
+		for my $component (grep { /\A(?:input|switch|cct):\d+\z/ } keys %$result) {
 			next if ref($result->{$component}) ne 'HASH';
-			$entry->{config}{$component} = { map { $_ => $result->{$component}{$_} } qw(id type) };
+			$entry->{config}{$component} = { map { $_ => $result->{$component}{$_} } qw(id type ct_range) };
 		}
 
+		$entry->{has_bthome} = ref($result->{bthome}) eq 'HASH' ? 1 : 0;
 		return { %$empty, requests => [_request($state, $entry, 'status')] };
 	}
+
+	# Dynamische BLU-Komponenten werden nur bei vorhandener BTHome-Funktion abgefragt.
+	if ($part eq 'status') {
+		$entry->{snapshot} = $result;
+		return { %$empty, requests => [_request($state, $entry, 'components')] }
+			if $entry->{has_bthome} || ref($result->{bthome}) eq 'HASH';
+	}
+
+	# Jede Seite muss zur selben Revision gehoeren und den angeforderten Offset fortsetzen.
+	if ($part eq 'components') {
+		my $offset = $entry->{components_offset} || 0;
+		my $components = $result->{components};
+		return { status => 'error', error_class => 'schema', error => 'Shelly: Ungueltige Komponentenseite' }
+			if ref($components) ne 'ARRAY'
+				|| grep { !defined($result->{$_}) || ref($result->{$_}) || $result->{$_} !~ /\A\d+\z/ } qw(offset total cfg_rev);
+		return { status => 'error', error_class => 'schema', error => 'Shelly: Inkonsistente Komponentenseiten' }
+			if $result->{offset} != $offset || $result->{total} > 256
+				|| $offset + @$components > $result->{total}
+				|| (!@$components && $offset < $result->{total})
+				|| (defined($entry->{components_revision}) && $entry->{components_revision} != $result->{cfg_rev})
+				|| (defined($entry->{components_total}) && $entry->{components_total} != $result->{total});
+		$entry->{components_revision} = $result->{cfg_rev};
+		$entry->{components_total} = $result->{total};
+
+		# Nur benoetigte Statusfelder bleiben im Snapshot; Schluessel und Metadaten werden verworfen.
+		for my $component (@$components) {
+			return { status => 'error', error_class => 'schema', error => 'Shelly: Ungueltige dynamische Komponente' }
+				if ref($component) ne 'HASH' || !defined($component->{key}) || ref($component->{key})
+					|| $component->{key} !~ /\A[a-z][a-z0-9]*:\d+\z/
+					|| $entry->{component_keys}{$component->{key}}++;
+			my $key = $component->{key};
+
+			# Unbekannte dynamische Typen werden wie unbekannte statische Komponenten sichtbar gemeldet.
+			if ($key !~ /\Abthome(?:device|sensor):(\d+)\z/) {
+				push @{ $entry->{component_warnings} }, "Shelly: Dynamische Komponente $key wird noch nicht unterstuetzt";
+				next;
+			}
+			my $channel = $1;
+			my $values = $component->{status};
+			return { status => 'error', error_class => 'schema', error => "Shelly: Ungueltiger Status von $key" }
+				if ref($values) ne 'HASH' || !defined($values->{id}) || ref($values->{id}) || "$values->{id}" ne "$channel";
+			$entry->{snapshot}{$key} = { map { $_ => $values->{$_} }
+				grep { exists($values->{$_}) } qw(id value battery rssi packet_id last_update_ts last_updated_ts) };
+		}
+
+		$entry->{components_offset} = $offset + @$components;
+		return { %$empty, requests => [_request($state, $entry, 'components')] }
+			if $entry->{components_offset} < $result->{total};
+	}
 	my $parsed = MQTT2_Discovery::Parser::Shelly::parse(
-		info => $entry->{info}, config => $entry->{config}, status => $result,
+		info => $entry->{info}, config => $entry->{config}, status => $entry->{snapshot},
 		mqtt_prefix => $prefix, discovery_topic => "shelly/$entry->{info}{id}/config",
-		state_topic => "$entry->{reply}/state/rpc",
+		state_topic => "$entry->{reply}/state/rpc", component_reply => "$entry->{reply}/state",
 	);
+	push @{ $parsed->{warnings} }, @{ $entry->{component_warnings} || [] } if $parsed->{status} eq 'ok';
 	my $model = MQTT2_Discovery::Model::from_parser_result(adapter => id(), parsed => $parsed);
 	return $model if $model->{status} ne 'ok';
 	$entry->{complete} = 1;
@@ -177,6 +233,21 @@ sub consume {
 			id => ++$state->{sequence}, src => "$entry->{reply}/state", method => 'Shelly.GetStatus',
 		}),
 	}];
+
+	# Gekoppelte BLU-Geraete bekommen Initialwerte ueber ihre dokumentierten Einzelabfragen.
+	for my $component (sort keys %{ $entry->{snapshot} }) {
+		next if $component !~ /\A(bthomedevice|bthomesensor):(\d+)\z/;
+		my ($type, $channel) = ($1, 0 + $2);
+		my $method = $type eq 'bthomedevice' ? 'BTHomeDevice.GetStatus' : 'BTHomeSensor.GetStatus';
+		push @{ $model->{after_apply} }, {
+			topic => "$prefix/rpc", payload => JSON::PP->new->canonical(1)->encode({
+				id => ++$state->{sequence}, src => "$entry->{reply}/state/$component",
+				method => $method, params => { id => $channel },
+			}),
+		};
+	}
+
+	delete @{$entry}{qw(snapshot component_keys component_warnings)};
 	return $model;
 }
 

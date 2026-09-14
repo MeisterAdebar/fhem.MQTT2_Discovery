@@ -96,7 +96,8 @@ sub _manual_json_topic_patterns {
 	for my $line (@{ $manual || [] }) {
 		my ($regexp, $code) = split /\s+/, $line, 2;
 		next if !defined($regexp) || !defined($code)
-			|| $code !~ /\bjson2nameValue\s*\(\s*[^,]+\s*,\s*(['"])\1\s*(?:,|\))/;
+			|| ($code !~ /\bjson2nameValue\s*\(\s*[^,]+\s*,\s*(['"])\1\s*(?:,|\))/
+				&& $code !~ /\bjson2nameValue\s*\(\s*\$EVENT\s*\)/);
 		next if $regexp !~ s/:\.\*(?:\$)?\z//;
 
 		# $DEVICETOPIC wird wie in MQTT2_DEVICE auf den fuer den fertigen Plan
@@ -183,7 +184,7 @@ sub prepare_json_readings {
 	for my $entry (@{ $entries || [] }) {
 		my $kind = ref($entry) eq 'HASH' ? ($entry->{kind} || '') : '';
 		my $json_topic_entry = $kind eq 'json_reading' || $kind eq 'json_autocreate'
-			|| $kind eq 'json_sequence';
+			|| $kind eq 'json_sequence' || ($kind eq 'reading' && exists($entry->{items}));
 
 		# Ein vorhandener manueller JSON-Sammelhandler gewinnt konservativ fuer
 		# dasselbe Topic, damit MQTT2_DEVICE den Payload nicht zweimal auswertet.

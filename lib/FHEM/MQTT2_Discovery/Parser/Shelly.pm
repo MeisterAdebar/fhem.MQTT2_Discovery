@@ -66,9 +66,69 @@ sub _entity {
 				template => "{{ value_json.params['$component'].$path }}" },
 			{ type => 'template', topic => $context->{state_topic}, name => $name,
 				template => "{{ value_json.result['$component'].$path }}" },
+			# Dynamische Komponenten fehlen in GetStatus und erhalten eine eigene Initialantwort.
+			($component =~ /\Abthome(?:device|sensor):\d+\z/ ? ({
+				type => 'template', topic => "$context->{component_reply}/$component/rpc", name => $name,
+				template => "{{ value_json.result.$path }}",
+			}) : ()),
 		],
 		%configuration,
 	};
+}
+
+# Beschreibt einen begrenzten RPC-Zahlenwert; ungueltige Eingaben erzeugen keinen Payload.
+sub _rpc_number {
+	my ($context, $component, $path, $method, $channel, $min, $max, $unit) = @_;
+	my $json = JSON::PP->new->canonical(1);
+	my $payload = $json->encode({
+		id => 1, src => "$context->{mqtt_prefix}/events", method => $method,
+		params => { id => $channel, $path => '__VALUE__' },
+	});
+	# Zwei bedingte Ausdruecke pruefen beide Grenzen innerhalb des sicheren Template-Subsets.
+	$payload =~ s/"__VALUE__"/{{ value | float if value | float >= $min if value | float <= $max }}/;
+	return _entity($context, $component, $path, 'number', $path,
+		command_topic => "$context->{mqtt_prefix}/rpc", command_template => $payload,
+		min => $min, max => $max, step => 1, unit_of_measurement => $unit);
+}
+
+# Liest gekoppelte BLU-Komponenten ohne angenommene Sensorart oder erfundene Einheiten.
+sub _bthome_entities {
+	my ($context, $component, $values) = @_;
+	my @entities;
+
+	# Ein schlafender Sensor wird auch mit noch unbekanntem Wert bereits gebunden.
+	if ($component =~ /\Abthomesensor:/) {
+		push @entities, _entity($context, $component, 'value', 'sensor', '');
+	} else {
+		push @entities, _entity($context, $component, 'battery', 'sensor', 'battery',
+			device_class => 'battery', unit_of_measurement => '%');
+		push @entities, _entity($context, $component, 'rssi', 'sensor', 'rssi',
+			device_class => 'signal_strength', unit_of_measurement => 'dBm');
+		push @entities, _entity($context, $component, 'packet_id', 'sensor', 'packet_id');
+	}
+
+	# Firmwareversionen verwenden beide Schreibweisen; alle Transportwege behalten denselben Namen.
+	my $updated = _entity($context, $component, 'last_update_ts', 'sensor', 'last_update');
+
+	for my $template (\$updated->{value_template}, map { \$_->{template} } @{ $updated->{supplemental_signals} }) {
+		my ($root) = $$template =~ /\{\{ (.+)\.last_update_ts \}\}/;
+		$$template = "{{ $root.last_updated_ts if $root.last_updated_ts is defined else $root.last_update_ts }}";
+	}
+
+	push @entities, $updated;
+
+	# Ereignislisten werden nach Komponentenkennung gefiltert, unabhaengig von ihrer Arrayposition.
+	for my $field (qw(event idx channel ts)) {
+		my $name = $component;
+		$name =~ s/:/_/g;
+		push @{ $entities[0]{supplemental_signals} }, {
+			type => 'template', topic => "$context->{mqtt_prefix}/events/rpc",
+			name => "${name}_$field", template => "{{ value_json.$field }}",
+			items => { path => ['params', 'events'], match => { component => $component } },
+		};
+	}
+
+	return @entities;
 }
 
 # Normalisiert einen vollstaendigen, zusammengehoerigen RPC-Snapshot ohne Geraete-Modelltabelle.
@@ -88,8 +148,8 @@ sub parse {
 	};
 	my $mqtt = ref($config->{mqtt}) eq 'HASH' ? $config->{mqtt} : {};
 	my (@entities, @warnings);
-	# Ein konfiguriertes Relais muss auch im vollstaendigen Status vorhanden sein.
-	for my $component (grep { /\Aswitch:\d+\z/ } keys %$config) {
+	# Konfigurierte Aktoren muessen auch im vollstaendigen Status vorhanden sein.
+	for my $component (grep { /\A(?:switch|cct):\d+\z/ } keys %$config) {
 		return { status => 'error', error_class => 'schema', error => "Shelly: Status von $component fehlt" }
 			if ref($status->{$component}) ne 'HASH';
 	}
@@ -106,8 +166,9 @@ sub parse {
 		my @measurements;
 
 		# Relaisbefehle verwenden feste JSON-RPC-Payloads und benoetigen MQTT Control nicht.
-		if ($component =~ /\Aswitch:(\d+)\z/) {
-			my $channel = 0 + $1;
+		if ($component =~ /\A(switch|cct):(\d+)\z/) {
+			my $kind = $1;
+			my $channel = 0 + $2;
 			return { status => 'error', error_class => 'schema', error => "Shelly: $component.output fehlt oder ist ungueltig" }
 				if !JSON::PP::is_bool($values->{output});
 			return { status => 'error', error_class => 'schema', error => "Shelly: Kanal-ID von $component stimmt nicht ueberein" }
@@ -115,11 +176,38 @@ sub parse {
 			my $json = JSON::PP->new->canonical(1);
 			# Schaltantworten teilen das bereits gelesene Ereignistopic, ohne neue Discovery auszulösen.
 			my $source = "$args{mqtt_prefix}/events";
-			push @entities, _entity(\%args, $component, 'output', 'switch', '',
+			my $method = $kind eq 'cct' ? 'CCT.Set' : 'Switch.Set';
+			push @entities, _entity(\%args, $component, 'output', $kind eq 'cct' ? 'light' : 'switch', '',
 				command_topic => "$args{mqtt_prefix}/rpc", state_on => 'true', state_off => 'false',
-				payload_on => $json->encode({ id => 1, src => $source, method => 'Switch.Set', params => { id => $channel, on => JSON::PP::true } }),
-				payload_off => $json->encode({ id => 1, src => $source, method => 'Switch.Set', params => { id => $channel, on => JSON::PP::false } }),
+				payload_on => $json->encode({ id => 1, src => $source, method => $method, params => { id => $channel, on => JSON::PP::true } }),
+				payload_off => $json->encode({ id => 1, src => $source, method => $method, params => { id => $channel, on => JSON::PP::false } }),
 			);
+
+			# CCT verwendet Prozent und Kelvin; die Farbtemperatur darf nicht als Mired gesendet werden.
+			if ($kind eq 'cct') {
+				return { status => 'error', error_class => 'schema', error => "Shelly: $component.brightness ist ungueltig" }
+					if !defined($values->{brightness}) || ref($values->{brightness})
+						|| $values->{brightness} !~ /\A\d+(?:\.\d+)?\z/
+						|| $values->{brightness} > 100;
+				push @entities, _rpc_number(\%args, $component, 'brightness', $method, $channel, 0, 100, '%');
+				my $range = $settings->{ct_range};
+				# Nur die dokumentierte Duo-Bulb-Voreinstellung ersetzt eine fehlende Bereichsangabe.
+				$range = [2700, 6500] if !defined($range) && $info->{id} =~ /\Ashellyduobulbg3-/i;
+				return { status => 'error', error_class => 'schema', error => "Shelly: $component.ct ist ungueltig" }
+					if !defined($values->{ct}) || ref($values->{ct}) || $values->{ct} !~ /\A\d+\z/;
+
+				# Ohne verlaessliche Grenzen bleibt die Temperatur lesbar und wird nicht geraten.
+				if (ref($range) eq 'ARRAY' && @$range == 2
+						&& !grep { !defined($_) || ref($_) || $_ !~ /\A\d+\z/ } @$range) {
+					return { status => 'error', error_class => 'schema', error => "Shelly: $component.ct_range ist ungueltig" }
+						if $range->[0] < 1000 || $range->[1] > 10000 || $range->[0] >= $range->[1];
+					push @entities, _rpc_number(\%args, $component, 'ct', $method, $channel, @$range, 'K');
+				} else {
+					push @entities, _entity(\%args, $component, 'ct', 'sensor', 'ct', unit_of_measurement => 'K');
+					push @warnings, "Shelly: $component ohne gueltiges ct_range, Farbtemperatur nur lesbar";
+				}
+			}
+
 			@measurements = (
 				['temperature.tC', 'temperature', 'temperature', '°C'],
 				['apower', 'power', 'power', 'W'], ['voltage', 'voltage', 'voltage', 'V'],
@@ -146,7 +234,9 @@ sub parse {
 			@measurements = (['uptime', 'uptime', 'duration', 's']);
 		} elsif ($component =~ /\Adevicepower:\d+\z/) {
 			@measurements = (['battery.percent', 'battery', 'battery', '%']);
-		} elsif ($component =~ /:\d+\z/ && $component !~ /\A(?:script|bthome)/) {
+		} elsif ($component =~ /\Abthome(?:device|sensor):\d+\z/) {
+			push @entities, _bthome_entities(\%args, $component, $values);
+		} elsif ($component =~ /:\d+\z/ && $component !~ /\Ascript/) {
 			push @warnings, "Shelly: Komponente $component wird noch nicht unterstuetzt";
 		}
 

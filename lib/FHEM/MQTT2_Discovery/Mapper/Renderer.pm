@@ -402,6 +402,7 @@ sub _render_topic_runtime {
 			|| !defined($entry->{template}) || ref($entry->{template}) || $entry->{template} eq '';
 		push @readings, {
 			name => $entry->{name}, template => $entry->{template},
+			(exists($entry->{items}) ? (items => $entry->{items}) : ()),
 			(($entry->{template_context} || '') eq 'trigger' ? (context => 'trigger') : ()),
 		};
 	}
@@ -426,6 +427,8 @@ sub render_entry {
 
 	# Reading-Arten werden als regulaere readingList-Zeilen gerendert.
 	if ($entry->{kind} eq 'reading') {
+		return _render_topic_runtime($entry->{topic}, [$entry], undef, $device_topic, $references)
+			if exists($entry->{items});
 		my $regex = _regex($entry->{topic}, $device_topic, $entry->{payload});
 		return "$regex $entry->{name}" if !defined($entry->{template}) || $entry->{template} eq '';
 		return _render_runtime_reading($entry, $device_topic, $references);
@@ -723,9 +726,10 @@ sub render_entries {
 			$a->{name} cmp $b->{name}
 				|| $a->{template} cmp $b->{template}
 				|| ($a->{template_context} || '') cmp ($b->{template_context} || '')
+				|| JSON::PP->new->canonical(1)->encode($a->{items}) cmp JSON::PP->new->canonical(1)->encode($b->{items})
 		} grep {
 			my $signature = join("\0", $_->{name} // '', $_->{template} // '',
-				$_->{template_context} // '');
+				$_->{template_context} // '', JSON::PP->new->canonical(1)->encode($_->{items}));
 			!$seen{$signature}++;
 		} @{ $runtime_topics{$topic} };
 		my $availability = $runtime_availability{$topic};

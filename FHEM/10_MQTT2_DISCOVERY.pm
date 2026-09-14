@@ -23,7 +23,7 @@ use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
 use vars qw(%defs %attr %modules $readingFnAttributes);
 
-our $MQTT2_DISCOVERY_VERSION = '0.9.9';
+our $MQTT2_DISCOVERY_VERSION = '0.9.10';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
 our $MQTT2_DISCOVERY_AVAILABILITY_REFRESH_DELAY = 60;
 our $MQTT2_DISCOVERY_AVAILABILITY_RETRY_DELAY = 10;
@@ -120,7 +120,7 @@ sub MQTT2_DISCOVERY_Initialize($) {
 	# zugehoerigen Commandref-Anker stehen in der eingebetteten HTML-Dokumentation.
 	$hash->{FW_deviceOverview} = 1;
 	# Match bleibt absichtlich prefixunabhaengig, da Prefixe je IODev konfiguriert sind.
-	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors|announce|online|events/rpc)|mqtt2_discovery/[^/\\x00]+/shelly/[a-f0-9]{16}/(?:info|config|status)/rpc|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
+	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors|announce|online|events/rpc)|mqtt2_discovery/[^/\\x00]+/shelly/[a-f0-9]{16}/(?:info|config|status|components)/rpc|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
 	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
 	$modules{MQTT2_DISCOVERY}{defptr} ||= {};
 }
@@ -797,7 +797,7 @@ sub MQTT2_DISCOVERY_Parse($$) {
 		MQTT2_DISCOVERY_shelly_args($config), topic => $topic, payload => $payload,
 		state => $config->{helper}{formats}{shelly} || {},
 	);
-	my $native_topic = $topic =~ m{/(?:announce|online|events/rpc|(?:info|config|status)/rpc)$};
+	my $native_topic = $topic =~ m{/(?:announce|online|events/rpc|(?:info|config|status|components)/rpc)$};
 	return '[NEXT]' if $native_topic && !@shelly;
 
 	# Auch deaktivierte Discovery-Nachrichten werden konsumiert, damit
@@ -2815,6 +2815,34 @@ sub MQTT2_Discovery_runtime {
 						|| !defined($reading->{name}) || ref($reading->{name})
 						|| $reading->{name} !~ /^[A-Za-z0-9_.-]+$/
 						|| !defined($reading->{template}) || ref($reading->{template});
+				# Gefilterte Ereignisarrays werden vollstaendig durchlaufen; pro Reading gilt der letzte Treffer.
+				if (exists($reading->{items})) {
+					my $items = $reading->{items};
+					die 'Ungueltiger Ereignisfilter' if ref($items) ne 'HASH'
+						|| ref($items->{path}) ne 'ARRAY' || !@{ $items->{path} }
+						|| ref($items->{match}) ne 'HASH' || !keys %{ $items->{match} }
+						|| grep { !defined($_) || ref($_) || /[\x00-\x1f]/ }
+							(@{ $items->{path} }, keys %{ $items->{match} }, values %{ $items->{match} });
+					my $data = eval { JSON::PP::decode_json($event) };
+
+					# Fehlende oder ungueltige Quellpfade lassen bestehende Readings unveraendert.
+					for my $key (@{ $items->{path} }) {
+						$data = ref($data) eq 'HASH' ? $data->{$key} : undef;
+					}
+
+					next if ref($data) ne 'ARRAY';
+
+					for my $item (@$data) {
+						next if ref($item) ne 'HASH' || grep {
+							!defined($item->{$_}) || ref($item->{$_}) || "$item->{$_}" ne "$items->{match}{$_}"
+						} keys %{ $items->{match} };
+						my $values = MQTT2_Discovery_runtime('reading', $reading->{template},
+							JSON::PP::encode_json($item), $reading->{name});
+						@updates{keys %$values} = values %$values if ref($values) eq 'HASH';
+					}
+
+					next;
+				}
 				my $reading_operation = ($reading->{context} || '') eq 'trigger'
 					? 'triggerReading' : 'reading';
 				my $values = MQTT2_Discovery_runtime(
@@ -3289,9 +3317,14 @@ Requests native Shelly Gen2/Gen3/Gen4 discovery. Without an argument, broadcasts
 <code>announce</code>; an explicit MQTT prefix starts read-only RPC queries directly.
 MQTT-RPC and either RPC status notifications or generic MQTT status updates must
 be enabled on the Shelly. Broadcast discovery additionally requires MQTT Control.
-The module supports relays, switch inputs and reported measurements; Gen1,
-covers, dimmers, RGB, virtual/BTHome components and button events are not supported.
-After changing a device profile, repeat the query. No Shelly settings are changed.<br>
+The module supports relays, switch inputs, CCT lights and reported measurements.
+CCT commands use percent for brightness and Kelvin for color temperature.
+Paired BTHome components provide sensor values, battery, RSSI, timestamps and
+button/rotation events on the gateway device. All dynamic component pages must
+complete before the snapshot is applied. Events require RPC notifications.
+Gen1, covers, non-CCT dimmers, RGB, other virtual components and local input button
+events are not supported. Repeat the query after profile or pairing changes.
+No Shelly settings are changed and no Bluetooth devices are paired automatically.<br>
 Syntax: <code>set &lt;name&gt; discoverShelly [mqtt-prefix]</code>
 </li>
 </ul>
@@ -3457,10 +3490,15 @@ Fordert native Discovery fuer Shelly Gen2/Gen3/Gen4 an. Ohne Argument wird
 <code>announce</code> gesendet; ein konkreter MQTT-Prefix startet direkt lesende
 RPC-Abfragen. MQTT-RPC und mindestens RPC-Statusmeldungen oder generische
 MQTT-Statusupdates muessen am Shelly aktiviert sein. Die Broadcast-Suche benoetigt
-zusaetzlich MQTT Control. Unterstuetzt werden Relais, Schalteingaenge und gemeldete
-Messwerte; Gen1, Cover, Dimmer, RGB, virtuelle/BTHome-Komponenten und Tasterereignisse
-werden nicht unterstuetzt. Nach einem Profilwechsel die Abfrage wiederholen.
-Shelly-Einstellungen werden nicht veraendert.<br>
+zusaetzlich MQTT Control. Unterstuetzt werden Relais, Schalteingaenge, CCT-Leuchten
+und gemeldete Messwerte. CCT-Befehle verwenden Prozent fuer die Helligkeit und
+Kelvin fuer die Farbtemperatur. Gekoppelte BTHome-Komponenten liefern Sensorwerte,
+Batterie, RSSI, Zeitstempel sowie Taster- und Drehereignisse am Gateway-Device.
+Alle dynamischen Komponentenseiten muessen vor dem Anwenden vollstaendig vorliegen.
+Ereignisse benoetigen RPC-Meldungen. Gen1, Cover, andere Dimmer, RGB, sonstige
+virtuelle Komponenten und lokale Eingangstaster-Ereignisse werden nicht unterstuetzt.
+Nach Profilwechsel oder Aenderungen gekoppelter BLU-Komponenten die Abfrage wiederholen.
+Shelly-Einstellungen werden nicht veraendert und keine Bluetooth-Geraete gekoppelt.<br>
 Syntax: <code>set &lt;name&gt; discoverShelly [mqtt-prefix]</code>
 </li>
 </ul>

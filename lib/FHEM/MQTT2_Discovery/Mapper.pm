@@ -527,7 +527,22 @@ sub _add_supplemental_signals {
 			_add_entry($list, $warnings, _reading($topic, undef, $name), "Zusatzsignal $name");
 		} elsif (($type || '') eq 'template') {
 			# Alternative Transportkanaele verwenden denselben sicheren Template-Compiler.
-			_add_entry($list, $warnings, _reading($topic, $signal->{template}, $name), "Zusatzsignal $name");
+			my $entry = _reading($topic, $signal->{template}, $name);
+			# Ein Arrayfilter bindet das Template an passende Objekte statt an feste Arrayindizes.
+			if (exists($signal->{items}) && !$entry->{error}) {
+				my $items = $signal->{items};
+				if (ref($items) ne 'HASH' || ref($items->{path}) ne 'ARRAY' || !@{ $items->{path} }
+						|| ref($items->{match}) ne 'HASH' || !keys %{ $items->{match} }
+						|| grep { !defined($_) || ref($_) || /[\x00-\x1f]/ }
+							(@{ $items->{path} }, keys %{ $items->{match} }, values %{ $items->{match} })) {
+					$entry = { error => 'Ungueltiger Arrayfilter fuer Zusatzsignal' };
+				} else {
+					$entry->{kind} = 'reading';
+					$entry->{items} = $items;
+					delete $entry->{json_key};
+				}
+			}
+			_add_entry($list, $warnings, $entry, "Zusatzsignal $name");
 		} elsif (($type || '') eq 'json_flatten') {
 			_add_entry($list, $warnings, {
 				kind => 'json_autocreate', topic => $topic, name => $name,
