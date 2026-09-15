@@ -1,6 +1,9 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 9b6010cd62c4631d18fbc281c162595bc9ebf2b18568249fc2b724ae16e68172
+# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+- change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
+  behoben.
+  - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.
 - change: MQTT2_DISCOVERY: - Shelly-CCT-Leuchten um Ein/Aus, Helligkeit und
   Farbtemperatur erweitert.
   - Gekoppelte BLU-/BTHome-Sensoren sowie Taster- und Drehereignisse

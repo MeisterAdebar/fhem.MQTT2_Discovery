@@ -12,7 +12,8 @@ use strict;
 use warnings;
 use lib './lib/FHEM';
 use Encode ();
-use JSON::PP qw(decode_json);
+# Vermeidet JSON-Funktionsimporte in den mit anderen FHEM-Modulen geteilten Namensraum.
+use JSON::PP ();
 use MQTT2_Discovery::Helper qw(stable_unique stable_suffix split_lines line_key merge_generated_lines);
 use MQTT2_Discovery::FormatRegistry ();
 use MQTT2_Discovery::Model ();
@@ -23,7 +24,7 @@ use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
 use vars qw(%defs %attr %modules $readingFnAttributes);
 
-our $MQTT2_DISCOVERY_VERSION = '0.9.10';
+our $MQTT2_DISCOVERY_VERSION = '0.9.11';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
 our $MQTT2_DISCOVERY_AVAILABILITY_REFRESH_DELAY = 60;
 our $MQTT2_DISCOVERY_AVAILABILITY_RETRY_DELAY = 10;
@@ -96,7 +97,7 @@ sub MQTT2_DISCOVERY_log_payload($) {
 	return '<empty payload>' if $payload eq '';
 	my ($decoded, $safe);
 	my $ok = eval {
-		$decoded = decode_json($payload);
+		$decoded = JSON::PP::decode_json($payload);
 		$safe = JSON::PP->new->canonical(1)->encode(MQTT2_DISCOVERY_log_redacted($decoded));
 		1;
 	};
@@ -1303,7 +1304,7 @@ sub MQTT2_DISCOVERY_enqueue($$$$) {
 	my $queue_key = $topic;
 	# Das gemeinsame Announce-Topic traegt mehrere Geraete und darf sie nicht gegenseitig ersetzen.
 	if ($topic eq 'shellies/announce') {
-		my $info = eval { decode_json($payload) };
+		my $info = eval { JSON::PP::decode_json($payload) };
 		$queue_key .= "\0$info->{id}" if MQTT2_Discovery::Parser::Shelly::valid_info($info);
 	}
 
@@ -1793,7 +1794,7 @@ sub MQTT2_DISCOVERY_registry($) {
 		if (utf8::is_utf8($stored)) {
 			$registry = JSON::PP->new->decode($stored);
 		} else {
-			eval { $registry = decode_json($stored); 1 }
+			eval { $registry = JSON::PP::decode_json($stored); 1 }
 				or $registry = JSON::PP->new->decode($stored);
 		}
 	} if $stored ne '';
