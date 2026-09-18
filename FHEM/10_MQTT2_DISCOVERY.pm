@@ -684,6 +684,17 @@ sub MQTT2_DISCOVERY_apply_parsed_readings($$$) {
 		my $device_topic = AttrVal($record->{name}, 'devicetopic', '');
 		my %updates;
 
+		# Die Antwort auf die eigene Statusabfrage; ihr Topic ergibt sich aus dem
+		# aktuellen Namen dieser Instanz, nicht aus einem gespeicherten Text.
+		if (defined($record->{reply_key}) && defined($record->{reply_reference})
+				&& $topic eq "mqtt2_discovery/$hash->{NAME}/shelly/$record->{reply_key}/state/rpc") {
+			my $values = MQTT2_DISCOVERY_runtimeRef(
+				$record->{name}, $record->{reply_reference}, $payload,
+			);
+			@updates{ keys %$values } = values %$values if ref($values) eq 'HASH';
+		}
+
+
 		for my $entry (MQTT2_DISCOVERY_parse_readings($hash, $record)) {
 			next if ref($entry) ne 'HASH' || !defined($entry->{regexp}) || !defined($entry->{reference});
 			my $pattern = $entry->{regexp};
@@ -2867,6 +2878,21 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 			next if !defined($line) || $line eq '';
 			my ($regexp, $reference) = $line =~ /^(\S+):\.\*\s+\{[^}]*'(r_[a-f0-9]+)'/;
 			next if !defined($regexp) || !defined($reference);
+
+			# Der Geraetestamm wird gleich aufgeloest. Ohne readingList-Attribut
+			# braucht das Zielgeraet dann kein devicetopic mehr, und die gespeicherten
+			# Muster haengen nicht an einem Attribut, das jemand aendern kann.
+			$regexp =~ s/\$DEVICETOPIC/$render_device_topic/g
+				if defined($render_device_topic) && $render_device_topic ne '';
+
+			# Das eigene Antworttopic wird nicht gespeichert, sondern beim Auswerten
+			# aus dem aktuellen Namen dieser Instanz und dem Geraeteschluessel
+			# zusammengesetzt. So uebersteht es ein rename des Discovery-Devices.
+			if ($regexp =~ m{^mqtt2_discovery/[^/]+/shelly/([a-f0-9]{16})/state/rpc$}) {
+				$record->{reply_key} = $1;
+				$record->{reply_reference} = $reference;
+				next;
+			}
 			push @parsed, { regexp => "$regexp:.*", reference => $reference };
 		}
 
@@ -2884,6 +2910,12 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 		kind => 'set', mode => $effective_mode, current => $merge_set,
 		previous_owned => $previous_owned_set, generated => \@set_entries,
 	);
+	# Ohne erzeugte readingList und setList braucht das Zielgeraet keinen
+	# Topic-Stamm mehr; ein vorhandenes devicetopic bleibt unangetastet, falls
+	# manuelle Zeilen es verwenden.
+	$manage_device_topic = 0
+		if $reading->{value} eq '' && $set->{value} eq ''
+			&& !exists($attr{$name}{devicetopic});
 	my $plan = MQTT2_Discovery::DevicePlanner::attribute_plan(
 		device => $name,
 		manage_device_topic => $manage_device_topic,
