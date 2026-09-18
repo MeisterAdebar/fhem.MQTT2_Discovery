@@ -1,6 +1,38 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 0258a216bc69ba1ae74d9ffec2f8ad5935d4487a8cabd6d7a0e007a01f7b9081
+# Msg-SHA256: eb9d610ac3c3114cb36d2b401d401d9f1d85e0ae8a3f42246b1cb4b1eae2064d
+- change: MQTT2_DISCOVERY: Readings je Geraet auswaehlbar ueber set
+  selectReadings
+  - Ausgangspunkt: Nicht jeder will alles, was ein Geraet meldet; beim Shelly
+    sind das wifi_rssi und sys_uptime. Bisher gibt es dafuer keinen Hebel: Von
+    Hand entfernte Zeilen stellt das Modul bei der naechsten Erkennung wieder
+    her, und die Werte stehen zusaetzlich in den Sammelzeilen fuer die
+    Abfrageantwort und die Ereignisse. Es muss also die Entity entfallen, nicht
+    die Zeile; extraJsonReadings ignore hilft nicht, das betrifft nur nicht
+    angekuendigte JSON-Felder.
+  - Loesung: set <name> selectReadings <MQTT2_DEVICE> zeigt in FHEMWEB ein
+    Formular mit einem Haekchen je erkanntem Reading, vorbelegt mit dem
+    aktuellen Stand; ohne FHEMWEB kommt ein Usage-Text mit derselben
+    Befehlszeile. Die abgewaehlten Namen stehen unter selections in der
+    Registry, also neben den Geraetedatensaetzen, und ueberleben dadurch auch
+    das Loeschen des Zieldevices.
+  - Gefiltert wird vor dem Rendern, die Werte entfallen damit auch in den
+    Sammelzeilen. Am Zielgeraet wird autocreate 0 gesetzt, sonst haengt
+    MQTT2_DEVICE die abgewaehlten Topics beim naechsten Eintreffen selbst
+    wieder an die verwaltete readingList an. Bereits vorhandene Readings werden
+    entfernt, denn ein nicht mehr beschriebenes Reading behielte dauerhaft
+    seinen veralteten Wert.
+  - Zum Dialog: Das Formular bringt einen eigenen Uebernehmen-Knopf mit. Das
+    Muster aus AttrTemplate.pm verlaesst sich auf den Knopf von FW_okDialog;
+    wird ein Set-Formular von der Detailseite abgeschickt, rendert FHEMWEB die
+    Antwort jedoch als ganze Seite, in der es diesen Knopf nicht gibt. Der
+    bestehende attrTemplate-Dialog hat dieselbe Schwaeche.
+  - Offen: Eine Auswahl bereits vor dem Anlegen des Devices braucht eine
+    Warteliste samt set approve, weil zur Erkennungszeit kein Client verbunden
+    ist.
+  - Tests: neue Datei tests/39_select_readings.t prueft Filterung in Zeilen und
+    Sammelzeilen, autocreate 0, die Ablage neben dem Geraetedatensatz und die
+    Wirksamkeit nach einer erneuten Erkennung.
 - change: MQTT2_DISCOVERY: availabilityReading none unterdrueckt das
   verdichtete Reading
   - Hintergrund: Das sichtbare Availability-Reading ist kein Echo eines Topics,

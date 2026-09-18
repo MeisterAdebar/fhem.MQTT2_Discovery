@@ -444,6 +444,158 @@ sub MQTT2_DISCOVERY_devices_html($) {
 		. '</div></html>';
 }
 
+# Die abgewaehlten Readings liegen bewusst neben den Geraetedatensaetzen: Wird ein
+# MQTT2_DEVICE geloescht, verwirft die Registry seinen Datensatz und legt ihn bei
+# der naechsten Erkennung neu an; die Auswahl soll das ueberleben.
+sub MQTT2_DISCOVERY_ignored_entities($$) {
+	my ($hash, $record) = @_;
+	return () if ref($record) ne 'HASH' || !defined($record->{name});
+	my $selections = MQTT2_DISCOVERY_registry($hash)->{selections};
+	return () if ref($selections) ne 'HASH'
+		|| ref($selections->{ $record->{name} }) ne 'ARRAY';
+	return grep { defined($_) && !ref($_) && $_ ne '' } @{ $selections->{ $record->{name} } };
+}
+
+# Alle Readingnamen, die der Dialog zur Auswahl stellt.
+sub MQTT2_DISCOVERY_selectable_readings($$) {
+	my ($hash, $record) = @_;
+	my %names;
+	my $references = ref($record->{runtime_refs}) eq 'HASH' ? $record->{runtime_refs} : {};
+
+	for my $descriptor (values %$references) {
+		next if ref($descriptor) ne 'HASH';
+		my $operation = $descriptor->{operation} // '';
+		if ($operation eq 'reading' && defined($descriptor->{name})) {
+			$names{ $descriptor->{name} } = 1;
+		} elsif ($operation eq 'topic' && ref($descriptor->{configuration}) eq 'HASH') {
+
+			for my $reading (@{ $descriptor->{configuration}{readings} || [] }) {
+				$names{ $reading->{name} } = 1
+					if ref($reading) eq 'HASH' && defined($reading->{name});
+			}
+
+		}
+	}
+
+	return sort keys %names;
+}
+
+# FHEMWEB-Formular mit eigenem Knopf: Das Muster aus AttrTemplate.pm verlaesst sich
+# auf den Knopf von FW_okDialog; bei einem abgeschickten Set-Formular rendert
+# FHEMWEB die Antwort aber als ganze Seite, in der es diesen Knopf nicht gibt.
+sub MQTT2_DISCOVERY_select_readings_dialog($$$$) {
+	my ($hash, $target_name, $selectable, $ignored) = @_;
+	my $command = MQTT2_DISCOVERY_html_escape("set $hash->{NAME} selectReadings $target_name");
+	my $detail = MQTT2_DISCOVERY_html_escape($target_name);
+	my $rows = join('', map {
+		my $name = MQTT2_DISCOVERY_html_escape($_);
+		my $checked = $ignored->{$_} ? '' : " checked='checked'";
+		"<tr><td><input type='checkbox' class='m2dSelect' name='$name'$checked></td><td>$name</td></tr>";
+	} @$selectable);
+	return '<html>'
+		. "<input type='hidden' id='m2dSelectCmd' value='$command'>"
+		. "<p>Welche Readings soll $detail behalten?</p>"
+		. "<table class='block wide'>$rows</table>"
+		. "<br><input type='button' id='m2dSelectOk' value='&Uuml;bernehmen'>"
+		. qq{<script>
+			(function(){
+				var apply = function(){
+					var cmd = document.getElementById("m2dSelectCmd").value;
+					var boxes = document.getElementsByClassName("m2dSelect");
+					for(var i=0; i<boxes.length; i++)
+						cmd += " "+boxes[i].getAttribute("name")+"="+(boxes[i].checked ? 1 : 0);
+					if(typeof FW_cmd == "function") {
+						FW_cmd(FW_root+"?cmd="+encodeURIComponent(cmd)+"&XHR=1", function(){
+							location.href = FW_root+"?detail=$detail";
+						});
+					} else {
+						location.href = "?cmd="+encodeURIComponent(cmd)+"&detail=$detail";
+					}
+				};
+				document.getElementById("m2dSelectOk").onclick = apply;
+
+				// Im Popup von FHEMWEB uebernimmt zusaetzlich dessen eigener Knopf.
+				if(typeof \$ == "function" && \$("#FW_okDialog").length) {
+					\$("#FW_okDialog").parent().find("button").css("display","block");
+					\$("#FW_okDialog").parent().find(".ui-dialog-buttonpane button")
+						.unbind("click").click(function(){ apply(); \$("#FW_okDialog").remove(); });
+				}
+			})();
+		</script>}
+		. '</html>';
+}
+
+# Zeigt die Auswahl an oder uebernimmt sie und baut die Listen neu auf.
+sub MQTT2_DISCOVERY_select_readings($@) {
+	my ($hash, $target_name, @pairs) = @_;
+	return 'Usage: set <name> selectReadings <MQTT2_DEVICE> [<reading>=0|1 ...]'
+		if !defined($target_name) || $target_name eq '';
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+	my @records = grep {
+		ref($_) eq 'HASH' && defined($_->{name}) && $_->{name} eq $target_name
+	} values %{ $registry->{devices} || {} };
+	return "$target_name wird von $hash->{NAME} nicht verwaltet" if @records != 1;
+	my $record = $records[0];
+	my @selectable = MQTT2_DISCOVERY_selectable_readings($hash, $record);
+	my %ignored = map { ($_ => 1) } MQTT2_DISCOVERY_ignored_entities($hash, $record);
+
+	# Bereits abgewaehlte Namen entstehen nicht mehr und fehlen deshalb in den
+	# Runtime-Referenzen; fuer den Dialog gehoeren sie wieder in die Liste.
+	my %offered = map { ($_ => 1) } (@selectable, keys %ignored);
+	@selectable = sort keys %offered;
+	return "$target_name hat noch keine erkannten Readings" if !@selectable;
+
+	if (!@pairs) {
+		return MQTT2_DISCOVERY_select_readings_dialog($hash, $target_name, \@selectable, \%ignored)
+			if $hash->{CL} && ($hash->{CL}{TYPE} // '') eq 'FHEMWEB';
+		return "Usage: set $hash->{NAME} selectReadings $target_name "
+			. join(' ', map { "$_=" . ($ignored{$_} ? 0 : 1) } @selectable);
+	}
+	my %selection = map { ($_ => $ignored{$_} ? 0 : 1) } @selectable;
+
+	for my $pair (@pairs) {
+		my ($name, $value) = $pair =~ /^([A-Za-z0-9_.-]+)=([01])$/;
+		return "Ungueltige Angabe: $pair" if !defined($name);
+		return "Unbekanntes Reading: $name" if !exists($selection{$name});
+		$selection{$name} = $value;
+	}
+	my @ignore = sort grep { !$selection{$_} } keys %selection;
+
+	if (@ignore) {
+		$registry->{selections}{$target_name} = \@ignore;
+	} else {
+		delete $registry->{selections}{$target_name};
+	}
+	my $error = MQTT2_DISCOVERY_apply_device_lines($hash, $record, { rebuild_lists => 1 });
+	return $error if $error;
+	MQTT2_DISCOVERY_persist_registry($hash);
+
+	# Ein abgewaehltes Reading wird nicht mehr beschrieben; es stehen zu lassen
+	# wuerde einen veralteten Wert dauerhaft sichtbar machen.
+	for my $reading (@ignore) {
+		next if $reading =~ /^\./;
+		next if ref($defs{$target_name}{READINGS}) ne 'HASH'
+			|| !exists($defs{$target_name}{READINGS}{$reading});
+		MQTT2_DISCOVERY_gateway($hash)->delete_reading($defs{$target_name}, $reading);
+	}
+
+	MQTT2_DISCOVERY_log($hash, 2,
+		"selectReadings $target_name ignoriert: " . (@ignore ? join(',', @ignore) : '-'));
+	return undef;
+}
+
+# Die verwalteten Zieldevices erscheinen als Auswahlliste hinter selectReadings,
+# damit FHEMWEB ein Klappmenue statt eines Textfelds anbietet.
+sub MQTT2_DISCOVERY_set_list($) {
+	my ($hash) = @_;
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+	my @targets = sort grep { defined($_) && !ref($_) && $defs{$_} } map {
+		ref($_) eq 'HASH' ? $_->{name} : undef
+	} values %{ $registry->{devices} || {} };
+	my $select = @targets ? 'selectReadings:' . join(',', @targets) : 'selectReadings';
+	return "activate:noArg deactivate:noArg rebuildDevice $select rescan:noArg discoverShelly";
+}
+
 # Verteilt die erlaubten Set-Kommandos auf Aktivierung, Deaktivierung oder Neuaufbau.
 sub MQTT2_DISCOVERY_Set($@) {
 	my ($hash, @arguments) = @_;
@@ -451,7 +603,7 @@ sub MQTT2_DISCOVERY_Set($@) {
 	my $command = shift @arguments;
 	MQTT2_DISCOVERY_log($hash, 3, 'set ' . (defined($command) ? $command : '<missing>'));
 	MQTT2_DISCOVERY_log($hash, 4, 'set arguments=[' . join(', ', @arguments) . ']') if @arguments;
-	return 'Unknown argument ?, choose one of activate:noArg deactivate:noArg rebuildDevice rescan:noArg discoverShelly'
+	return 'Unknown argument ?, choose one of ' . MQTT2_DISCOVERY_set_list($hash)
 		if !defined $command;
 	return MQTT2_DISCOVERY_activate($hash) if $command eq 'activate' && !@arguments;
 	return MQTT2_DISCOVERY_deactivate($hash) if $command eq 'deactivate' && !@arguments;
@@ -463,7 +615,8 @@ sub MQTT2_DISCOVERY_Set($@) {
 	return MQTT2_DISCOVERY_rescan($hash) if $command eq 'rescan' && !@arguments;
 	return MQTT2_DISCOVERY_discover_shelly($hash, $arguments[0])
 		if $command eq 'discoverShelly' && @arguments <= 1;
-	return "Unknown argument $command, choose one of activate:noArg deactivate:noArg rebuildDevice rescan:noArg discoverShelly";
+	return MQTT2_DISCOVERY_select_readings($hash, @arguments) if $command eq 'selectReadings';
+	return "Unknown argument $command, choose one of " . MQTT2_DISCOVERY_set_list($hash);
 }
 
 # Liefert den instanzlokalen Antwortpfad und die getrennt schaltbare native Erkennung.
@@ -2364,6 +2517,23 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	for my $mapping (@$resolved_mappings) {
 		push @reading_entries, @{ $mapping->{reading_lines} || [] };
 		push @set_entries, @{ $mapping->{set_lines} || [] };
+	}
+
+	# Im Dialog abgewaehlte Readings entstehen gar nicht erst, weder als eigene
+	# Zeile noch in den Sammelzeilen fuer die Abfrageantwort und die Ereignisse.
+	my %ignored_entities = map { ($_ => 1) } MQTT2_DISCOVERY_ignored_entities($hash, $record);
+	if (%ignored_entities) {
+
+		# Ohne abgeschaltetes Autocreate haengt MQTT2_DEVICE die abgewaehlten Topics
+		# beim naechsten Eintreffen selbst wieder an; das gilt auch nach einer Neuanlage.
+		CommandAttr(undef, "$name autocreate 0")
+			if AttrVal($name, 'autocreate', '') ne '0';
+		@reading_entries = grep {
+			ref($_) ne 'HASH' || !$ignored_entities{ $_->{name} // '' }
+		} @reading_entries;
+		@set_entries = grep {
+			ref($_) ne 'HASH' || !$ignored_entities{ $_->{name} // '' }
+		} @set_entries;
 	}
 	my @availability_topics = sort stable_unique(map { $_->{topic} }
 		grep {
