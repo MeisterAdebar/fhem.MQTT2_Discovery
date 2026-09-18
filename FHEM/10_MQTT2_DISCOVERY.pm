@@ -122,7 +122,7 @@ sub MQTT2_DISCOVERY_Initialize($) {
 	$hash->{FW_deviceOverview} = 1;
 	# Match bleibt absichtlich prefixunabhaengig, da Prefixe je IODev konfiguriert sind.
 	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors|announce|online|events/rpc)|mqtt2_discovery/[^/\\x00]+/shelly/[a-f0-9]{16}/(?:info|config|status|components)/rpc|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
-	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
+	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 readingsViaParse:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
 	$modules{MQTT2_DISCOVERY}{defptr} ||= {};
 }
 
@@ -242,6 +242,8 @@ sub MQTT2_DISCOVERY_Attr(@) {
 		} elsif ($attribute eq 'extraJsonReadings') {
 			return 'extraJsonReadings muss include oder ignore sein'
 				if $value !~ /^(?:include|ignore)$/;
+		} elsif ($attribute eq 'readingsViaParse') {
+			return 'readingsViaParse muss 0 oder 1 sein' if $value !~ /^[01]$/;
 		} elsif ($attribute eq 'availabilityReading') {
 			return 'availabilityReading muss mit einem Buchstaben oder Unterstrich beginnen und darf nur Buchstaben, Ziffern, Punkte, Unterstriche und Bindestriche enthalten'
 				if $value !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/;
@@ -440,6 +442,68 @@ sub MQTT2_DISCOVERY_devices_html($) {
 		. '<br>'
 		. MQTT2_DISCOVERY_devices_table($unmanaged_heading, $unmanaged, $empty_text)
 		. '</div></html>';
+}
+
+# Mit readingsViaParse wertet das Modul die Nutzdaten selbst aus. Dafuer muss es
+# alle Nachrichten sehen, deshalb wird der Match des Moduls weit gestellt, solange
+# mindestens eine Instanz das Attribut gesetzt hat. Ohne das Attribut bleibt der
+# enge Match erhalten und nichts am bisherigen Ablauf aendert sich.
+our $MQTT2_DISCOVERY_NARROW_MATCH;
+sub MQTT2_DISCOVERY_update_match() {
+	$MQTT2_DISCOVERY_NARROW_MATCH = $modules{MQTT2_DISCOVERY}{Match}
+		if !defined($MQTT2_DISCOVERY_NARROW_MATCH);
+	my $wide = 0;
+
+	for my $instance (values %{ $modules{MQTT2_DISCOVERY}{defptr} || {} }) {
+		next if ref($instance) ne 'HASH' || !defined($instance->{NAME});
+		$wide = 1 if MQTT2_DISCOVERY_gateway($instance)->attr_value(
+			$instance->{NAME}, 'readingsViaParse', 0,
+		);
+	}
+
+	$modules{MQTT2_DISCOVERY}{Match} = $wide ? '.*' : $MQTT2_DISCOVERY_NARROW_MATCH;
+	return $wide;
+}
+
+# Liefert die vom Modul selbst auszuwertenden Zeilen eines Zielgeraets.
+sub MQTT2_DISCOVERY_parse_readings($$) {
+	my ($hash, $record) = @_;
+	return () if ref($record) ne 'HASH' || ref($record->{parse_readings}) ne 'ARRAY';
+	return @{ $record->{parse_readings} };
+}
+
+# Wertet eine Nutzdatennachricht fuer alle verwalteten Zieldevices aus und schreibt
+# deren Readings direkt, ohne den Umweg ueber ein readingList-Attribut.
+sub MQTT2_DISCOVERY_apply_parsed_readings($$$) {
+	my ($hash, $topic, $payload) = @_;
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+	my $written = 0;
+
+	for my $record (values %{ $registry->{devices} || {} }) {
+		next if ref($record) ne 'HASH' || !defined($record->{name});
+		my $target = $defs{ $record->{name} };
+		next if !$target;
+		my $device_topic = AttrVal($record->{name}, 'devicetopic', '');
+		my %updates;
+
+		for my $entry (MQTT2_DISCOVERY_parse_readings($hash, $record)) {
+			next if ref($entry) ne 'HASH' || !defined($entry->{regexp}) || !defined($entry->{reference});
+			my $pattern = $entry->{regexp};
+			$pattern =~ s/\$DEVICETOPIC/\Q$device_topic\E/g if $device_topic ne '';
+			next if "$topic:$payload" !~ /^$pattern$/s;
+			my $values = MQTT2_DISCOVERY_runtimeRef($record->{name}, $entry->{reference}, $payload);
+			next if ref($values) ne 'HASH';
+			@updates{ keys %$values } = values %$values;
+		}
+
+		next if !%updates;
+		MQTT2_DISCOVERY_gateway($hash)->update_readings($target, \%updates);
+		MQTT2_DISCOVERY_log($hash, 4,
+			"readings aus $topic fuer $record->{name}: " . join(',', sort keys %updates));
+		$written++;
+	}
+
+	return $written;
 }
 
 # Verteilt die erlaubten Set-Kommandos auf Aktivierung, Deaktivierung oder Neuaufbau.
@@ -794,6 +858,11 @@ sub MQTT2_DISCOVERY_Parse($$) {
 	$message =~ s/^autocreate=[^\0]+\0//s;
 	my ($cid, $topic, $payload) = split /\0/, $message, 3;
 	return '[NEXT]' if !defined($topic) || !defined($payload);
+
+	# Mit readingsViaParse schreibt das Modul die Readings selbst und gibt die
+	# Nachricht danach weiter, damit manuelle Zeilen am Geraet erhalten bleiben.
+	MQTT2_DISCOVERY_apply_parsed_readings($config, $topic, $payload)
+		if MQTT2_DISCOVERY_gateway($config)->attr_value($config->{NAME}, 'readingsViaParse', 0);
 	my @shelly = MQTT2_Discovery::Format::Shelly::route(
 		MQTT2_DISCOVERY_shelly_args($config), topic => $topic, payload => $payload,
 		state => $config->{helper}{formats}{shelly} || {},
@@ -2437,6 +2506,28 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	@set_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		\@set_entries, $render_device_topic, undef, \%runtime_references,
 	) };
+
+	# Mit readingsViaParse entsteht kein readingList-Attribut mehr: Die erzeugten
+	# Zeilen werden in Regexp und Runtime-Referenz zerlegt und in der Registry
+	# abgelegt; ausgewertet wird spaeter in ParseFn. Manuelle Zeilen des Anwenders
+	# bleiben im Attribut und arbeiten unveraendert weiter.
+	if (MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'readingsViaParse', 0)) {
+		my @parsed;
+
+		for my $entry (@reading_entries) {
+			my $line = ref($entry) eq 'HASH' ? $entry->{line} : $entry;
+			next if !defined($line) || $line eq '';
+			my ($regexp, $reference) = $line =~ /^(\S+):\.\*\s+\{[^}]*'(r_[a-f0-9]+)'/;
+			next if !defined($regexp) || !defined($reference);
+			push @parsed, { regexp => "$regexp:.*", reference => $reference };
+		}
+
+		$record->{parse_readings} = \@parsed;
+		@reading_entries = ();
+	} else {
+		delete $record->{parse_readings};
+	}
+	MQTT2_DISCOVERY_update_match();
 	my $reading = merge_generated_lines(
 		kind => 'reading', mode => $effective_mode, current => $prepared_old_reading,
 		previous_owned => $previous_owned_reading, generated => \@reading_entries,

@@ -1,6 +1,35 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 768786092c119950c064f1acce94597bb3ea920c08e9fe30fbc72fb76a80b9d0
+# Msg-SHA256: 81ebb5e25c2792ce78325f7593f9a67e7fdcad6c71e89816b701d4af182f2573
+- change: MQTT2_DISCOVERY: Readings ohne readingList: das Modul wertet die
+  Nutzdaten in ParseFn selbst aus
+  - Anlass: Beta-Users These im FHEM-Forum (Thread 145198), dass ein Shelly
+    auch ohne readingList-Attribut auskommt, wenn die ParseFn des
+    Discovery-Moduls die Readings setzt, wie es MQTT_GENERIC_BRIDGE fuer fremde
+    Devices tut. Die These trifft zu.
+  - Umsetzung: Das neue Attribut readingsViaParse (Vorgabe 0) laesst das
+    readingList-Attribut entfallen. Die erzeugten Zeilen werden in Regexp und
+    Runtime-Referenz zerlegt und als parse_readings in der Registry abgelegt;
+    ParseFn wertet sie mit denselben deklarativen Referenzen aus und schreibt
+    die Werte ueber readingsBeginUpdate, readingsBulkUpdate und
+    readingsEndUpdate in das Zielgeraet.
+  - Dispatch: Solange mindestens eine Instanz das Attribut gesetzt hat, steht
+    der Match des Moduls auf .*, sonst bleibt der bisherige enge Match. Nach
+    dem Schreiben gibt ParseFn die Nachricht weiter, damit manuelle Zeilen am
+    Geraet unveraendert arbeiten und nichts verschluckt wird.
+  - Geprueft an einem Shelly 1 Mini Gen3: Das Zielgeraet hat kein
+    readingList-Attribut, bekommt aber nach der Erkennung alle Readings und
+    folgt einem echten Schaltvorgang innerhalb weniger Sekunden. Der Zweig
+    enthaelt dafuer die Korrektur des Komponenten-Topics, weil der laufende
+    Statusweg sonst am Doppelpunkt scheitert.
+  - Offen: setList bleibt ein Attribut, dafuer gibt es den getrennten Vorschlag
+    setsViaHook. Ein weiter Match bedeutet, dass das Modul jede Nachricht
+    sieht; das kostet Laufzeit und sollte vor einer Veroeffentlichung gemessen
+    werden.
+  - Tests: neue Datei tests/41_readings_via_parse.t prueft das fehlende
+    Attribut, die Ablage in der Registry, geschriebene Readings aus einer
+    gewoehnlichen Nutzdatennachricht, die Weitergabe im Dispatch und das
+    unveraenderte Verhalten ohne das Attribut.
 - change: MQTT2_DISCOVERY: Doppelpunkt im Komponenten-Topic an topicConversion
   angepasst
   - Befund: Parser/Shelly.pm erzeugt das state_topic <prefix>/status/switch:0,
