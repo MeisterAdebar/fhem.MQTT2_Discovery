@@ -1,6 +1,22 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+# Msg-SHA256: 2b118622efdbe8e56b9cd2bff68892537b993263de4c908e33c45bbe7dad285e
+- change: MQTT2_DISCOVERY: reload des Moduls im laufenden FHEM wieder moeglich
+  - Befund: reload 10_MQTT2_DISCOVERY bricht ab mit "Not enough arguments for
+    main::MQTT2_DISCOVERY_process ... near \"$batch)\"". Beim ersten Laden ist
+    der Prototyp an der Aufrufstelle noch unbekannt, beim erneuten Uebersetzen
+    gilt er.
+  - Ursache: Der Aufruf in der Queue uebergab die Nachricht als aufgeloestes
+    Array (@$message). Der Prototyp ($$$$;$) legt jedem Parameter skalaren
+    Kontext auf, damit zaehlt das Array als ein einziges Argument und es fehlen
+    zwei.
+  - Folge: Jede Modulaenderung verlangte bisher shutdown restart; ein reload
+    war nicht nutzbar.
+  - Loesung: Die drei Bestandteile der Nachricht werden einzeln uebergeben, und
+    eine Vorwaertsdeklaration stellt den Prototyp schon beim ersten Laden
+    scharf, wie es fuer MQTT2_DISCOVERY_process_inner bereits geschieht.
+  - Tests: neue Datei tests/33_reload.t laedt die Moduldatei zweimal im selben
+    Prozess und prueft, dass kein Uebersetzungsfehler entsteht.
 - change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
   behoben.
   - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.
