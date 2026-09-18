@@ -12,6 +12,10 @@ use MQTT2_Discovery::Template ();
 
 # Alle Renderer behandeln Discovery-Daten als untrusted Input. Escaping und
 # Validierung passieren deshalb hier zentral, bevor FHEM-Attributtext entsteht.
+# Mit availabilityReading none entfaellt das verdichtete sichtbare Reading;
+# Quellen und Regeln bleiben als interne Readings erhalten.
+our $AVAILABILITY_VISIBLE = 1;
+
 sub _regex_literal {
 	my ($value) = @_;
 	$value =~ s{([\\.^$|()\[\]{}*+?])}{\\$1}g;
@@ -581,7 +585,7 @@ sub _render_availability_groups {
 
 	for my $topic (sort keys %topics) {
 		my $configuration = {
-			reading => $availability_reading,
+			reading => ($AVAILABILITY_VISIBLE ? $availability_reading : ''),
 			sources => [ map { $sources{$_} } sort keys %{ $topics{$topic} } ],
 			policies => \@policies,
 		};
@@ -593,7 +597,8 @@ sub _render_availability_groups {
 			kind => 'availability_group', role => 'availability',
 			name => $availability_reading, reserved_reading => 1, topic => $topic,
 			names => [
-				$availability_reading, sort(keys %{ $topics{$topic} }), sort(keys %policies),
+				($AVAILABILITY_VISIBLE ? $availability_reading : ()),
+				sort(keys %{ $topics{$topic} }), sort(keys %policies),
 			],
 			configuration => $configuration,
 			line => _regex($topic, $device_topic, undef) . " $expression",

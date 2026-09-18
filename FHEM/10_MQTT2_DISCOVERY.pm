@@ -242,6 +242,8 @@ sub MQTT2_DISCOVERY_Attr(@) {
 		} elsif ($attribute eq 'extraJsonReadings') {
 			return 'extraJsonReadings muss include oder ignore sein'
 				if $value !~ /^(?:include|ignore)$/;
+		} elsif ($attribute eq 'availabilityReading' && lc($value // '') eq 'none') {
+			# none ist erlaubt und bedeutet kein sichtbares Reading.
 		} elsif ($attribute eq 'availabilityReading') {
 			return 'availabilityReading muss mit einem Buchstaben oder Unterstrich beginnen und darf nur Buchstaben, Ziffern, Punkte, Unterstriche und Bindestriche enthalten'
 				if $value !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/;
@@ -903,6 +905,8 @@ sub MQTT2_DISCOVERY_availability_reading($) {
 		$hash->{NAME}, 'availabilityReading',
 		$MQTT2_DISCOVERY_DEFAULT_AVAILABILITY_READING,
 	);
+	# none unterdrueckt das verdichtete sichtbare Reading vollstaendig.
+	return '' if lc($name) eq 'none';
 	return $name =~ /^[A-Za-z_][A-Za-z0-9_.-]*$/
 		? $name : $MQTT2_DISCOVERY_DEFAULT_AVAILABILITY_READING;
 }
@@ -1210,7 +1214,8 @@ sub MQTT2_DISCOVERY_sync_target_availability($$$) {
 		$status = MQTT2_DISCOVERY_device_availability_status(\@states);
 	}
 	$gateway->update_reading($target, $availability_reading, $status, 1)
-		if $gateway->reading_value($name, $availability_reading, '') ne $status;
+		if $availability_reading ne ''
+			&& $gateway->reading_value($name, $availability_reading, '') ne $status;
 	return;
 }
 
@@ -1761,10 +1766,12 @@ sub MQTT2_DISCOVERY_registry_valid($) {
 		return 0 if exists($record->{runtime_refs}) && ref($record->{runtime_refs}) ne 'HASH';
 		return 0 if exists($record->{availability_reading})
 			&& (ref($record->{availability_reading})
-				|| $record->{availability_reading} !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/);
+				|| ($record->{availability_reading} ne ''
+					&& $record->{availability_reading} !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/));
 		return 0 if exists($record->{owned_availability_reading})
 			&& (ref($record->{owned_availability_reading})
-				|| $record->{owned_availability_reading} !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/);
+				|| ($record->{owned_availability_reading} ne ''
+					&& $record->{owned_availability_reading} !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/));
 
 		# Runtime-Referenzen duerfen nur die vom Renderer erzeugte kurze SHA-1-Form
 		# und rein deklarative Hash-Beschreibungen aus dem internen Reading laden.
@@ -2425,6 +2432,8 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 		$matching_device_topic, $record->{cid},
 	);
 	my $initial_reading_names = MQTT2_DISCOVERY_expected_reading_names($prepared_readings);
+	local $MQTT2_Discovery::Mapper::Renderer::AVAILABILITY_VISIBLE =
+		MQTT2_DISCOVERY_availability_reading($hash) ne '' ? 1 : 0;
 	@reading_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		$prepared_readings, $render_device_topic, $reserved_readings, \%runtime_references,
 	) };
@@ -2867,10 +2876,13 @@ sub MQTT2_Discovery_runtime {
 				if ref($configuration) ne 'HASH'
 					|| ref($configuration->{sources}) ne 'ARRAY'
 					|| ref($configuration->{policies}) ne 'ARRAY';
+			# Ein leerer Name unterdrueckt das sichtbare Reading; ein fehlender
+			# Schluessel behaelt den bisherigen Standardnamen.
 			my $availability_reading = $configuration->{reading} // 'availability';
+			$availability_reading = undef if $availability_reading eq '';
 			die 'Ungueltiger Availability-Readingname'
-				if ref($availability_reading)
-					|| $availability_reading !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+				if defined($availability_reading) && (ref($availability_reading)
+					|| $availability_reading !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/);
 			my (%updates, %updated_sources);
 
 			# Jede fuer das aktuelle Topic deklarierte Quelle wertet ihren eigenen
@@ -2929,7 +2941,8 @@ sub MQTT2_Discovery_runtime {
 			# Die Entity-Regeln behalten ihre jeweilige HA-Semantik. Das gruppierte
 			# FHEM-Device ist online, sobald mindestens eine seiner Entities verfuegbar
 			# ist, und erst offline, wenn alle Entities sicher offline sind.
-			if (%updated_sources && @{ $configuration->{policies} }) {
+			if (defined($availability_reading) && %updated_sources
+					&& @{ $configuration->{policies} }) {
 				my @policy_states = map {
 					exists($updates{ $_->{reading} })
 						? $updates{ $_->{reading} }
@@ -2944,7 +2957,7 @@ sub MQTT2_Discovery_runtime {
 			# Quell- und Regelreadings werden auch offline aktualisiert, der sichtbare
 			# Zustand darf dadurch aber nicht wieder online werden.
 			$updates{$availability_reading} = 'offline'
-				if %updated_sources
+				if defined($availability_reading) && %updated_sources
 					&& ReadingsVal($device, '.availability_io', 'online') ne 'online';
 			$answer = \%updates;
 		} elsif ($operation eq 'templatePublish') {

@@ -1,6 +1,25 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 367beb78674c08e45b306de30930fdb584777df653147f36863bcaf6fbbd5771
+# Msg-SHA256: 0258a216bc69ba1ae74d9ffec2f8ad5935d4487a8cabd6d7a0e007a01f7b9081
+- change: MQTT2_DISCOVERY: availabilityReading none unterdrueckt das
+  verdichtete Reading
+  - Hintergrund: Das sichtbare Availability-Reading ist kein Echo eines Topics,
+    sondern ein Urteil ueber alle Quellen einer Entity plus den Zustand der
+    Brokerverbindung. Wer nur die Rohquelle sehen will, etwa lwt eines Shelly,
+    hatte bisher keine Moeglichkeit, das verdichtete Reading abzuschalten.
+  - Loesung: availabilityReading akzeptiert zusaetzlich den Wert none. Dann
+    entsteht kein sichtbares Reading mehr; Quellen und Regeln bleiben als
+    interne Readings erhalten, ebenso die Bewertung der Brokerverbindung in
+    .availability_io.
+  - Umsetzung: Der Renderer traegt bei none einen leeren Namen in die
+    Konfiguration ein, die Runtime ueberspringt daraufhin das sichtbare
+    Reading. Ein fehlender Schluessel behaelt wie bisher den Standardnamen,
+    damit bestehende Konfigurationen unveraendert arbeiten.
+  - Zu bedenken: Ohne verdichtetes Reading hat ein getrenntes IODev kein
+    sichtbares Ziel mehr; bei einem MQTT2_CLIENT ist das ein spuerbarer
+    Verlust.
+  - Tests: neue Datei tests/38_availability_none.t prueft, dass lwt erhalten
+    bleibt und kein verdichtetes Reading mehr entsteht.
 - change: MQTT2_DISCOVERY: Letzter Wille eines Shelly erscheint als sichtbares
   Reading lwt
   - Befund: Availability und letzter Wille sind zwei verschiedene Aussagen,
