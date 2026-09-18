@@ -1,6 +1,23 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+# Msg-SHA256: b56da8b921051c0148eefb9252d5855cb6b6e0b1d3e32dacf8504bad5fe80f42
+- change: MQTT2_DISCOVERY: Verwaiste Registry-Eintraege blockieren die
+  Erkennung nicht mehr
+  - Befund: Wird ein verwaltetes MQTT2_DEVICE in FHEM geloescht, bleibt sein
+    Datensatz in der Registry stehen; MQTT2_DISCOVERY_apply_device_lines steigt
+    danach mit "Verwaltetes Device X existiert nicht" aus.
+  - Folge: Bei jeder weiteren Discovery-Nachricht steht "queue apply failed" im
+    Log, und weil der Lauf abbricht, wird die Stelle in stage_mapping, die ein
+    fehlendes Device neu anlegen wuerde, nie erreicht. Ohne Eingriff in die
+    Registry kommt das Device nicht zurueck.
+  - Nachweis: Nach dem Loeschen des Zieldevices meldete jede Antwort auf die
+    eigenen RPC-Abfragen denselben Fehler; erst das Entfernen des Datensatzes
+    aus .registry liess discoverShelly das Device wieder anlegen.
+  - Loesung: Fehlt das Zieldevice, verwirft apply_device_lines den zugehoerigen
+    Datensatz, schreibt eine Logzeile und gibt keinen Fehler zurueck; die
+    naechste Erkennung legt Device und Datensatz neu an.
+  - Tests: neue Datei tests/32_orphan_record.t mit geloeschtem Zieldevice,
+    verworfenem Datensatz und erfolgreicher Neuanlage.
 - change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
   behoben.
   - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.

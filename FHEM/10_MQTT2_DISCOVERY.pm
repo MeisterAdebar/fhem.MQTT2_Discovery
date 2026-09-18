@@ -2315,7 +2315,22 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	$options = {} if ref($options) ne 'HASH';
 	my $rebuild_lists = $options->{rebuild_lists} ? 1 : 0;
 	my $name = $record->{name};
-	return "Verwaltetes Device $name existiert nicht" if !$defs{$name};
+
+	# Ein von Hand geloeschtes Zieldevice darf die Erkennung nicht dauerhaft
+	# blockieren: Der verwaiste Datensatz wird verworfen, die naechste Erkennung
+	# legt Device und Datensatz neu an.
+	if (!$defs{$name}) {
+		my $registry = MQTT2_DISCOVERY_registry($hash);
+
+		for my $identity (keys %{ $registry->{devices} || {} }) {
+			next if ($registry->{devices}{$identity} // 0) != $record;
+			delete $registry->{devices}{$identity};
+		}
+
+		MQTT2_DISCOVERY_persist_registry($hash);
+		MQTT2_DISCOVERY_log($hash, 2, "verwaisten Registry-Eintrag fuer $name verworfen");
+		return undef;
+	}
 	my %previous_availability_topics = map { ($_ => 1) }
 		grep { defined($_) && !ref($_) && $_ ne '' }
 		@{ $record->{availability_topics} || [] };
