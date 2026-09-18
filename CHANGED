@@ -1,6 +1,35 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+# Msg-SHA256: c5c0831d0c9d1aa81ef2db6ba0117a2941c5f4ede350226f694bdb02f4bac8e5
+- change: MQTT2_DISCOVERY: Set-Kommandos ueber einen registrierten Hook statt
+  ueber das setList-Attribut
+  - Hintergrund: Im FHEM-Forum (Thread 145198, MQTT best current practice)
+    schlaegt Beta-User vor, dass MQTT2_DEVICE bei einem unbekannten Befehl beim
+    Discovery-Modul nachfragt, damit ein einfaches Shelly-Geraet weder
+    readingList noch setList als Attribut braucht.
+  - Umsetzung hier: Das neue Attribut setsViaHook (Vorgabe 0) laesst das
+    setList-Attribut entfallen; die Befehle liegen strukturiert in der
+    Registry. MQTT2_DISCOVERY_SetExtensions ergaenzt sie bei "?" in der
+    Auswahl, fuehrt einen bekannten Befehl selbst aus und setzt anschliessend
+    state, weil MQTT2_DEVICE_Set diesen Schritt nur fuer Befehle aus seiner
+    eigenen setList uebernimmt. Fremde Devices reicht der Hook unveraendert
+    weiter.
+  - Registrierung statt fester Name: Das Modul traegt sich mit
+    $data{MQTT2_DEVICE}{SetExtensionsFn} ein, also in %data wie FHEMWEB mit
+    $data{FWEXT} und ausdruecklich nicht in %modules; ein Schreibzugriff auf
+    einen noch nicht geladenen Moduleintrag erzeugt dort durch Autovivification
+    einen Eintrag ohne Match und ParseFn, an dem FHEMs Dispatch stirbt (fhem.pl
+    Zeile 4195 und 4203, auf einem Testsystem gezielt reproduziert). In FHEM
+    ist das die uebliche Richtung, siehe $data{FWEXT} bei FHEMWEB sowie
+    FingerprintFn, NotifyOrderPrefix und AttrFn in fhem.pl; eine Pruefung der
+    Art "defined &main::Fremdfunktion" kommt dort an keiner Stelle vor.
+  - Voraussetzung: Ohne die passende Ergaenzung in 10_MQTT2_DEVICE.pm bleibt
+    der Eintrag wirkungslos und das Modul verhaelt sich unveraendert. Beide
+    moeglichen Fassungen samt offener Punkte stehen in
+    docs/mqtt2-device-hook.md.
+  - Tests: neue Datei tests/40_sets_via_hook.t prueft die Registrierung, das
+    fehlende setList-Attribut, die ergaenzte Auswahl, das Ausfuehren samt state
+    und das unveraenderte Verhalten bei fremden Devices.
 - change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
   behoben.
   - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.
