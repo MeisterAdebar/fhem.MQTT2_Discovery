@@ -104,20 +104,20 @@ sub readings_for {
 subtest 'fhemConventions schaltet state, on und off frei' => sub {
 	my $hash = setup();
 	discover($hash, status => 1);
-	is(readings_for("$id/status/switch:0", { output => JSON::PP::true })->{switch_0}, 'true',
+	is(readings_for("$id/status/switch_0", { output => JSON::PP::true })->{switch_0}, 'true',
 		'ohne das Attribut bleibt alles unveraendert');
 	like(attr_value($target, 'setList'), qr/^switch_0:on,off /m, 'der Setter behaelt seinen Namen');
 
 	$hash = setup();
 	$main::attr{discovery}{fhemConventions} = 1;
 	discover($hash, status => 1);
-	my $values = readings_for("$id/status/switch:0", { output => JSON::PP::true });
+	my $values = readings_for("$id/status/switch_0", { output => JSON::PP::true });
 	is($values->{state}, 'on', 'der Zustand landet als on in state');
 	ok(!exists($values->{switch_0}), 'der alte Readingname entfaellt');
 	my $set_list = attr_value($target, 'setList');
 	like($set_list, qr/^on:noArg /m, 'on wird als eigener Befehl angeboten');
 	like($set_list, qr/^off:noArg /m, 'off wird als eigener Befehl angeboten');
-	is(readings_for("$id/status/switch:0", { output => JSON::PP::false })->{state}, 'off',
+	is(readings_for("$id/status/switch_0", { output => JSON::PP::false })->{state}, 'off',
 		'false wird zu off abgebildet');
 };
 

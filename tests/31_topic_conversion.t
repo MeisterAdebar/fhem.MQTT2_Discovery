@@ -76,6 +76,8 @@ sub readings_for {
 
 	for my $line (split /\n/, attr_value($target, 'readingList') // '') {
 		my ($pattern) = split /\s+/, $line, 2;
+		my $prefix = attr_value($target, 'devicetopic');
+		$pattern =~ s/\$DEVICETOPIC/\Q$prefix\E/g if defined $prefix;
 		next if "$topic:$payload" !~ /^$pattern$/s;
 		my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
 		next if !defined($reference);
@@ -89,7 +91,7 @@ sub readings_for {
 subtest 'Aktives topicConversion erzeugt umgewandelte Zeilen' => sub {
 	my $hash = setup();
 	my $reading_list = discover($hash);
-	like($reading_list, qr{\Q$id/status/switch_0:\E}, 'der Doppelpunkt der Komponente wird umgewandelt');
+	like($reading_list, qr{\$DEVICETOPIC/status/switch_0:}, 'der Doppelpunkt der Komponente wird umgewandelt');
 	unlike($reading_list, qr{\Qstatus/switch:0\E}, 'das Rohtopic erscheint nicht mehr');
 	is(readings_for("$id/status/switch_0", { output => JSON::PP::false })->{switch_0}, 'false',
 		'die umgewandelte Zeile wertet den Komponentenstatus aus');
@@ -101,7 +103,7 @@ subtest 'Abgeschaltetes topicConversion behaelt das Rohtopic' => sub {
 	my $hash = setup();
 	$main::attr{mqtt}{topicConversion} = 0;
 	my $reading_list = discover($hash);
-	like($reading_list, qr{\Q$id/status/switch:0:\E}, 'ohne Umwandlung bleibt der Doppelpunkt stehen');
+	like($reading_list, qr{\$DEVICETOPIC/status/switch:0:}, 'ohne Umwandlung bleibt der Doppelpunkt stehen');
 	is(readings_for("$id/status/switch:0", { output => JSON::PP::true })->{switch_0}, 'true',
 		'die Zeile wertet das Rohtopic aus');
 };

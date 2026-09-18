@@ -105,7 +105,7 @@ subtest 'Nur die am Geraet aktiven Meldewege erzeugen Zeilen' => sub {
 	my $hash = setup();
 	my $reading_list = discover($hash, status => 1);
 	unlike($reading_list, qr{\Qevents/rpc\E}, 'ohne rpc_ntf entsteht keine Ereigniszeile');
-	like($reading_list, qr{\Qstatus/switch:0\E}, 'mit status_ntf entsteht die Komponentenzeile');
+	like($reading_list, qr{\Qstatus/switch_0\E}, 'mit status_ntf entsteht die Komponentenzeile');
 
 	$hash = setup();
 	$reading_list = discover($hash, rpc => 1);

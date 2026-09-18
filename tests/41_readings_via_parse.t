@@ -111,7 +111,7 @@ subtest 'Ohne readingList schreibt das Modul die Readings selbst' => sub {
 subtest 'Ohne das Attribut bleibt alles beim Alten' => sub {
 	my $hash = setup();
 	my $reading_list = discover($hash);
-	like($reading_list, qr{\Q$id/status/switch_0:\E}, 'die readingList entsteht wie bisher');
+	like($reading_list, qr{\$DEVICETOPIC/status/switch_0:}, 'die readingList entsteht wie bisher');
 	isnt($main::modules{MQTT2_DISCOVERY}{Match}, '.*', 'der enge Match bleibt erhalten');
 };
 
