@@ -22,7 +22,7 @@ use MQTT2_Discovery::Mapper::Semantics ();
 use MQTT2_Discovery::Template ();
 use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
-use vars qw(%defs %attr %modules $readingFnAttributes);
+use vars qw(%defs %attr %modules %data $readingFnAttributes);
 
 our $MQTT2_DISCOVERY_VERSION = '0.9.11';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
@@ -114,6 +114,12 @@ sub MQTT2_DISCOVERY_process($$$$;$);
 
 sub MQTT2_DISCOVERY_Initialize($) {
 	my ($hash) = @_;
+	# Ein Fremdmodul traegt sich ein, statt in 10_MQTT2_DEVICE.pm namentlich zu
+	# stehen; dort genuegt dann der Aufruf des hinterlegten Namens. Die Ablage
+	# erfolgt in %data wie bei FHEMWEB und ausdruecklich nicht in %modules: Ein
+	# Schreibzugriff auf $modules{<noch nicht geladenes Modul>} erzeugt dort einen
+	# Eintrag ohne Match und ParseFn, an dem Dispatch spaeter stirbt.
+	$data{MQTT2_DEVICE}{SetExtensionsFn} = 'MQTT2_DISCOVERY_SetExtensions';
 	$hash->{DefFn} = 'MQTT2_DISCOVERY_Define';
 	$hash->{UndefFn} = 'MQTT2_DISCOVERY_Undef';
 	$hash->{GetFn} = 'MQTT2_DISCOVERY_Get';
@@ -127,6 +133,7 @@ sub MQTT2_DISCOVERY_Initialize($) {
 	# Match bleibt absichtlich prefixunabhaengig, da Prefixe je IODev konfiguriert sind.
 	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors|announce|online|events/rpc)|mqtt2_discovery/[^/\\x00]+/shelly/[a-f0-9]{16}/(?:info|config|status|components)/rpc|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
 	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 fhemConventions:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
+	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 setsViaHook:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
 	$modules{MQTT2_DISCOVERY}{defptr} ||= {};
 }
 
@@ -599,7 +606,41 @@ sub MQTT2_DISCOVERY_set_list($) {
 	my $select = @targets ? 'selectReadings:' . join(',', @targets) : 'selectReadings';
 	return "activate:noArg deactivate:noArg rebuildDevice $select rescan:noArg discoverShelly";
 }
+# Bedient die Set-Kommandos eines verwalteten MQTT2_DEVICE, ohne dass dort ein
+# setList-Attribut noetig ist: bei "?" ergaenzt die Funktion die Befehle in der
+# Auswahl, sonst fuehrt sie den gewaehlten Befehl aus. Fremde Devices reicht sie
+# unveraendert an SetExtensions weiter.
+sub MQTT2_DISCOVERY_SetExtensions($$@) {
+	my ($hash, $list, $name, $cmd, @a) = @_;
+	my ($discovery, $record) = MQTT2_DISCOVERY_runtimeRegistryRecord($name);
+	return SetExtensions($hash, $list, $name, $cmd, @a)
+		if ref($record) ne 'HASH' || ref($record->{hook_sets}) ne 'ARRAY';
+	my %sets = map { (($_->{name} // '') => $_) } @{ $record->{hook_sets} };
+	my $entry = defined($cmd) ? $sets{$cmd} : undef;
 
+	# Ohne passenden Befehl entscheidet SetExtensions, also auch bei "?".
+	if (!$entry) {
+		my $offered = join(' ', map {
+			$_->{name} . (defined($_->{spec}) && $_->{spec} ne '' ? ":$_->{spec}" : '')
+		} sort { ($a->{name} // '') cmp ($b->{name} // '') } @{ $record->{hook_sets} });
+		$list .= ($list eq '' ? '' : ' ') . $offered if $offered ne '';
+		return SetExtensions($hash, $list, $name, $cmd, @a);
+	}
+	my $payload = $entry->{kind} eq 'button' ? $entry->{payload}
+		: ref($entry->{mapping}) eq 'HASH' && defined($a[0]) ? $entry->{mapping}{ $a[0] } : undef;
+	return "Unbekannter Wert fuer $cmd" if !defined($payload);
+	my $error = MQTT2_DISCOVERY_gateway($discovery)->publish_mqtt(
+		$discovery->{IODev}, $entry->{topic}, $payload,
+	);
+	return $error if defined($error) && $error ne '';
+
+	# MQTT2_DEVICE setzt state nur fuer Befehle aus seiner eigenen setList; auf
+	# diesem Weg uebernimmt das Modul denselben Schritt.
+	MQTT2_DISCOVERY_gateway($discovery)->update_reading($defs{$name}, 'state',
+		$cmd . (@a ? ' ' . join(' ', @a) : ''), 1) if $defs{$name};
+	MQTT2_DISCOVERY_log($discovery, 3, "set $name $cmd ueber den Hook ausgefuehrt");
+	return undef;
+}
 # Verteilt die erlaubten Set-Kommandos auf Aktivierung, Deaktivierung oder Neuaufbau.
 sub MQTT2_DISCOVERY_Set($@) {
 	my ($hash, @arguments) = @_;
@@ -2689,6 +2730,24 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	@reading_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		$prepared_readings, $render_device_topic, $reserved_readings, \%runtime_references,
 	) };
+
+	# Mit setsViaHook entsteht kein setList-Attribut mehr: Die Befehle liegen
+	# strukturiert in der Registry und werden ueber den Hook angeboten und
+	# ausgefuehrt. Nicht unterstuetzte Befehlsarten bleiben im Attribut.
+	my $via_hook = MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'setsViaHook', 0)
+		&& !grep {
+			ref($_) ne 'HASH' || ($_->{kind} // '') !~ /^(?:button|choice)$/
+		} @set_entries;
+	if ($via_hook) {
+		$record->{hook_sets} = [ map { {
+			name => $_->{name}, spec => $_->{spec}, kind => $_->{kind}, topic => $_->{topic},
+			(defined($_->{payload}) ? (payload => $_->{payload}) : ()),
+			(ref($_->{mapping}) eq 'HASH' ? (mapping => { %{ $_->{mapping} } }) : ()),
+		} } @set_entries ];
+		@set_entries = ();
+	} else {
+		delete $record->{hook_sets};
+	}
 	@set_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		\@set_entries, $render_device_topic, undef, \%runtime_references,
 	) };
