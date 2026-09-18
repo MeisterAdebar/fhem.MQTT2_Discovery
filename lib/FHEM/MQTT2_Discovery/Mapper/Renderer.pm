@@ -16,6 +16,9 @@ use MQTT2_Discovery::Template ();
 # (Attribut topicConversion, Default 1). Die erzeugten readingList-Zeilen muessen
 # deshalb den umgewandelten Namen treffen; das Modul setzt den Schalter je IODev.
 our $TOPIC_CONVERSION = 0;
+# Mit availabilityReading none entfaellt das verdichtete sichtbare Reading;
+# Quellen und Regeln bleiben als interne Readings erhalten.
+our $AVAILABILITY_VISIBLE = 1;
 
 sub _regex_literal {
 	my ($value) = @_;
@@ -601,7 +604,7 @@ sub _render_availability_groups {
 
 	for my $topic (sort keys %topics) {
 		my $configuration = {
-			reading => $availability_reading,
+			reading => ($AVAILABILITY_VISIBLE ? $availability_reading : ''),
 			sources => [ map { $sources{$_} } sort keys %{ $topics{$topic} } ],
 			policies => \@policies,
 		};
@@ -613,7 +616,8 @@ sub _render_availability_groups {
 			kind => 'availability_group', role => 'availability',
 			name => $availability_reading, reserved_reading => 1, topic => $topic,
 			names => [
-				$availability_reading, sort(keys %{ $topics{$topic} }), sort(keys %policies),
+				($AVAILABILITY_VISIBLE ? $availability_reading : ()),
+				sort(keys %{ $topics{$topic} }), sort(keys %policies),
 			],
 			configuration => $configuration,
 			line => _regex($topic, $device_topic, undef) . " $expression",

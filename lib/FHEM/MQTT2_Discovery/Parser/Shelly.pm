@@ -73,7 +73,10 @@ sub _entity {
 		value_template => $value_template, state_reading_name => $name,
 		json_autocreate => 0,
 		availability => [
-			{ topic => "$prefix/online", payload_available => 'true', payload_not_available => 'false' },
+			# Das online-Topic ist der letzte Wille des Geraets; die Rolle macht daraus
+			# ein sichtbares Reading lwt, wie in FHEM ueblich.
+			{ topic => "$prefix/online", payload_available => 'true', payload_not_available => 'false',
+				role => 'lwt' },
 			{ topic => $context->{state_topic}, value_template => '{{ value_json.src }}',
 				payload_available => $context->{info}{id}, payload_not_available => 'offline' },
 		],
