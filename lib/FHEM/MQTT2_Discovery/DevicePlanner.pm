@@ -23,9 +23,12 @@ sub device_topic {
 
 	# Availability-Topics liegen haeufig ausserhalb des eigentlichen
 	# Geraetebaums und duerfen das gemeinsame Prefix nicht verfaelschen.
+	# Die eigenen Antworttopics des Moduls liegen in seinem Namensraum und wuerden
+	# den gemeinsamen Geraetestamm sonst vollstaendig aufloesen.
 	my @topics = stable_unique(map { $_->{topic} }
 		grep { ref($_) eq 'HASH' && ($_->{role} // '') ne 'availability'
-			&& defined($_->{topic}) && !ref($_->{topic}) && $_->{topic} ne '' }
+			&& defined($_->{topic}) && !ref($_->{topic}) && $_->{topic} ne ''
+			&& $_->{topic} !~ m{^mqtt2_discovery/} }
 		@{ $entries || [] });
 	my @availability_topics = stable_unique(map { $_->{topic} }
 		grep { ref($_) eq 'HASH' && ($_->{role} // '') eq 'availability'
