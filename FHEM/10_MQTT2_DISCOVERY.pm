@@ -132,9 +132,7 @@ sub MQTT2_DISCOVERY_Initialize($) {
 	$hash->{FW_deviceOverview} = 1;
 	# Match bleibt absichtlich prefixunabhaengig, da Prefixe je IODev konfiguriert sind.
 	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors|announce|online|events/rpc)|mqtt2_discovery/[^/\\x00]+/shelly/[a-f0-9]{16}/(?:info|config|status|components)/rpc|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
-	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 fhemConventions:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
-	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 setsViaHook:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
-	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 readingsViaParse:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
+	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 fhemConventions:0,1 setsViaHook:0,1 readingsViaParse:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
 	$modules{MQTT2_DISCOVERY}{defptr} ||= {};
 }
 
