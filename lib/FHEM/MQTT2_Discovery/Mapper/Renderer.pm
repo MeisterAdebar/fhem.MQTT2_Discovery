@@ -12,6 +12,11 @@ use MQTT2_Discovery::Template ();
 
 # Alle Renderer behandeln Discovery-Daten als untrusted Input. Escaping und
 # Validierung passieren deshalb hier zentral, bevor FHEM-Attributtext entsteht.
+# MQTT2_SERVER und MQTT2_CLIENT ersetzen im empfangenen Topic ':' durch '_'
+# (Attribut topicConversion, Default 1). Die erzeugten readingList-Zeilen muessen
+# deshalb den umgewandelten Namen treffen; das Modul setzt den Schalter je IODev.
+our $TOPIC_CONVERSION = 0;
+
 sub _regex_literal {
 	my ($value) = @_;
 	$value =~ s{([\\.^$|()\[\]{}*+?])}{\\$1}g;
@@ -47,6 +52,13 @@ sub _mqtt_filter_regex {
 sub _regex {
 	my ($topic, $device_topic, $payload) = @_;
 	my $regex;
+
+	# Empfangene Topics erreichen FHEM nur in umgewandelter Form; Publish-Topics
+	# der setList bleiben davon unberuehrt, sie laufen nicht ueber diesen Weg.
+	if ($TOPIC_CONVERSION && defined($topic)) {
+		$topic =~ s/:/_/g;
+		$device_topic =~ s/:/_/g if defined($device_topic);
+	}
 
 	# Nur echte Topic-Prefixe werden durch $DEVICETOPIC ersetzt; aehnlich
 	# beginnende Segmente duerfen nicht versehentlich zusammenfallen.

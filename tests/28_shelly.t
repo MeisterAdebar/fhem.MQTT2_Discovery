@@ -244,7 +244,7 @@ subtest 'SERVER und CLIENT funktionieren bis zu den echten Runtime-Bindings' => 
 		is(dispatch_message('mqtt', 'shelly-client', 'haus/licht/events/rpc', '{"src":"shelly1g4-aabbccddeeff","method":"NotifyStatus","params":{}}'),
 			['MQTT2_DISCOVERY', 'MQTT2_DEVICE', 'MQTT_GENERIC_BRIDGE'], 'bekannte RPC-Telemetrie bleibt im normalen Dispatch');
 		is(scalar(@published), $before_publish, 'bekannte RPC-Telemetrie erzeugt keine neuen Abfragen');
-		my $component = readings_for($target, 'haus/licht/status/switch:0', { output => JSON::PP::true });
+		my $component = readings_for($target, 'haus/licht/status/switch_0', { output => JSON::PP::true });
 		is($component->{switch_0}, 'true', 'Komponentenstatus verwendet denselben Readingnamen');
 		my ($set) = grep { /^switch_0:/ } split /\n/, attr_value($target, 'setList');
 		my ($reference) = ($set // '') =~ /'(r_[a-f0-9]+)'/;
