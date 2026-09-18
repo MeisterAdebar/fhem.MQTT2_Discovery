@@ -105,6 +105,18 @@ sub _semantic_display_name {
 }
 
 # Baut eine einheitliche Ein/Aus-Capability aus FHEM-Set- und MQTT-Zustandswerten.
+# Gleiche Bedingung wie die Wertabbildung im Mapper: Ist das Reading bereits auf
+# on und off abgebildet, waere eine zweite Abbildung auf die Rohwerte irrefuehrend.
+sub _read_is_mapped {
+	my ($entity, $component) = @_;
+	return 0 if !$MQTT2_Discovery::Mapper::FHEM_CONVENTIONS;
+	return 0 if ref($entity) ne 'HASH';
+	return 0 if ($component // '') !~ /^(?:switch|binary_sensor|light)$/;
+	my ($on, $off) = ($entity->{state_on}, $entity->{state_off});
+	return 0 if !defined($on) || ref($on) || !defined($off) || ref($off);
+	return "$on" ne "$off" ? 1 : 0;
+}
+
 sub _power_capability {
 	my (%args) = @_;
 	my %capability = (kind => 'boolean');
@@ -117,6 +129,8 @@ sub _power_capability {
 	$capability{inactiveValue} = $inactive;
 	my $state_on = defined($args{state_on}) ? $args{state_on} : ($args{payload_on} // 'ON');
 	my $state_off = defined($args{state_off}) ? $args{state_off} : ($args{payload_off} // 'OFF');
+
+	return \%capability if $args{mapped};
 
 	# Nur zwei unterschiedliche skalare Readingwerte ergeben eine eindeutige
 	# Abbildung auf die vom FHEM-Setter angebotenen Werte on und off.
@@ -311,6 +325,9 @@ sub _semantic_entity {
 			my ($on, $off) = $component eq 'device_tracker'
 				? ($entity->{payload_home} // 'home', $entity->{payload_not_home} // 'not_home')
 				: ($entity->{payload_on} // 'ON', $entity->{payload_off} // 'OFF');
+
+			# Das Reading liefert bereits die abgebildeten Werte.
+			($on, $off) = ('on', 'off') if _read_is_mapped($entity, $component);
 			$capabilities->{state} = {
 				read => $read_name{$reading_name},
 				options => [$on, $off], activeValue => $on, inactiveValue => $off,
@@ -324,6 +341,7 @@ sub _semantic_entity {
 			options => _set_choice_values($sets, $set_name),
 			state_on => $entity->{state_on}, state_off => $entity->{state_off},
 			payload_on => $entity->{payload_on}, payload_off => $entity->{payload_off},
+			mapped => _read_is_mapped($entity, 'switch'),
 		) if defined($read_name{$reading_name}) || $has_set{$set_name};
 	} elsif ($component eq 'button') {
 		my $set_name = _single_set_name($sets, $reading_name);

@@ -314,6 +314,24 @@ sub _command_set_name {
 sub render_entries { return MQTT2_Discovery::Mapper::Renderer::render_entries(@_); }
 
 
+# Schaltbar ueber das Attribut fhemConventions am Discovery-Device; ohne das
+# Attribut bleiben Readingnamen und -werte unveraendert.
+our $FHEM_CONVENTIONS = 0;
+
+# Liefert die Abbildung der angekuendigten Zustandswerte auf die FHEM-Schreibweise.
+# Nur ausdruecklich erklaerte Zustandswerte werden abgebildet; payload_on und
+# payload_off beschreiben bei Home Assistant und Tasmota den Befehlspayload.
+sub _boolean_value_map {
+	my ($entity, $component) = @_;
+	return undef if !$FHEM_CONVENTIONS;
+	return undef if ref($entity) ne 'HASH';
+	return undef if ($component // '') !~ /^(?:switch|binary_sensor|light)$/;
+	my ($on, $off) = ($entity->{state_on}, $entity->{state_off});
+	return undef if !defined($on) || ref($on) || !defined($off) || ref($off);
+	return undef if "$on" eq "$off" || "$on" =~ /[\x00-\x1f]/ || "$off" =~ /[\x00-\x1f]/;
+	return { "$on" => 'on', "$off" => 'off' };
+}
+
 # Erzeugt einen abstrakten Reading-Eintrag aus Topic, Template und Zielnamen.
 sub _reading {
 	my ($topic, $template, $name, $payload, $json_autocreate, $json_reading_name, $semantic_name) = @_;
@@ -630,6 +648,24 @@ sub _map_canonical_entity {
 
 	_add_supplemental_signals(\@readings, \@warnings, $extensions->{supplemental_signals});
 
+	# Aus den angekuendigten Zustandswerten entsteht eine Abbildung auf on und off,
+	# damit Reading und Setter denselben Wert verwenden.
+	my $value_map = _boolean_value_map($entity, $component);
+	if (ref($value_map) eq 'HASH') {
+
+		for my $reading (@readings) {
+			next if ref($reading) ne 'HASH' || ($reading->{name} // '') ne $state_reading_name;
+			$reading->{value_map} = { %$value_map };
+
+			# Mit Abbildung ist die kompakte json2nameValue-Form nicht mehr moeglich.
+			if (($reading->{kind} // '') ne 'reading') {
+				$reading->{kind} = 'reading';
+				delete $reading->{json_key};
+			}
+		}
+
+	}
+
 	# JSON-Autocreate kann den sichtbaren Reading-Namen veraendern. Set-Befehle
 	# muessen den danach tatsaechlich vorhandenen Namen verwenden.
 	my %primary_read_name = MQTT2_Discovery::Mapper::Semantics::entry_read_names(\@readings);
@@ -645,6 +681,10 @@ sub _map_canonical_entity {
 		_add_entry(\@sets, \@warnings,
 			_choice_command($command_set_name, 'on,off', $entity->{command_topic}, \%mapping,
 				undef, $entity->{command_codec}), 'switch');
+
+		# Kennzeichnet den Hauptschalter; ein binaerer Nebenbefehl wie mute einer
+		# Mediawiedergabe ist kein Kanal und darf state nicht beanspruchen.
+		$sets[-1]{primary_switch} = 1 if @sets && ref($sets[-1]) eq 'HASH';
 		push @set_state, $command_set_name;
 	} elsif ($component eq 'button') {
 		_add_entry(\@sets, \@warnings,

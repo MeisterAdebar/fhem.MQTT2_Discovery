@@ -1,6 +1,38 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+# Msg-SHA256: 8024195c2f9b146a2310bb11071b630348a78dd8eeb7a8c0f7a9fe7d72d51cca
+- change: MQTT2_DISCOVERY: FHEM-Konventionen fuer einkanalige Geraete hinter
+  dem Attribut fhemConventions
+  - Befund 1: Das erzeugte Reading eines Shelly-Schalters steht auf false oder
+    true, die setList bietet aber switch_0:on,off an. state_on und state_off
+    stehen in der Entity, wirken jedoch nur auf die Semantic-Metadaten und
+    nicht auf den Readingwert.
+  - Befund 2: Bei einem Geraet mit genau einem Kanal heisst das Zustandsreading
+    in FHEM state, geschaltet wird mit on und off, so machen es auch die
+    mitgelieferten attrTemplates. MQTT2_DEVICE_Set schreibt ohne setStateList
+    das Reading state auf den Kommandonamen; mit einem Setter switch_0 steht
+    dort nach jedem Schalten switch_0, bis eine Rueckmeldung eintrifft, und
+    dauerhaft, wenn weder status_ntf noch rpc_ntf aktiv ist. Ausserdem greifen
+    ohne on und off die SetExtensions nicht, es gibt also kein on-for-timer und
+    kein blink.
+  - Loesung: Das neue Attribut fhemConventions (Vorgabe 0) schaltet beides
+    frei. Aus state_on und state_off entsteht eine Wertabbildung, die als
+    deklaratives Feld bis in den Runtime-Deskriptor reicht und nach der
+    Template-Auswertung angewandt wird; unbekannte Werte bleiben unveraendert.
+    Bei genau einem als Hauptschalter gekennzeichneten Kanal wird das
+    Zustandsreading nach state umbenannt und der Choice-Setter durch on:noArg
+    und off:noArg ersetzt.
+  - Abgrenzung: Die Kennzeichnung erfolgt nur fuer die switch-Entity, damit ein
+    binaerer Nebenbefehl wie mute einer Mediawiedergabe state nicht
+    beansprucht. Abgebildet werden nur ausdruecklich erklaerte state_on und
+    state_off, nicht payload_on und payload_off, damit Home Assistant und
+    Tasmota unveraendert bleiben.
+  - Bekannte Grenze: Die Abbildung entsteht beim Mapping, ein rebuildDevice
+    allein genuegt nach dem Einschalten des Attributs deshalb nicht; erst die
+    naechste Erkennung bildet ab.
+  - Tests: neue Datei tests/36_fhem_conventions.t mit und ohne Attribut,
+    geprueft werden Readingname, Setternamen und die Abbildung beider
+    Zustaende.
 - change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
   behoben.
   - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.

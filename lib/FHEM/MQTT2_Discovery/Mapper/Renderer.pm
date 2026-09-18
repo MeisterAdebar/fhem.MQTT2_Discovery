@@ -298,6 +298,7 @@ sub _render_runtime_reading {
 		runtime => ($entry->{template_context} || '') eq 'trigger'
 			? 'triggerReading' : 'reading',
 		template => $entry->{template}, name => $entry->{name},
+		(ref($entry->{value_map}) eq 'HASH' ? (map => $entry->{value_map}) : ()),
 	}, $references);
 	return defined($expression) ? "$regex $expression" : undef;
 }
@@ -403,6 +404,7 @@ sub _render_topic_runtime {
 		push @readings, {
 			name => $entry->{name}, template => $entry->{template},
 			(exists($entry->{items}) ? (items => $entry->{items}) : ()),
+			(ref($entry->{value_map}) eq 'HASH' ? (map => $entry->{value_map}) : ()),
 			(($entry->{template_context} || '') eq 'trigger' ? (context => 'trigger') : ()),
 		};
 	}
@@ -430,7 +432,13 @@ sub render_entry {
 		return _render_topic_runtime($entry->{topic}, [$entry], undef, $device_topic, $references)
 			if exists($entry->{items});
 		my $regex = _regex($entry->{topic}, $device_topic, $entry->{payload});
-		return "$regex $entry->{name}" if !defined($entry->{template}) || $entry->{template} eq '';
+
+		# Ohne Template liefert erst die Runtime die abgebildeten Werte.
+		if (!defined($entry->{template}) || $entry->{template} eq '') {
+			return "$regex $entry->{name}" if ref($entry->{value_map}) ne 'HASH';
+			return _render_runtime_reading({ %$entry, template => '{{ value }}' },
+				$device_topic, $references);
+		}
 		return _render_runtime_reading($entry, $device_topic, $references);
 	}
 
