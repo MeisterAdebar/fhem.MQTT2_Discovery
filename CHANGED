@@ -1,6 +1,27 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+# Msg-SHA256: 367beb78674c08e45b306de30930fdb584777df653147f36863bcaf6fbbd5771
+- change: MQTT2_DISCOVERY: Letzter Wille eines Shelly erscheint als sichtbares
+  Reading lwt
+  - Befund: Availability und letzter Wille sind zwei verschiedene Aussagen,
+    tragen im erzeugten Device aber denselben Namen. Bei einem direkt am Broker
+    haengenden Geraet ist die Quelle der eigene letzte Wille; bei zigbee2mqtt
+    dagegen ist <device>/availability eine von der Bruecke errechnete
+    Erreichbarkeit, waehrend der letzte Wille der Bruecke gehoert
+    (bridge/state).
+  - Folge: In FHEM heisst das eine seit jeher lwt und das andere availability.
+    Im Discovery-Device war der Rohwert zudem nicht mehr sichtbar, die Quellen
+    lagen als .availability_<hash> versteckt.
+  - Loesung: Eine Availability-Quelle kann jetzt eine Rolle tragen. Der
+    Shelly-Adapter kennzeichnet <prefix>/online als lwt, weil er diese Quelle
+    selbst baut; bei Home-Assistant-Discovery steht die Art nicht im Payload
+    und wird bewusst nicht am Topicnamen geraten. Quellen mit Rolle erhalten
+    ein sichtbares, sprechendes Reading, alle uebrigen bleiben unveraendert
+    intern.
+  - Das verdichtete Reading bleibt daneben bestehen, es traegt zusaetzlich den
+    Zustand der Brokerverbindung.
+  - Tests: neue Datei tests/37_lwt_rolle.t prueft online und offline ueber das
+    lwt-Reading und das weiterhin vorhandene verdichtete Reading.
 - change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
   behoben.
   - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.

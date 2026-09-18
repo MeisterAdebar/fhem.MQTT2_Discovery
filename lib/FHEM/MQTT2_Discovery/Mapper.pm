@@ -387,7 +387,11 @@ sub _availability_source {
 		topic => $topic, template => $template,
 		payload_available => "$available",
 		payload_not_available => "$unavailable",
-		source_reading => '.availability_' . stable_suffix($signature, 8),
+		# Nur ein Adapter, der die Quelle selbst baut, kennt ihre Art. Ein erklaerter
+		# letzter Wille bekommt deshalb das in FHEM uebliche Reading lwt, alle
+		# uebrigen Quellen bleiben wie bisher intern und versteckt.
+		source_reading => ($source->{role} // '') eq 'lwt'
+			? 'lwt' : '.availability_' . stable_suffix($signature, 8),
 	};
 }
 
