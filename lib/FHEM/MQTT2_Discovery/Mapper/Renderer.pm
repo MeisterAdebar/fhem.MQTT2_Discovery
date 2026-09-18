@@ -20,6 +20,7 @@ our $TOPIC_CONVERSION = 0;
 # Quellen und Regeln bleiben als interne Readings erhalten.
 our $AVAILABILITY_VISIBLE = 1;
 
+
 sub _regex_literal {
 	my ($value) = @_;
 	$value =~ s{([\\.^$|()\[\]{}*+?])}{\\$1}g;
