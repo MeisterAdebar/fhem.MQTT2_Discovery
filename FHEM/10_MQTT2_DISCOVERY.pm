@@ -2593,6 +2593,26 @@ sub MQTT2_DISCOVERY_prefer_device_discovery_mappings($) {
 # Ein Geraet mit genau einem schaltbaren Kanal folgt der FHEM-Konvention: Der
 # Zustand gehoert nach state, geschaltet wird mit on und off. Damit schreibt auch
 # MQTT2_DEVICE_Set beim Setzen denselben Wert, den die Rueckmeldung liefert.
+# Schaltet die beim Mapping mitgefuehrte Wertabbildung scharf.
+sub MQTT2_DISCOVERY_enable_boolean_maps($) {
+	my ($readings) = @_;
+	my $count = 0;
+
+	for my $reading (@$readings) {
+		next if ref($reading) ne 'HASH' || ref($reading->{boolean_map}) ne 'HASH';
+		$reading->{value_map} = { %{ $reading->{boolean_map} } };
+
+		# Mit Abbildung ist die kompakte json2nameValue-Form nicht mehr moeglich.
+		if (($reading->{kind} // '') ne 'reading') {
+			$reading->{kind} = 'reading';
+			delete $reading->{json_key};
+		}
+		$count++;
+	}
+
+	return $count;
+}
+
 sub MQTT2_DISCOVERY_single_channel_state($$) {
 	my ($readings, $sets) = @_;
 	my @switches = grep {
@@ -2700,8 +2720,23 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	my $fhem_conventions = MQTT2_DISCOVERY_gateway($hash)->attr_value(
 		$hash->{NAME}, 'fhemConventions', 0,
 	) ? 1 : 0;
-	MQTT2_DISCOVERY_single_channel_state(\@reading_entries, \@set_entries)
-		if $fhem_conventions;
+	if ($fhem_conventions) {
+		MQTT2_DISCOVERY_enable_boolean_maps(\@reading_entries);
+		my $renamed = MQTT2_DISCOVERY_single_channel_state(\@reading_entries, \@set_entries);
+
+		# Der alte Readingname wird nicht mehr beschrieben und bliebe sonst mit
+		# seinem letzten Wert sichtbar stehen.
+		if ($renamed && ref($defs{$name}{READINGS}) eq 'HASH') {
+
+			for my $reading (@reading_entries) {
+				next if ref($reading) ne 'HASH' || ($reading->{semantic_name} // '') eq '';
+				my $old = $reading->{semantic_name};
+				next if $old eq ($reading->{name} // '') || !exists($defs{$name}{READINGS}{$old});
+				MQTT2_DISCOVERY_gateway($hash)->delete_reading($defs{$name}, $old);
+			}
+
+		}
+	}
 	# Im Dialog abgewaehlte Readings entstehen gar nicht erst, weder als eigene
 	# Zeile noch in den Sammelzeilen fuer die Abfrageantwort und die Ereignisse.
 	my %ignored_entities = map { ($_ => 1) } MQTT2_DISCOVERY_ignored_entities($hash, $record);

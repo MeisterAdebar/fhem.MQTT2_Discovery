@@ -1,4 +1,4 @@
-UPD 2026-09-18_18:02:29 175849 FHEM/10_MQTT2_DISCOVERY.pm
+UPD 2026-09-18_18:11:15 176978 FHEM/10_MQTT2_DISCOVERY.pm
 UPD 2026-09-18_12:50:07 2213 lib/FHEM/MQTT2_Discovery/ActionPlan.pm
 UPD 2026-09-18_17:58:38 9896 lib/FHEM/MQTT2_Discovery/DevicePlanner.pm
 UPD 2026-09-18_17:59:12 14488 lib/FHEM/MQTT2_Discovery/FHEMGateway.pm
@@ -8,7 +8,7 @@ UPD 2026-09-18_12:50:07 792 lib/FHEM/MQTT2_Discovery/Format/Sonos2mqtt.pm
 UPD 2026-09-18_12:50:07 798 lib/FHEM/MQTT2_Discovery/Format/Tasmota.pm
 UPD 2026-09-18_13:25:23 2438 lib/FHEM/MQTT2_Discovery/FormatRegistry.pm
 UPD 2026-09-18_12:50:07 4043 lib/FHEM/MQTT2_Discovery/Helper.pm
-UPD 2026-09-18_17:58:38 49973 lib/FHEM/MQTT2_Discovery/Mapper.pm
+UPD 2026-09-18_18:11:15 49938 lib/FHEM/MQTT2_Discovery/Mapper.pm
 UPD 2026-09-18_12:50:07 1754 lib/FHEM/MQTT2_Discovery/Mapper/Common.pm
 UPD 2026-09-18_12:50:07 12796 lib/FHEM/MQTT2_Discovery/Mapper/NameResolver.pm
 UPD 2026-09-18_17:59:13 30538 lib/FHEM/MQTT2_Discovery/Mapper/Renderer.pm
