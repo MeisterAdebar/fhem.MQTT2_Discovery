@@ -1,6 +1,21 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 8024195c2f9b146a2310bb11071b630348a78dd8eeb7a8c0f7a9fe7d72d51cca
+# Msg-SHA256: 3b265388975eecfe24afcd1ab5c8eadd9b7674890ed4d9c672943ffa72e940f8
+- change: MQTT2_DISCOVERY: Wertabbildung wird beim Anwenden scharf geschaltet
+  statt beim Mappen
+  - Befund: Die Abbildung auf on und off entstand beim Mapping. Nach dem Setzen
+    von fhemConventions blieb der Zustand deshalb roh, bis eine neue Erkennung
+    lief; ein rebuildDevice benannte das Reading zwar nach state um, liess aber
+    den Wert auf true oder false stehen.
+  - Loesung: Die moegliche Abbildung wird beim Mapping nur noch mitgefuehrt und
+    erst beim Anwenden scharf geschaltet. Damit genuegt nach dem Umschalten des
+    Attributs ein rebuildDevice.
+  - Ausserdem wird der alte Readingname beim Umbenennen entfernt; er wurde
+    nicht mehr beschrieben und blieb sonst mit seinem letzten Wert sichtbar
+    stehen.
+  - Geprueft am Shelly 1 Mini Gen3: Nach attr fhemConventions 1 und
+    rebuildDevice steht state sofort auf off, das fruehere switch_0 ist
+    verschwunden, und Schalten folgt in beide Richtungen.
 - change: MQTT2_DISCOVERY: FHEM-Konventionen fuer einkanalige Geraete hinter
   dem Attribut fhemConventions
   - Befund 1: Das erzeugte Reading eines Shelly-Schalters steht auf false oder

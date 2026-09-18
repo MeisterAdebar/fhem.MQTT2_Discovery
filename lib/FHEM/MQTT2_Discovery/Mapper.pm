@@ -323,7 +323,6 @@ our $FHEM_CONVENTIONS = 0;
 # payload_off beschreiben bei Home Assistant und Tasmota den Befehlspayload.
 sub _boolean_value_map {
 	my ($entity, $component) = @_;
-	return undef if !$FHEM_CONVENTIONS;
 	return undef if ref($entity) ne 'HASH';
 	return undef if ($component // '') !~ /^(?:switch|binary_sensor|light)$/;
 	my ($on, $off) = ($entity->{state_on}, $entity->{state_off});
@@ -650,18 +649,15 @@ sub _map_canonical_entity {
 
 	# Aus den angekuendigten Zustandswerten entsteht eine Abbildung auf on und off,
 	# damit Reading und Setter denselben Wert verwenden.
+	# Die moegliche Abbildung wird immer mitgefuehrt, aber erst beim Anwenden
+	# scharf geschaltet. Dadurch genuegt nach dem Setzen des Attributs ein
+	# rebuildDevice, es braucht keine neue Erkennung.
 	my $value_map = _boolean_value_map($entity, $component);
 	if (ref($value_map) eq 'HASH') {
 
 		for my $reading (@readings) {
 			next if ref($reading) ne 'HASH' || ($reading->{name} // '') ne $state_reading_name;
-			$reading->{value_map} = { %$value_map };
-
-			# Mit Abbildung ist die kompakte json2nameValue-Form nicht mehr moeglich.
-			if (($reading->{kind} // '') ne 'reading') {
-				$reading->{kind} = 'reading';
-				delete $reading->{json_key};
-			}
+			$reading->{boolean_map} = { %$value_map };
 		}
 
 	}
