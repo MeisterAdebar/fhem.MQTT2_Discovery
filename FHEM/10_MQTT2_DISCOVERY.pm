@@ -2425,6 +2425,12 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 		$matching_device_topic, $record->{cid},
 	);
 	my $initial_reading_names = MQTT2_DISCOVERY_expected_reading_names($prepared_readings);
+	# Das IODev wandelt ':' in empfangenen Topics zu '_'. Die erzeugten
+	# readingList-Zeilen muessen denselben Namen treffen.
+	local $MQTT2_Discovery::Mapper::Renderer::TOPIC_CONVERSION =
+		MQTT2_DISCOVERY_gateway($hash)->attr_value(
+			$hash->{IODevName} // '', 'topicConversion', 1,
+		) ? 1 : 0;
 	@reading_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		$prepared_readings, $render_device_topic, $reserved_readings, \%runtime_references,
 	) };

@@ -1,6 +1,27 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+# Msg-SHA256: 768786092c119950c064f1acce94597bb3ea920c08e9fe30fbc72fb76a80b9d0
+- change: MQTT2_DISCOVERY: Doppelpunkt im Komponenten-Topic an topicConversion
+  angepasst
+  - Befund: Parser/Shelly.pm erzeugt das state_topic <prefix>/status/switch:0,
+    MQTT2_SERVER und MQTT2_CLIENT stellen aber <prefix>/status/switch_0 zu
+    (Attribut topicConversion, Default 1, 00_MQTT2_SERVER.pm Zeile 635); die
+    erzeugte readingList-Zeile trifft deshalb nie.
+  - Folge: Schaltzustand und Temperatur bleiben auf dem Stand der
+    Initialabfrage; betroffen sind alle Komponenten mit :<id>, also auch input,
+    cct und bthome. Mit rpc_ntf faellt es nicht auf, weil events/rpc keinen
+    Doppelpunkt im Topic hat.
+  - Nachweis an einem Shelly 1 Mini Gen3 mit FW 2.0.0: dieselbe Nachricht auf
+    status/wifi aktualisiert das Reading, auf status/switch:0 aendert sie
+    nichts.
+  - Loesung: Renderer::_regex wandelt Topic und devicetopic um, gesteuert ueber
+    $TOPIC_CONVERSION; das Modul setzt den Schalter vor dem Rendern aus dem
+    Attribut des gebundenen IODev. Betroffen sind nur readingList und
+    Availability, die Publish-Topics der setList behalten den Doppelpunkt.
+  - Tests: neue Datei tests/31_topic_conversion.t mit aktivem und
+    abgeschaltetem topicConversion sowie unveraenderten Publish-Topics; in
+    28_shelly.t und 29_shelly_cct_blu.t fuettern die Faelle jetzt das
+    umgewandelte Topic, wie es ein MQTT2_SERVER zustellt.
 - change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
   behoben.
   - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.
