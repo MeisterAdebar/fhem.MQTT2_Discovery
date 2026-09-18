@@ -22,7 +22,7 @@ my @published;
 sub config {
 	return {
 		sys => { device => { name => $target } },
-		mqtt => { topic_prefix => $prefix, rpc_ntf => JSON::PP::true },
+		mqtt => { topic_prefix => $prefix, rpc_ntf => JSON::PP::true, status_ntf => JSON::PP::true },
 		'cct:0' => { id => 0, ct_range => [2200, 7000] },
 	};
 }
