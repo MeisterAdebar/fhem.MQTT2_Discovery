@@ -95,6 +95,17 @@ subtest 'Ohne readingList schreibt das Modul die Readings selbst' => sub {
 	my ($record) = values %{ main::MQTT2_DISCOVERY_registry($hash)->{devices} };
 	ok(scalar(@{ $record->{parse_readings} || [] }), 'die Zeilen liegen in der Registry');
 
+	# Die Muster stehen mit aufgeloestem Geraetestamm in der Registry, das Zielgeraet
+	# braucht dafuer kein devicetopic.
+	ok(!grep({ $_->{regexp} =~ /\$DEVICETOPIC/ } @{ $record->{parse_readings} }),
+		'kein Muster verweist auf das devicetopic-Attribut');
+
+	# Das eigene Antworttopic wird nicht als Text gespeichert, sondern aus dem
+	# aktuellen Instanznamen zusammengesetzt; damit uebersteht es ein rename.
+	ok(!grep({ $_->{regexp} =~ m{^mqtt2_discovery/} } @{ $record->{parse_readings} }),
+		'das eigene Antworttopic steht nicht als Muster in der Registry');
+	like($record->{reply_key}, qr/^[a-f0-9]{16}$/, 'stattdessen ist der Geraeteschluessel gemerkt');
+
 	# Eine gewoehnliche Nutzdatennachricht muss die Readings aktualisieren.
 	dispatch_message('mqtt', 'shelly-client', "$id/status/switch_0",
 		encode_json({ output => JSON::PP::false, temperature => { tC => 21.5 } }));

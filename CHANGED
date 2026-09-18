@@ -1,6 +1,27 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 81ebb5e25c2792ce78325f7593f9a67e7fdcad6c71e89816b701d4af182f2573
+# Msg-SHA256: a134da4d43f2674008809c550ae5553ee1bdc1b626d130a9e1580610a2c4677a
+- change: MQTT2_DISCOVERY: Gespeicherte Muster ohne devicetopic und ohne das
+  eigene Antworttopic
+  - Befund: Die in der Registry abgelegten Muster enthielten $DEVICETOPIC und
+    wurden beim Auswerten aus dem Attribut des Zielgeraets aufgeloest. Damit
+    hing die Auswertung an einem Attribut, das nur fuer die readingList von
+    MQTT2_DEVICE gedacht ist und das jeder aendern kann.
+  - Zweiter Befund: Das eigene Antworttopic des Moduls stand als Text in der
+    Registry und enthielt den Namen der Discovery-Instanz. Nach einem rename
+    passte es bis zur naechsten Erkennung nicht mehr.
+  - Loesung: Der Geraetestamm wird beim Speichern aufgeloest, und das
+    Antworttopic wird gar nicht gespeichert, sondern beim Auswerten aus dem
+    aktuellen Instanznamen und dem gemerkten Geraeteschluessel zusammengesetzt.
+  - Zusaetzlich verwaltet das Modul am Zielgeraet kein devicetopic mehr, wenn
+    weder readingList noch setList erzeugt werden. Ein vorhandenes devicetopic
+    bleibt unangetastet, damit manuelle Zeilen weiter arbeiten.
+  - Geprueft am Shelly 1 Mini Gen3: Am Zielgeraet steht nur noch autocreate;
+    Schalten und laufende Werte funktionieren unveraendert, auch nach einem
+    rename des Discovery-Devices.
+  - Tests: tests/41_readings_via_parse.t prueft zusaetzlich, dass kein Muster
+    auf devicetopic verweist, dass das Antworttopic nicht als Text gespeichert
+    ist und dass stattdessen der Geraeteschluessel gemerkt wird.
 - change: MQTT2_DISCOVERY: Readings ohne readingList: das Modul wertet die
   Nutzdaten in ParseFn selbst aus
   - Anlass: Beta-Users These im FHEM-Forum (Thread 145198), dass ein Shelly
