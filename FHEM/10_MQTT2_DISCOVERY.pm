@@ -2368,6 +2368,7 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	my $generated_device_topic = MQTT2_Discovery::DevicePlanner::device_topic($record, \@all_entries);
 	my @device_topic_entries = grep {
 		ref($_) eq 'HASH' && ($_->{role} // '') ne 'availability' && defined($_->{topic})
+			&& $_->{topic} !~ m{^mqtt2_discovery/}
 	} @all_entries;
 	my $old_device_topic_exists = exists($attr{$name}) && exists($attr{$name}{devicetopic});
 	my $old_device_topic = $old_device_topic_exists ? $attr{$name}{devicetopic} : undef;

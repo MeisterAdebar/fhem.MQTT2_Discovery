@@ -1,6 +1,26 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+# Msg-SHA256: 99430cdea32aa4a52a7fc88e4cf231e061cf592912f173d1f25ea848dbdc8c88
+- change: MQTT2_DISCOVERY: devicetopic entsteht wieder, weil Modultopics den
+  Stamm nicht mehr aufloesen
+  - Befund: DevicePlanner::device_topic bildet den gemeinsamen Topic-Stamm
+    ueber alle Nutzdaten-Topics eines Devices. Dazu zaehlte auch das eigene
+    Antworttopic des Moduls
+    (mqtt2_discovery/<instanz>/shelly/<hash>/state/rpc), das in einem anderen
+    Namensraum liegt.
+  - Folge: Bei nativer Shelly-Erkennung bleibt kein gemeinsamer Stamm uebrig,
+    das Device bekommt kein devicetopic, und jede readingList-Zeile wiederholt
+    den vollen Geraeteprefix.
+  - Loesung: Topics im modul-eigenen Namensraum werden bei der Berechnung
+    ausgeklammert, wie es fuer Availability-Topics bereits geschieht; dieselbe
+    Einschraenkung gilt fuer die Pruefung, ob ein vorhandenes devicetopic
+    weiterhin alle Topics traegt.
+  - Ergebnis am Shelly 1 Mini Gen3: devicetopic wird gesetzt, die Geraetezeilen
+    lauten $DEVICETOPIC/status/switch_0 und $DEVICETOPIC/online, und die eine
+    Zeile fuer die Abfrageantwort behaelt zu Recht ihr volles Topic.
+  - Tests: neue Datei tests/34_device_topic.t mit gesetztem Stamm, weiterhin
+    funktionierender Auswertung und einem Fall, in dem allein aus Modultopics
+    kein Stamm entsteht.
 - change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
   behoben.
   - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.
