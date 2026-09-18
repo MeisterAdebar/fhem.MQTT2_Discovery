@@ -22,7 +22,7 @@ sub configuration {
 	my ($prefix) = @_;
 	return {
 		sys => { device => { name => 'Werkstatt' } },
-		mqtt => { topic_prefix => $prefix, rpc_ntf => JSON::PP::true, status_ntf => JSON::PP::false },
+		mqtt => { topic_prefix => $prefix, rpc_ntf => JSON::PP::true, status_ntf => JSON::PP::true },
 		'input:0' => { type => 'switch' }, 'switch:0' => { id => 0 },
 		wifi => { sta => { pass => 'nicht-persistieren' } },
 	};

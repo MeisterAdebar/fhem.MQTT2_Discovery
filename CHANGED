@@ -1,6 +1,25 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+# Msg-SHA256: bf66ed758ff0d1e78799a40d805cdc6ab086d464dfe29b0e214aabacf8aa4b8d
+- change: MQTT2_DISCOVERY: Nur die am Geraet aktiven Meldewege erzeugen
+  readingList-Zeilen
+  - Befund: Shelly.GetConfig liefert rpc_ntf und status_ntf, der Adapter legt
+    beide im Snapshot ab, nutzt sie aber nur fuer eine Warnung, wenn beide aus
+    sind. Erzeugt wurden bisher immer alle Wege.
+  - Folge: Bei rpc_ntf false steht eine Zeile fuer events/rpc in der
+    readingList, die nie ausloest; bei status_ntf false gilt dasselbe fuer
+    status/<komponente>. An einem Shelly 1 Mini Gen3 mit status_ntf true und
+    rpc_ntf false kam das Ereignistopic im Log kein einziges Mal vor.
+  - Loesung: Die Ereigniszeile entsteht nur bei rpc_ntf, die Komponentenzeile
+    nur bei status_ntf. Die Antwort der eigenen Abfrage bleibt immer gebunden,
+    sie liefert die Initialwerte und traegt die zweite Availability-Quelle;
+    ohne gepushten Status wird sie zur Hauptquelle der Entity.
+  - Ausserdem benennt die Warnung jetzt konkret, dass weder rpc_ntf noch
+    status_ntf aktiv ist und die Werte nur aus der Abfrage kommen.
+  - Tests: neue Datei tests/35_active_signals.t fuer beide Meldewege einzeln
+    und fuer den Fall ohne jeden Weg; in 28_shelly.t und 29_shelly_cct_blu.t
+    ist status_ntf in den Fixtures gesetzt, weil die Faelle den Komponentenweg
+    pruefen.
 - change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
   behoben.
   - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.

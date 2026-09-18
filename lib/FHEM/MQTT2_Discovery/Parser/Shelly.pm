@@ -47,14 +47,30 @@ sub _entity {
 	$name .= "_$suffix" if defined($suffix) && $suffix ne '';
 	my $topic = $context->{discovery_topic};
 	my $prefix = $context->{mqtt_prefix};
+
+	# Das Geraet meldet nur ueber die Wege, die in seiner MQTT-Konfiguration
+	# eingeschaltet sind; Zeilen fuer abgeschaltete Wege wuerden nie ausloesen.
+	my $mqtt = ref($context->{config}) eq 'HASH' && ref($context->{config}{mqtt}) eq 'HASH'
+		? $context->{config}{mqtt} : {};
+	my $pushes_status = $mqtt->{status_ntf} ? 1 : 0;
+	my $pushes_events = $mqtt->{rpc_ntf} ? 1 : 0;
+	my $reply_signal = {
+		type => 'template', topic => $context->{state_topic}, name => $name,
+		template => "{{ value_json.result['$component'].$path }}",
+	};
+
+	# Ohne gepushten Status traegt die Antwort der eigenen Abfrage den Wert.
+	my ($state_topic, $value_template) = $pushes_status
+		? ("$prefix/status/$component", "{{ value_json.$path }}")
+		: ($reply_signal->{topic}, $reply_signal->{template});
 	return {
 		operation => 'upsert', format => 'shelly', prefix => 'shelly',
 		component => $kind, component_key => $name, object_id => $name,
 		preferred_entity_name => $name, name => $name,
 		unique_id => "$context->{info}{id}_$name", device => $context->{device},
 		discovery_topic => $topic, entity_key => "$topic|$name", device_topic => $prefix,
-		state_topic => "$prefix/status/$component",
-		value_template => "{{ value_json.$path }}", state_reading_name => $name,
+		state_topic => $state_topic,
+		value_template => $value_template, state_reading_name => $name,
 		json_autocreate => 0,
 		availability => [
 			{ topic => "$prefix/online", payload_available => 'true', payload_not_available => 'false' },
@@ -62,10 +78,9 @@ sub _entity {
 				payload_available => $context->{info}{id}, payload_not_available => 'offline' },
 		],
 		supplemental_signals => [
-			{ type => 'template', topic => "$prefix/events/rpc", name => $name,
-				template => "{{ value_json.params['$component'].$path }}" },
-			{ type => 'template', topic => $context->{state_topic}, name => $name,
-				template => "{{ value_json.result['$component'].$path }}" },
+			($pushes_events ? ({ type => 'template', topic => "$prefix/events/rpc", name => $name,
+				template => "{{ value_json.params['$component'].$path }}" }) : ()),
+			($pushes_status ? ($reply_signal) : ()),
 			# Dynamische Komponenten fehlen in GetStatus und erhalten eine eigene Initialantwort.
 			($component =~ /\Abthome(?:device|sensor):\d+\z/ ? ({
 				type => 'template', topic => "$context->{component_reply}/$component/rpc", name => $name,
@@ -154,7 +169,7 @@ sub parse {
 			if ref($status->{$component}) ne 'HASH';
 	}
 
-	push @warnings, 'Shelly: RPC status notifications oder Generic status update over MQTT aktivieren'
+	push @warnings, 'Shelly: weder rpc_ntf noch status_ntf aktiv; Werte kommen nur aus der Abfrage'
 		if !$mqtt->{rpc_ntf} && !$mqtt->{status_ntf};
 
 	# Nur tatsaechlich gemeldete Komponenten und Werte werden als Funktionen angelegt.
