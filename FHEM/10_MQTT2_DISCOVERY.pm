@@ -126,7 +126,7 @@ sub MQTT2_DISCOVERY_Initialize($) {
 	$hash->{FW_deviceOverview} = 1;
 	# Match bleibt absichtlich prefixunabhaengig, da Prefixe je IODev konfiguriert sind.
 	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors|announce|online|events/rpc)|mqtt2_discovery/[^/\\x00]+/shelly/[a-f0-9]{16}/(?:info|config|status|components)/rpc|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
-	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
+	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 fhemConventions:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
 	$modules{MQTT2_DISCOVERY}{defptr} ||= {};
 }
 
@@ -1666,6 +1666,11 @@ sub MQTT2_DISCOVERY_process_inner($$$$;$) {
 			}
 			next;
 		}
+		# Die Wertabbildung entsteht bereits beim Mapping, der Schalter muss deshalb
+		# hier schon gelten.
+		local $MQTT2_Discovery::Mapper::FHEM_CONVENTIONS = MQTT2_DISCOVERY_gateway($hash)->attr_value(
+			$hash->{NAME}, 'fhemConventions', 0,
+		) ? 1 : 0;
 		my $mapping = MQTT2_Discovery::Mapper::map_model(
 			model => $event, io_name => $hash->{IODevName},
 			name_prefix => MQTT2_DISCOVERY_gateway($hash)->attr_value(
@@ -2317,6 +2322,47 @@ sub MQTT2_DISCOVERY_prefer_device_discovery_mappings($) {
 }
 
 # Rendert und setzt alle verwalteten Attribute eines Zieldevices als atomaren Plan.
+# Ein Geraet mit genau einem schaltbaren Kanal folgt der FHEM-Konvention: Der
+# Zustand gehoert nach state, geschaltet wird mit on und off. Damit schreibt auch
+# MQTT2_DEVICE_Set beim Setzen denselben Wert, den die Rueckmeldung liefert.
+sub MQTT2_DISCOVERY_single_channel_state($$) {
+	my ($readings, $sets) = @_;
+	my @switches = grep {
+		ref($_) eq 'HASH' && $_->{primary_switch}
+			&& ($_->{kind} // '') eq 'choice' && ($_->{spec} // '') eq 'on,off'
+			&& ref($_->{mapping}) eq 'HASH'
+			&& defined($_->{mapping}{on}) && defined($_->{mapping}{off})
+	} @$sets;
+	return 0 if @switches != 1;
+	my $switch = $switches[0];
+	my $switch_name = $switch->{name};
+	return 0 if !defined($switch_name) || $switch_name eq '' || $switch_name eq 'state';
+
+	# Ein bereits vergebenes state bleibt unangetastet, ebenso ein vorhandener
+	# Befehl on oder off eines anderen Kanals.
+	return 0 if grep { ref($_) eq 'HASH' && ($_->{name} // '') eq 'state' } @$readings;
+	return 0 if grep {
+		ref($_) eq 'HASH' && defined($_->{name}) && $_->{name} =~ /^(?:on|off)$/
+	} @$sets;
+	my $renamed = 0;
+
+	for my $reading (@$readings) {
+		next if ref($reading) ne 'HASH' || ($reading->{name} // '') ne $switch_name;
+		$reading->{semantic_name} = $switch_name if !defined($reading->{semantic_name});
+		$reading->{name} = 'state';
+		$renamed++;
+	}
+	return 0 if !$renamed;
+
+	# Aus der Auswahl werden die beiden einzelnen Befehle mit festem Payload.
+	@$sets = grep { $_ != $switch } @$sets;
+	push @$sets, {
+		kind => 'button', name => $_, spec => 'noArg',
+		topic => $switch->{topic}, payload => $switch->{mapping}{$_},
+	} for qw(on off);
+	return 1;
+}
+
 sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	my ($hash, $record, $options) = @_;
 	$options = {} if ref($options) ne 'HASH';
@@ -2380,6 +2426,14 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 		push @reading_entries, @{ $mapping->{reading_lines} || [] };
 		push @set_entries, @{ $mapping->{set_lines} || [] };
 	}
+
+	# Die Konventionen aendern bestehende Readingnamen und -werte und sind deshalb
+	# abschaltbar; ohne das Attribut bleibt alles wie bisher.
+	my $fhem_conventions = MQTT2_DISCOVERY_gateway($hash)->attr_value(
+		$hash->{NAME}, 'fhemConventions', 0,
+	) ? 1 : 0;
+	MQTT2_DISCOVERY_single_channel_state(\@reading_entries, \@set_entries)
+		if $fhem_conventions;
 	my @availability_topics = sort stable_unique(map { $_->{topic} }
 		grep {
 			ref($_) eq 'HASH' && ($_->{role} || '') eq 'availability'
@@ -2772,6 +2826,20 @@ sub MQTT2_DISCOVERY_jsonPayload($$$) {
 }
 
 # Der Dispatcher ruft nur die sichere Template-Engine auf; Discovery-Text wird nie als Perl-Code evaluiert.
+# Bildet genau ein Reading ueber seine angekuendigte Wertetabelle ab. Unbekannte
+# Werte bleiben unveraendert, damit nichts still verschwindet.
+sub MQTT2_DISCOVERY_applyValueMap($$$) {
+	my ($values, $name, $map) = @_;
+	return $values if ref($values) ne 'HASH' || ref($map) ne 'HASH'
+		|| !defined($name) || !exists($values->{$name});
+	my $value = $values->{$name};
+	return $values if !defined($value) || ref($value);
+	return $values if grep { !defined($_) || ref($_) || /[\x00-\x1f]/ }
+		(keys %$map, values %$map);
+	$values->{$name} = $map->{"$value"} if exists($map->{"$value"});
+	return $values;
+}
+
 sub MQTT2_Discovery_runtime {
 	my ($operation, @arguments) = @_;
 	my $answer;
@@ -2868,6 +2936,8 @@ sub MQTT2_Discovery_runtime {
 						} keys %{ $items->{match} };
 						my $values = MQTT2_Discovery_runtime('reading', $reading->{template},
 							JSON::PP::encode_json($item), $reading->{name});
+						$values = MQTT2_DISCOVERY_applyValueMap($values, $reading->{name}, $reading->{map})
+							if ref($reading->{map}) eq 'HASH';
 						@updates{keys %$values} = values %$values if ref($values) eq 'HASH';
 					}
 
@@ -2878,6 +2948,8 @@ sub MQTT2_Discovery_runtime {
 				my $values = MQTT2_Discovery_runtime(
 					$reading_operation, $reading->{template}, $event, $reading->{name},
 				);
+				$values = MQTT2_DISCOVERY_applyValueMap($values, $reading->{name}, $reading->{map})
+					if ref($reading->{map}) eq 'HASH';
 				@updates{keys %$values} = values %$values if ref($values) eq 'HASH';
 			}
 
@@ -3123,6 +3195,8 @@ sub MQTT2_DISCOVERY_runtimeRef($$$) {
 			($runtime eq 'triggerReading' && ref($descriptor->{filter}) eq 'HASH'
 				? ($descriptor->{filter}) : ()),
 		);
+		$answer = MQTT2_DISCOVERY_applyValueMap($answer, $name, $descriptor->{map})
+			if ref($descriptor->{map}) eq 'HASH';
 		return MQTT2_DISCOVERY_mqttReadingBytes($answer);
 	}
 	if ($operation eq 'topic' || $operation eq 'availability') {
