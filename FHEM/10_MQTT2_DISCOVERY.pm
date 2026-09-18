@@ -108,6 +108,10 @@ sub MQTT2_DISCOVERY_log_payload($) {
 # --- FHEM-Lebenszyklus und Benutzerbefehle -----------------------------------
 
 # Registriert FHEMs Lebenszyklus-, Parser- und Attributschnittstellen fuer den Modultyp.
+# Vorwaertsdeklaration der Verarbeitung: Ohne sie gilt ihr Prototyp erst ab dem
+# zweiten Laden der Datei, weshalb ein reload bisher mit einem Argumentfehler abbrach.
+sub MQTT2_DISCOVERY_process($$$$;$);
+
 sub MQTT2_DISCOVERY_Initialize($) {
 	my ($hash) = @_;
 	$hash->{DefFn} = 'MQTT2_DISCOVERY_Define';
@@ -1396,7 +1400,10 @@ sub MQTT2_DISCOVERY_process_queue($) {
 		last if $message;
 	}
 
-	MQTT2_DISCOVERY_process($hash, @$message, $batch) if $message;
+	# Die Argumente werden einzeln uebergeben: Der Prototyp der Funktion legt jedem
+	# Parameter skalaren Kontext auf, ein aufgeloestes Array zaehlte als ein Argument.
+	MQTT2_DISCOVERY_process($hash, $message->[0], $message->[1], $message->[2], $batch)
+		if $message;
 
 	my $error;
 
