@@ -23,7 +23,7 @@ Commit-Nachricht und ist fuer sich gruen, auch mit `PERL5OPT=-Mwarnings=FATAL`.
 | `feat/active-signals` | Zeilen nur fuer die am Geraet aktiven Meldewege (`rpc_ntf`, `status_ntf`) |
 | `feat/fhem-conventions` | Attribut `fhemConventions`: `state`, `on`/`off` und Wertabbildung bei einem Kanal |
 | `feat/select-readings` | `lwt` als eigene Rolle, `availabilityReading none`, Auswahl der Readings per Dialog |
-| `feat/sets-via-hook` | Attribut `setsViaHook`: Set-Kommandos aus der Registry statt aus dem Attribut |
+| `feat/sets-via-hook` | Attribut `setsViaHook`: Set-Kommandos aus der Registry statt aus dem Attribut, eingetragen in `$modules{<Typ>}{SetExtensionsFn}` |
 | `feat/readings-via-parse` | Attribut `readingsViaParse`: Readings ohne `readingList`, das Modul wertet in `ParseFn` selbst aus |
 
 ## Integrationszweig
@@ -35,7 +35,11 @@ dort auf den gemeinsamen Stand gezogen.
 ## Zum Forum
 
 `feat/sets-via-hook` und `feat/readings-via-parse` gehoeren zum Thread 145198
-"MQTT best current practice". Der zweite Zweig belegt Beta-Users These, dass ein Shelly auch ohne
+"MQTT best current practice". Seit fhem.pl-Revision 31663 braucht der erste Zweig **keine Aenderung
+an 10_MQTT2_DEVICE.pm** mehr: `SetExtensions.pm` ruft ueber `SE_Next` alle Funktionen auf, die unter
+`$modules{<Typ>}{SetExtensionsFn}` eingetragen sind. Den Vertrag beschreibt
+[docs/mqtt2-device-hook.md](https://github.com/MeisterAdebar/fhem.MQTT2_Discovery/blob/feat/sets-via-hook/docs/mqtt2-device-hook.md)
+im Zweig selbst. Der zweite Zweig belegt Beta-Users These, dass ein Shelly auch ohne
 `readingList` auskommt: Das Modul schreibt die Readings in `ParseFn` selbst, wie es
 MQTT_GENERIC_BRIDGE fuer fremde Devices tut. Die dafuer noetige
 Ergaenzung in `10_MQTT2_DEVICE.pm` und der Unterschied zwischen einem fest verdrahteten
