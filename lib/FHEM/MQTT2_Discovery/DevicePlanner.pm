@@ -17,15 +17,25 @@ sub topic_has_prefix {
 		&& ($topic eq $prefix || index($topic, "$prefix/") == 0);
 }
 
+# Erkennt ausschliesslich die von MQTT2_DISCOVERY selbst erzeugten Antworttopics.
+# Geraete duerfen denselben allgemeinen Root-Namen verwenden, ohne dadurch von
+# der normalen Topic-Stammbildung ausgeschlossen zu werden.
+sub is_internal_topic {
+	my ($topic) = @_;
+	return defined($topic) && !ref($topic)
+		&& $topic =~ m{\Amqtt2_discovery/[^/]+/shelly/[a-f0-9]{16}/state(?:/[a-z][a-z0-9]*:\d+)?/rpc\z};
+}
+
 # Ermittelt einen sicheren gemeinsamen Topic-Stamm fuer alle Nutzdaten eines Devices.
 sub device_topic {
 	my ($record, $entries) = @_;
 
-	# Availability-Topics liegen haeufig ausserhalb des eigentlichen
-	# Geraetebaums und duerfen das gemeinsame Prefix nicht verfaelschen.
+	# Availability-Topics und die eigenen Antworttopics des Moduls liegen haeufig
+	# ausserhalb des Geraetebaums und duerfen das gemeinsame Prefix nicht verfaelschen.
 	my @topics = stable_unique(map { $_->{topic} }
 		grep { ref($_) eq 'HASH' && ($_->{role} // '') ne 'availability'
-			&& defined($_->{topic}) && !ref($_->{topic}) && $_->{topic} ne '' }
+			&& defined($_->{topic}) && !ref($_->{topic}) && $_->{topic} ne ''
+			&& !is_internal_topic($_->{topic}) }
 		@{ $entries || [] });
 	my @availability_topics = stable_unique(map { $_->{topic} }
 		grep { ref($_) eq 'HASH' && ($_->{role} // '') eq 'availability'

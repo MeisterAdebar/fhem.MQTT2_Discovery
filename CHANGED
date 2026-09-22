@@ -1,6 +1,11 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 12ce95c0686ba31d1286eb58bf8545d3aa2d9e96fd12da44e1aaca3d8f3e0538
+# Msg-SHA256: 5607499d8df4d3ab2081fcb7b9ed3f6da325bd2c9d5156da5519b1e3d9ba6496
+- change: MQTT2_DISCOVERY: - Reload-Fehler in der Queue-Verarbeitung behoben
+  - Verwaiste Registry-Eintraege nach Device-Loeschungen bereinigt
+  - Topic-Konvertierung des IODev korrekt beruecksichtigt
+  - Interne Shelly-Antworttopics vom Device-Topic ausgeschlossen
+  - Shelly-Lesepfade an aktive MQTT-Benachrichtigungen angepasst
 - change: MQTT2_DISCOVERY: - Globale JSON-Importkollision im FHEM-Modul
   behoben.
   - JSON-Aufrufe gegen fremde Decoder abgesichert und Regressionstest ergaenzt.
