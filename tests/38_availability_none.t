@@ -112,4 +112,41 @@ subtest 'availabilityReading none unterdrueckt das verdichtete Reading' => sub {
 	ok(!exists($values->{availability}), 'availabilityReading none unterdrueckt das verdichtete Reading');
 };
 
+subtest 'der Wechsel von source auf none wird bemerkt und raeumt auf' => sub {
+	my $hash = setup();
+	$main::attr{discovery}{keys} = 'availability=source';
+	discover($hash, status => 1);
+	my ($record) = grep {
+		ref($_) eq 'HASH' && ($_->{name} // '') eq $target
+	} values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
+	my $sources = FHEM::MQTT2_DISCOVERY::availability_reading_names($record->{runtime_refs});
+	ok(scalar(keys %$sources) > 0, 'mit source fuehrt der Datensatz Quellen');
+
+	# Die Quellen tragen ihren zuletzt gemeldeten Wert, daneben ein Reading, das
+	# nicht zur Kette gehoert.
+	$main::defs{$target}{READINGS}{$_} = { VAL => 'online', TIME => '2026-09-23 12:00:00' }
+		for keys %$sources;
+	$main::defs{$target}{READINGS}{temperature} = { VAL => 42.5, TIME => '2026-09-23 12:00:00' };
+
+	# Beide Stufen ergeben denselben leeren Namen des verdichteten Readings.
+	# Erkannt wird der Wechsel deshalb nur ueber die mitgefuehrte Stufe.
+	ok(!FHEM::MQTT2_DISCOVERY::registry_rendering_outdated($hash),
+		'vor der Aenderung ist der Stand aktuell');
+	$main::attr{discovery}{keys} = 'availability=none';
+	ok(FHEM::MQTT2_DISCOVERY::registry_rendering_outdated($hash),
+		'der Wechsel auf none faellt auf');
+
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', $target);
+	is(FHEM::MQTT2_DISCOVERY::availability_reading_names($record->{runtime_refs}), {},
+		'die Kette ist aus dem Datensatz verschwunden');
+
+	# Ohne das Aufraeumen behielte jede Quelle ihren letzten Wert und meldete
+	# eine Erreichbarkeit, die niemand mehr fortschreibt.
+	my @left = grep { exists($main::defs{$target}{READINGS}{$_}) } sort keys %$sources;
+	is(\@left, [], 'und ihre Readings sind entfernt');
+
+	# Aufgeraeumt wird gezielt: Ein Reading, das nicht zur Kette gehoert, bleibt.
+	ok($main::defs{$target}{READINGS}{temperature}, 'ein fremdes Reading bleibt stehen');
+};
+
 done_testing();

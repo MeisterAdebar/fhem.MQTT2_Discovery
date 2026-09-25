@@ -162,9 +162,14 @@ sub parse {
 		payload_previous => _command_payload('previous'),
 		payload_mute => _command_payload('mute'),
 		payload_unmute => _command_payload('unmute'),
-		availability_topic => $availability_topic,
-		availability_template => "{{ value == '2' }}",
-		payload_available => '1', payload_not_available => '0',
+		# sonos2mqtt meldet auf diesem Topic seinen eigenen letzten Willen an
+		# (sonos/connected:0). Die Rolle macht daraus dasselbe sichtbare Reading
+		# wie bei Tasmota und Shelly.
+		availability => [
+			{ topic => $availability_topic, role => 'lwt',
+				value_template => "{{ value == '2' }}",
+				payload_available => '1', payload_not_available => '0' },
+		],
 	);
 	return { status => 'ok', entities => [\%entity], warnings => [] };
 }

@@ -98,9 +98,11 @@ subtest 'Speaker wird kanonischer Media-Player' => sub {
 		format => 'json', key => 'input', value_type => 'number',
 		constants => { command => 'volume' },
 	}, 'Lautstaerke verwendet den allgemeinen JSON-Codec mit konstantem Command');
+	# sonos2mqtt meldet auf diesem Topic seinen eigenen letzten Willen an
+	# (am Broker: sonos/connected:0), deshalb die Rolle.
 	is($event->{availability}, [{
 		topic => 'sonos/connected', value_template => "{{ value == '2' }}",
-		payload_available => '1', payload_not_available => '0',
+		payload_available => '1', payload_not_available => '0', role => 'lwt',
 	}], 'nur Sonos2mqtt-Status 2 wird als online normalisiert');
 	is(MQTT2_Discovery::Model::validate($event), undef, 'Media-Player-Modell ist gueltig');
 

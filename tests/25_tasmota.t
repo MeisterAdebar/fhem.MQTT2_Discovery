@@ -47,7 +47,7 @@ subtest 'config und sensors werden in beliebiger Reihenfolge zusammengefuehrt' =
 		ref($_->{supplemental_signals}) eq 'ARRAY' && !defined($_->{channel})
 	} @{ $result->{entities} };
 	is([map { $_->{type} } @{ $signal_owner->{supplemental_signals} }],
-		[qw(payload json_flatten json_flatten json_flatten json_sequence json_flatten)],
+		[qw(json_flatten json_flatten json_flatten json_sequence json_flatten)],
 		'Tasmota-Parser liefert seine Standardtelemetrie bereits als allgemeine Zusatzsignale');
 
 	# Das Statustopic eines Kanals gehoert zum Kanal; POWER1 ist der zweite

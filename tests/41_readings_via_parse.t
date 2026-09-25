@@ -157,4 +157,40 @@ subtest 'die geschriebenen Geraete kommen aus ParseFn zurueck' => sub {
 		['[NEXT]'], 'ohne Aenderung bleibt es bei der Marke');
 };
 
+subtest 'auch Sammel- und Sequenzzeilen wandern mit' => sub {
+	reset_env();
+	add_iodev('mqtt', 'MQTT2_SERVER');
+	my ($hash, $error) = define_discovery('discovery', 'mqtt');
+	die $error if $error;
+	FHEM::MQTT2_DISCOVERY::activate($hash);
+	$main::attr{discovery}{keys} = 'readings=parse';
+	dispatch_message('mqtt', 'client1', 'tasmota/discovery/AABBCCDDEEFF/config',
+		'{"dn":"Keller","fn":["Pumpe",null],"hn":"keller","mac":"AABBCCDDEEFF","md":"Generic",'
+			. '"ofln":"Offline","onln":"Online","state":["OFF","ON"],"sw":"15.6.0",'
+			. '"t":"tasmota_DDEEFF","ft":"%prefix%/%topic%/","tp":["cmnd","stat","tele"],'
+			. '"rl":[1,0],"so":{"4":0},"ver":1}');
+	my $device = 'Keller_Pumpe';
+	ok($main::defs{$device}, 'das Geraet entsteht');
+	my @lines = grep { /\S/ } split /\n/, attr_value($device, 'readingList') // '';
+	is(scalar(@lines), 0, 'im Attribut bleibt nichts stehen');
+
+	# Auch die Sequenzzeile wandert mit. Ihr Umschlag wird beim Auswerten
+	# entfernt, sonst hiesse das Reading Info1_Module statt Module.
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/INFO1',
+		'{"Info1":{"Module":"Generic","Version":"15.6.0"}}');
+	is($main::defs{$device}{READINGS}{Module}{VAL}, 'Generic',
+		'der Umschlag steht nicht im Readingnamen');
+	ok(!$main::defs{$device}{READINGS}{Info1_Module}, 'und auch nicht daneben');
+
+	# Telemetrie und Zustand wertet jetzt das Modul aus.
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/SENSOR',
+		'{"ENERGY":{"Power":42}}');
+	is($main::defs{$device}{READINGS}{ENERGY_Power}{VAL}, 42,
+		'die Sammelzeile der Telemetrie schreibt ihr Reading');
+	# Ohne style=fhem bleibt der Schluessel des Geraets der Readingname, und der
+	# Wert bleibt so, wie das Geraet ihn meldet.
+	dispatch_message('mqtt', 'client1', 'stat/tasmota_DDEEFF/RESULT', '{"POWER":"ON"}');
+	is($main::defs{$device}{READINGS}{POWER}{VAL}, 'ON', 'der Zustand kommt ebenfalls an');
+};
+
 done_testing();

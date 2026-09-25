@@ -1,6 +1,16 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: a2973b46ea279e3e44ca20c3aaad6ef25d50ac568c1c128f16062192625f8d74
+# Msg-SHA256: 8bbcb16c33304304568df9c93af529f58d7169cf43e3d3e17e253d83fbe1fddb
+- change: MQTT2_DISCOVERY: Sammelzeilen in der eigenen Auswertung
+  - Die Sammelzeilen eines Geraets werden in der eigenen Auswertung
+    verarbeitet. Am Zielgeraet bleibt dafuer keine readingList stehen.
+  - Auch die Felder dieser Zeilen sind einzeln auswaehlbar.
+  - Ein eigenes jsonMap am Zielgeraet bleibt wirksam, laesst sich aber trotzdem
+    abwaehlen, und eine Aenderung daran wirkt sofort.
+  - Eine Umbenennung zur Laufzeit laesst kein Reading unter dem alten Namen
+    zurueck.
+  - Eine geaenderte Einstellung erreicht auch bestehende Geraete.
+  - Der letzte Wille heisst bei jedem Adapter gleich.
 - change: MQTT2_DISCOVERY: Der Block wird eingefuegt statt abgelegt
   - Im Frontend antwortet get payloads in einem Textfeld zum Kopieren, sonst
     als reiner Text. Es entsteht keine Datei.

@@ -369,4 +369,57 @@ subtest 'Die Konvention haengt am Datensatz, nicht am Attribut' => sub {
 	is(record($hash)->{style}, 'raw', 'ohne Schluessel entsteht ein Datensatz nach alter Art');
 };
 
+subtest 'ein Reading, das niemand mehr schreibt, wird entfernt' => sub {
+	reset_env();
+	add_iodev('mqtt', 'MQTT2_SERVER');
+	my ($hash, $error) = define_discovery('discovery', 'mqtt');
+	die $error if $error;
+	FHEM::MQTT2_DISCOVERY::activate($hash);
+	dispatch_message('mqtt', 'client1', 'tasmota/discovery/AABBCCDDEEFF/config',
+		'{"dn":"Keller","fn":["Pumpe",null],"mac":"AABBCCDDEEFF","md":"Generic",'
+			. '"state":["OFF","ON"],"t":"tasmota_DDEEFF","ft":"%prefix%/%topic%/",'
+			. '"tp":["cmnd","stat","tele"],"rl":[1,0],"so":{"4":0},"ver":1}');
+	my $device = 'Keller_Pumpe';
+	like(attr_value($device, 'readingList'), qr{^stat/tasmota_DDEEFF/POWER:\.\* POWER$}m,
+		'der Schaltzustand kommt aus einer einfachen Zeile');
+
+	# Das Geraet hat gemeldet, das Reading steht.
+	$main::defs{$device}{READINGS}{POWER} = { VAL => 'ON', TIME => '2026-09-23 12:00:00' };
+	$main::attr{discovery}{keys} = 'hide=POWER';
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', $device);
+	unlike(attr_value($device, 'readingList') // '', qr{^stat/tasmota_DDEEFF/POWER:}m,
+		'die Zeile ist verschwunden');
+
+	# Aus den Sammelzeilen laesst sich kein Eintrag entfernen; dort verwirft die
+	# Umbenennungsliste den Schluessel, indem sie ihn auf nichts abbildet.
+	like(attr_value($device, 'readingList') // '', qr/\Q"POWER" => ""\E/,
+		'und die Sammelzeile verwirft den Schluessel');
+	ok(!exists($main::defs{$device}{READINGS}{POWER}),
+		'und ihr Reading bleibt nicht mit dem letzten Wert stehen');
+};
+
+subtest 'Eine Aenderung wirkt auf bestehende Geraete' => sub {
+	my $hash = setup();
+	discover($hash);
+
+	# Ohne vorgemerkten Neuaufbau saehe man eine geaenderte Einstellung erst an
+	# Geraeten, die danach erstmals entdeckt werden.
+	ok(!$hash->{helper}{rerender_pending}, 'nach der Erkennung steht nichts an');
+	FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'keys', 'availability=none');
+	ok($hash->{helper}{rerender_pending}, 'das Attribut merkt einen Neuaufbau vor');
+
+	# Der Geraeteschluessel baut unmittelbar nur sein eigenes Geraet neu auf.
+	$hash = setup();
+	discover($hash);
+	my $target = record($hash)->{name};
+	is(FHEM::MQTT2_DISCOVERY::key($hash, record($hash), 'availability'), 'combined',
+		'das Geraet folgt zunaechst der Vorgabe');
+	my $error = FHEM::MQTT2_DISCOVERY::Set(
+		$hash, 'discovery', 'deviceKey', $target, 'availability=none',
+	);
+	is($error, undef, 'der Geraeteschluessel wird angenommen');
+	is(FHEM::MQTT2_DISCOVERY::availability_reading_names(record($hash)->{runtime_refs}), {},
+		'und das Geraet ist sofort ohne Availability-Kette');
+};
+
 done_testing();

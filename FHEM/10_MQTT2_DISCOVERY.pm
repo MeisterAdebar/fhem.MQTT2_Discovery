@@ -269,6 +269,12 @@ sub Attr {
 		gateway($hash)->schedule(
 			0, $hash, sub { update_match() },
 		) if $hash && gateway($hash)->can_schedule();
+
+		# Jeder Schluessel aendert das erzeugte Ergebnis: style die Readingnamen,
+		# sets und readings die Attribute selbst, availability und hide den
+		# Umfang. Ohne Neuaufbau bliebe der zuletzt gerenderte Stand stehen und
+		# die Einstellung waere nur an neuen Geraeten zu sehen.
+		enqueue_rerender($hash) if $hash;
 		return undef;
 	}
 
@@ -558,6 +564,23 @@ sub selectable_readings {
 		}
 	}
 
+	# Felder einer Sammelzeile kuendigt die Discovery nicht an; angeboten wird,
+	# was am Geraet schon einmal ankam. Ein Name, der weder als Reading steht
+	# noch abgewaehlt ist, stammt aus einer ueberholten Zuordnung und faellt weg.
+	my $device = $defs{ $record->{name} // '' };
+	my %ignored = map { ($_ => 1) } ignored_entities($hash, $record);
+
+	for my $name (keys %{ ref($record->{json_seen}) eq 'HASH' ? $record->{json_seen} : {} }) {
+		next if !defined($name) || ref($name);
+
+		if (!$ignored{$name}
+				&& (!$device || ref($device->{READINGS}) ne 'HASH'
+					|| !exists($device->{READINGS}{$name}))) {
+			delete $record->{json_seen}{$name};
+			next;
+		}
+		$names{$name} = 1;
+	}
 	my @sorted = sort keys %names;
 	return @sorted;
 }
@@ -741,6 +764,41 @@ sub update_match {
 	return $wide;
 }
 
+# Raeumt nach einer Aenderung am Attribut jsonMap auf. Die Umbenennung wirkt
+# sofort, das bisher geschriebene Reading bliebe aber unter seinem alten Namen
+# stehen, als kaeme es weiterhin vom Geraet.
+sub sync_json_map {
+	my ($hash, $device_name) = @_;
+	my $target = $defs{$device_name};
+	return if !$target;
+	my ($record) = grep {
+		ref($_) eq 'HASH' && ($_->{name} // '') eq $device_name
+	} values %{ registry($hash)->{devices} || {} };
+	return if ref($record) ne 'HASH';
+	my $previous = ref($target->{helper}{mqtt2_discovery_json_map}) eq 'HASH'
+		? $target->{helper}{mqtt2_discovery_json_map} : {};
+	my $current = ref($target->{JSONMAP}) eq 'HASH' ? $target->{JSONMAP} : {};
+	my %sources = map { ($_ => 1) } (keys %$previous, keys %$current);
+
+	for my $source (sort keys %sources) {
+		my $before = defined($previous->{$source}) && !ref($previous->{$source})
+			&& $previous->{$source} ne '' ? $previous->{$source} : $source;
+		my $after = defined($current->{$source}) && !ref($current->{$source})
+			&& $current->{$source} ne '' ? $current->{$source} : $source;
+		next if $before eq $after;
+
+		# Entfernt wird nur, was das Modul selbst geschrieben hat.
+		next if !$record->{json_seen}{$before};
+		delete $record->{json_seen}{$before};
+		next if ref($target->{READINGS}) ne 'HASH' || !exists($target->{READINGS}{$before});
+		next if record_has_manual_reading($hash, $record, $before);
+		gateway($hash)->delete_reading($target, $before);
+		log_message($hash, 3, "jsonMap an $device_name: Reading $before entfernt");
+	}
+	$target->{helper}{mqtt2_discovery_json_map} = { %$current };
+	return;
+}
+
 # Liefert die vom Modul selbst auszuwertenden Zeilen eines Zielgeraets.
 sub parse_readings {
 	my ($hash, $record) = @_;
@@ -771,10 +829,10 @@ sub parse_index {
 			if defined($record->{reply_key}) && defined($record->{reply_reference});
 
 		for my $entry (parse_readings($hash, $record)) {
-			next if ref($entry) ne 'HASH' || !defined($entry->{regexp})
-				|| !defined($entry->{reference});
+			next if ref($entry) ne 'HASH' || !defined($entry->{regexp});
+			next if !defined($entry->{reference}) && ref($entry->{json}) ne 'HASH';
 			my $candidate = { record => $record, reference => $entry->{reference},
-				regexp => $entry->{regexp} };
+				json => $entry->{json}, regexp => $entry->{regexp} };
 
 			# Ein Muster ohne Sonderzeichen und mit beliebigem Payload ist ein
 			# fester Topicname und damit nachschlagbar.
@@ -798,12 +856,32 @@ sub forget_parse_index {
 	return;
 }
 
+# Tasmota verpackt INFO1 bis INFO3 in einen Umschlag, der denselben Namen traegt
+# wie das Topic. Ohne Auspacken stuende er in jedem Readingnamen (Info1_Module).
+# Dieselbe Form erzeugt der Renderer fuer die Zeile im Attribut.
+sub unwrap_sequence_payload {
+	my ($payload, $unwrap) = @_;
+	return $payload if ref($unwrap) ne 'HASH' || !defined($payload) || ref($payload);
+	my $prefix = $unwrap->{key_prefix};
+	my @parts = grep { defined($_) && !ref($_) } @{ $unwrap->{parts} || [] };
+	return $payload if !defined($prefix) || ref($prefix) || !@parts;
+	my $alternatives = join '|', map { quotemeta("$_") } @parts;
+	return $1 if $payload =~ /\A..\Q$prefix\E(?:$alternatives)..(.+).\z/s;
+	return $payload;
+}
+
 sub apply_parsed_readings {
 	my ($hash, $topic, $payload) = @_;
 	my $index = parse_index($hash);
 	my @candidates = (@{ $index->{exact}{$topic} || [] }, @{ $index->{other} || [] });
 	return () if !@candidates;
-	my (%updates, %targets);
+
+	# Die Sammelzeilen laufen zuerst: Sie flachen den ganzen Payload ab, waehrend
+	# eine Laufzeitreferenz denselben Wert ausdruecklich abbildet, etwa ON auf on.
+	# Die angekuendigte Zuordnung muss deshalb die rohe ueberschreiben.
+	@candidates = ((grep { ref($_->{json}) eq 'HASH' } @candidates),
+		(grep { ref($_->{json}) ne 'HASH' } @candidates));
+	my (%updates, %targets, %seen);
 
 	for my $candidate (@candidates) {
 		my $record = $candidate->{record};
@@ -818,12 +896,26 @@ sub apply_parsed_readings {
 			$pattern =~ s/\$DEVICETOPIC/\Q$device_topic\E/g if $device_topic ne '';
 			next if "$topic:$payload" !~ /^$pattern$/s;
 		}
-		my $values = runtimeRef($record->{name}, $candidate->{reference}, $payload);
+		my $values = ref($candidate->{json}) eq 'HASH'
+			? jsonReadings($record->{name}, $candidate->{json}{path},
+				unwrap_sequence_payload($payload, $candidate->{json}{unwrap}),
+				$candidate->{json}{renames})
+			: runtimeRef($record->{name}, $candidate->{reference}, $payload);
 		next if ref($values) ne 'HASH';
+
+		# Eine Sammelzeile kuendigt ihre Felder nicht an; welche es gibt, zeigt
+		# erst die Nachricht. Gemerkt werden sie, damit selectReadings sie
+		# anbieten kann.
+		$seen{ $record->{name} } = $record if ref($candidate->{json}) eq 'HASH'
+			&& grep { !$record->{json_seen}{$_} } keys %$values;
+		$record->{json_seen}{$_} = 1 for ref($candidate->{json}) eq 'HASH'
+			? keys %$values : ();
 		@{ $updates{ $record->{name} } }{ keys %$values } = values %$values;
 		$targets{ $record->{name} } = $target;
 	}
 	my @written;
+
+	persist_registry($hash) if %seen;
 
 	for my $name (sort keys %updates) {
 		gateway($hash)->update_readings($targets{$name}, $updates{$name});
@@ -1365,6 +1457,13 @@ sub device_key {
 	my $command_error = $gateway->set_attribute($device, 'mqttDiscoveryKeys', $line);
 	return $command_error if defined($command_error) && $command_error ne '';
 	log_message($hash, 3, "deviceKey $device: " . ($line ne '' ? $line : '<leer>'));
+
+	# Der Schluessel wirkt auf das erzeugte Ergebnis; ohne Neuaufbau bliebe das
+	# Geraet auf dem Stand, den es vor der Aenderung hatte.
+	forget_parse_index($hash);
+	my $rebuild_error = rebuild_device($hash, $device);
+	log_message($hash, 2, "deviceKey $device: Neuaufbau fehlgeschlagen: $rebuild_error")
+		if defined($rebuild_error) && $rebuild_error ne '';
 	return undef;
 }
 
@@ -1876,6 +1975,76 @@ sub availability_reading {
 		? $name : $DEFAULT_AVAILABILITY_READING;
 }
 
+# Sammelt die Readingnamen, die eine Referenztabelle fuer Availability fuehrt:
+# die Quellen je Topic und die Regeln, die daraus den sichtbaren Zustand bilden.
+sub availability_reading_names {
+	my ($references) = @_;
+	my %names;
+
+	for my $descriptor (values %{ ref($references) eq 'HASH' ? $references : {} }) {
+		next if ref($descriptor) ne 'HASH' || ref($descriptor->{configuration}) ne 'HASH';
+
+		# Eine reine Availability-Zeile traegt die Kette unmittelbar, eine
+		# gemeinsame Topic-Zeile fuehrt sie als eigenen Abschnitt.
+		my $availability = ($descriptor->{operation} // '') eq 'availability'
+			? $descriptor->{configuration} : $descriptor->{configuration}{availability};
+		next if ref($availability) ne 'HASH';
+
+		for my $entry (@{ $availability->{sources} || [] }, @{ $availability->{policies} || [] }) {
+			next if ref($entry) ne 'HASH' || !defined($entry->{reading})
+				|| ref($entry->{reading}) || $entry->{reading} eq '';
+			$names{ $entry->{reading} } = 1;
+		}
+	}
+
+	return \%names;
+}
+
+# Liefert die Readingnamen einfacher Zeilen der Form "muster name". Zeilen mit
+# Perl-Ausdruck tragen ihre Namen dagegen im Deskriptor.
+sub plain_reading_names {
+	my ($lines) = @_;
+	my %names;
+
+	for my $line (@{ ref($lines) eq 'ARRAY' ? $lines : [] }) {
+		next if ref($line) || !defined($line);
+		my (undef, $name) = split /\s+/, $line, 2;
+		next if !defined($name) || $name !~ /^[A-Za-z_][A-Za-z0-9_.-]*\z/;
+		$names{$name} = 1;
+	}
+
+	return \%names;
+}
+
+# Sammelt alle Readingnamen, die ein Datensatz nach dem Rendern erzeugt: aus den
+# einfachen Zeilen, aus den Deskriptoren und aus den Umbenennungen der
+# Sammelzeilen. Was hier fehlt, schreibt niemand mehr fort.
+sub generated_reading_names {
+	my ($record, $lines) = @_;
+	my $names = plain_reading_names($lines);
+
+	for my $descriptor (values %{ ref($record->{runtime_refs}) eq 'HASH' ? $record->{runtime_refs} : {} }) {
+		next if ref($descriptor) ne 'HASH' || ref($descriptor->{configuration}) ne 'HASH';
+
+		for my $entry (@{ $descriptor->{configuration}{readings} || [] }) {
+			$names->{ $entry->{name} } = 1
+				if ref($entry) eq 'HASH' && defined($entry->{name}) && !ref($entry->{name});
+		}
+		my $reading = $descriptor->{configuration}{reading};
+		$names->{$reading} = 1 if defined($reading) && !ref($reading) && $reading ne '';
+	}
+
+	# Eine Sammelzeile benennt nur um; welche Readings sie sonst erzeugt, haengt
+	# am Payload und laesst sich vorher nicht wissen.
+	for my $entry (@{ ref($record->{parse_readings}) eq 'ARRAY' ? $record->{parse_readings} : [] }) {
+		next if ref($entry) ne 'HASH' || ref($entry->{json}) ne 'HASH';
+		$names->{$_} = 1 for grep { defined($_) && !ref($_) }
+			values %{ $entry->{json}{renames} || {} };
+	}
+	%$names = (%$names, %{ availability_reading_names($record->{runtime_refs}) });
+	return $names;
+}
+
 # Erkennt Registry-Staende, deren zuletzt gerenderter Availability-Name nicht
 # mehr dem aktuellen Attribut beziehungsweise Moduldefault entspricht.
 sub registry_rendering_outdated {
@@ -1890,6 +2059,13 @@ sub registry_rendering_outdated {
 	for my $record (values %{ $registry->{devices} || {} }) {
 		my $rendered = $record->{availability_reading} // 'availability';
 		return 1 if $rendered ne availability_reading($hash, $record);
+
+		# source und none ergeben beide einen leeren Namen. Ohne die mitgefuehrte
+		# Stufe bliebe der Wechsel zwischen ihnen unbemerkt, und der Datensatz
+		# wertete weiter nach der alten Regel aus. Aeltere Staende fuehren sie
+		# nicht und werden erst beim naechsten Rendern nachgezogen.
+		next if !defined($record->{availability});
+		return 1 if $record->{availability} ne key($hash, $record, 'availability');
 	}
 
 	return 0;
@@ -2236,6 +2412,13 @@ sub Notify {
 	my $io_deleted = grep {
 		/^DELETED\s+\Q$io_name\E(?:\s|$)/
 	} @$events;
+
+	# Ein eigenes jsonMap am Zielgeraet benennt Readings um. Die Umbenennung
+	# wirkt sofort; das Reading unter dem alten Namen muss deshalb weg.
+	for my $event (@$events) {
+		next if $event !~ /^(?:ATTR|DELETEATTR)\s+(\S+)\s+jsonMap(?:\s|$)/;
+		sync_json_map($hash, $1);
+	}
 
 	# Beim Loeschen des IODev darf weder eine vorgemerkte Config noch dessen
 	# letzte Perl-Referenz einen scheinbar verfuegbaren Zustand erhalten.
@@ -3600,6 +3783,14 @@ sub apply_device_lines {
 		@{ $record->{availability_topics} || [] };
 	my $availability_reading = availability_reading($hash, $record);
 	my $previous_availability_reading = $record->{availability_reading} // 'availability';
+
+	# Die Quellreadings der bisherigen Kette werden vor dem Rendern festgehalten.
+	# Faellt die Kette weg, blieben sie sonst mit ihrem letzten Wert stehen.
+	my $previous_availability_names = availability_reading_names($record->{runtime_refs});
+
+	# Dasselbe gilt fuer einfache Zeilen: Wird aus dem rohen Reading eines Topics
+	# spaeter eine Quelle unter anderem Namen, bliebe der alte Name stehen.
+	my $previous_plain_names = plain_reading_names($record->{owned_reading});
 	my $previous_availability_owned = exists($record->{owned_availability_reading})
 		? $record->{owned_availability_reading} eq $previous_availability_reading
 		: !exists($record->{availability_reading})
@@ -3785,6 +3976,13 @@ sub apply_device_lines {
 	local $MQTT2_Discovery::Mapper::Renderer::AVAILABILITY_VISIBLE =
 		availability_reading($hash, $record) ne '' ? 1 : 0;
 
+	# Abgewaehlte Felder einer Sammelzeile lassen sich nicht als Eintrag
+	# weglassen; sie werden in der Umbenennungsliste auf den leeren String
+	# abgebildet und damit verworfen.
+	# Abgewaehlt ist der sichtbare Name. Ein eigenes jsonMap am Zielgeraet kann
+	# ihn jederzeit aendern, deshalb wird zusaetzlich beim Auswerten gefiltert;
+	# hier faellt nur weg, was ohne Umbenennung schon am Schluessel erkennbar ist.
+	local $MQTT2_Discovery::Mapper::Renderer::HIDDEN_JSON_KEYS = \%ignored_entities;
 	@reading_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		$prepared_readings, $render_device_topic, $reserved_readings, \%runtime_references,
 	) };
@@ -3822,9 +4020,27 @@ sub apply_device_lines {
 			next if !defined($line) || $line eq '';
 			my ($regexp, $reference) = $line =~ /^(\S+):\.\*\s+\{[^}]*'(r_[a-f0-9]+)'/;
 
-			# Was sich nicht in Muster und Referenz zerlegen laesst, etwa eine
-			# json2nameValue-Zeile ohne feste Feldliste, bleibt im Attribut.
-			# Stillschweigend weglassen hiesse: Das Reading kommt nie wieder.
+			# Eine Sammelzeile hat keine feste Feldliste und damit keine
+			# Laufzeitreferenz. Sie laesst sich trotzdem uebernehmen, weil der
+			# Renderer Namensraum und Umbenennungsliste strukturiert mitgibt und
+			# die Auswertung die eigene Funktion des Moduls ist.
+			if (!defined($reference) && ref($entry) eq 'HASH'
+					&& ref($entry->{json_readings}) eq 'HASH') {
+				my ($topic) = $line =~ /^(\S+):\.\*\s+\{/;
+
+				if (defined($topic)) {
+					$topic =~ s/\$DEVICETOPIC/$render_device_topic/g
+						if defined($render_device_topic) && $render_device_topic ne '';
+					push @parsed, { regexp => "$topic:.*",
+						json => { %{ $entry->{json_readings} } } };
+					next;
+				}
+			}
+
+			# Was sich weder in Muster und Referenz zerlegen noch als Sammelzeile
+			# uebernehmen laesst, etwa die Sequenzzeile mit vorgeschaltetem
+			# Auspacken, bleibt im Attribut. Stillschweigend weglassen hiesse:
+			# Das Reading kommt nie wieder.
 			if (!defined($regexp) || !defined($reference)) {
 				push @kept, $entry;
 				next;
@@ -3890,6 +4106,10 @@ sub apply_device_lines {
 	$record->{runtime_refs} = { %runtime_references };
 	$defs{$name}{helper}{mqtt2_discovery_runtime_refs} = $record->{runtime_refs};
 	$defs{$name}{helper}{mqtt2_discovery_availability_reading} = $availability_reading;
+	$defs{$name}{helper}{mqtt2_discovery_hidden_readings} = { %ignored_entities };
+	$defs{$name}{helper}{mqtt2_discovery_json_map} = {
+		%{ ref($defs{$name}{JSONMAP}) eq 'HASH' ? $defs{$name}{JSONMAP} : {} }
+	};
 	clear_device_readings($hash, $record)
 		if $rebuild_lists && $options->{clear_readings};
 	initialize_device_readings(
@@ -3901,6 +4121,7 @@ sub apply_device_lines {
 	$record->{availability_topics} = \@availability_topics;
 	$record->{availability_reading} = $availability_reading;
 	$record->{owned_availability_reading} = $availability_reading;
+	$record->{availability} = key($hash, $record, 'availability');
 	apply_device_semantics($hash, $record, \%resolved_by_key);
 	my @conflicts = (@json_conflicts, @{ $reading->{conflicts} }, @{ $set->{conflicts} });
 
@@ -3931,6 +4152,38 @@ sub apply_device_lines {
 			$defs{$name}, $previous_availability_reading,
 		);
 		log_message($hash, 2, "old availability reading removal failed for target=$name; reading=$previous_availability_reading; error=$delete_error")
+			if $delete_error;
+	}
+
+	# Dasselbe gilt fuer die Quellen und Regeln der Kette. Mit availability=none
+	# entfaellt die Kette ganz; ohne das Aufraeumen behielte jede Quelle ihren
+	# letzten Wert und das Geraet meldete eine Erreichbarkeit, die niemand mehr
+	# fortschreibt.
+	my $current_availability_names = availability_reading_names($record->{runtime_refs});
+
+	# Der IO-Zustand wird nicht aus einem Deskriptor gespeist, sondern beim
+	# Abgleich geschrieben. Mit none schreibt ihn niemand mehr fort, also gehoert
+	# er zu den aufzuraeumenden Readings.
+	$previous_availability_names->{'.availability_io'} = 1
+		if key($hash, $record, 'availability') eq 'none';
+
+	# Ein Name, den vorher eine einfache Zeile trug und den jetzt nichts mehr
+	# erzeugt, gehoert ebenfalls aufgeraeumt.
+	my $generated = generated_reading_names($record, $record->{owned_reading});
+	$previous_availability_names->{$_} = 1
+		for grep { !$generated->{$_} } keys %$previous_plain_names;
+
+	# Ein abgewaehltes Feld entsteht nicht mehr; sein letzter Wert soll nicht
+	# stehen bleiben, als kaeme er weiterhin vom Geraet.
+	$previous_availability_names->{$_} = 1 for keys %ignored_entities;
+
+	for my $reading (sort keys %$previous_availability_names) {
+		next if $current_availability_names->{$reading} || $generated->{$reading};
+		next if ref($defs{$name}{READINGS}) ne 'HASH'
+			|| !exists($defs{$name}{READINGS}{$reading});
+		next if record_has_manual_reading($hash, $record, $reading);
+		my $delete_error = gateway($hash)->delete_reading($defs{$name}, $reading);
+		log_message($hash, 2, "old availability source removal failed for target=$name; reading=$reading; error=$delete_error")
 			if $delete_error;
 	}
 
@@ -4638,7 +4891,14 @@ sub runtimeJSONMap {
 	for my $source_name (sort keys %$renames) {
 		my $target_name = $renames->{$source_name};
 		next if !defined($source_name) || $source_name eq ''
-			|| !defined($target_name) || ref($target_name) || $target_name eq '';
+			|| !defined($target_name) || ref($target_name);
+
+		# Der leere Zielname ist keine Umbenennung, sondern eine Abwahl:
+		# json2nameValue verwirft solche Schluessel (next if(!$map->{$name})).
+		if ($target_name eq '') {
+			$mapping{$source_name} = '';
+			next;
+		}
 
 		# Auch ein vorhandenes jsonMap darf keinen beliebigen Quellwert auf den
 		# inzwischen fuer eine technische Rolle reservierten Namen abbilden.
@@ -4673,7 +4933,17 @@ sub jsonReadings {
 	$json_map = runtimeJSONMap(
 		$json_map, { $availability => $path . '_' . $availability },
 	);
-	return json2nameValue($event, '', $json_map);
+	my $values = json2nameValue($event, '', $json_map);
+	return $values if ref($values) ne 'HASH';
+
+	# Abgewaehlt wird der sichtbare Name. Weil ein eigenes jsonMap ihn erst hier
+	# erzeugt, entscheidet das Ergebnis und nicht der Schluessel der Nachricht;
+	# eine Aenderung am Attribut wirkt damit sofort.
+	my $hidden = defined($device) && !ref($device) && $defs{$device}
+		? $defs{$device}{helper}{mqtt2_discovery_hidden_readings} : undef;
+	return $values if ref($hidden) ne 'HASH' || !%$hidden;
+	delete @{$values}{ grep { $hidden->{$_} } keys %$values };
+	return $values;
 }
 
 1;

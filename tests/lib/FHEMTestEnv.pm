@@ -114,6 +114,54 @@ sub ReadingsVal($$$) {
 	return exists($defs{$device}{READINGS}{$reading}) ? $defs{$device}{READINGS}{$reading}{VAL} : $default;
 }
 
+# Bildet FHEMs json2nameValue so weit nach, wie die Tests es brauchen:
+# verschachtelte Schluessel werden mit Unterstrichen verbunden, Arrays ab 1
+# nummeriert. Die Umbenennungsliste wirkt wie im Original auf den fertigen
+# Namen, ein leerer Zielname verwirft den Schluessel. Nicht nachgebildet sind
+# FHEMs eigener Parser und dessen Sonderfaelle; der Vertrag steht in
+# docs/verified-fhem-interfaces.md.
+sub json2nameValue {
+	my ($in, $prefix, $map, $filter, $negFilter) = @_;
+	return {} if !defined($in) || $in eq '';
+	$prefix = '' if !defined($prefix);
+	my $data = eval { JSON::PP->new->decode($in) };
+	return {} if ref($data) ne 'HASH';
+	my (%flat, $walk);
+
+	$walk = sub {
+		my ($node, $name) = @_;
+
+		if (ref($node) eq 'HASH') {
+			$walk->($node->{$_}, $name eq '' ? $_ : "${name}_$_") for sort keys %$node;
+			return;
+		}
+
+		if (ref($node) eq 'ARRAY') {
+			$walk->($node->[$_], $name . '_' . ($_ + 1)) for 0 .. $#$node;
+			return;
+		}
+		$node = $node ? 'true' : 'false' if ref($node) eq 'JSON::PP::Boolean';
+		$flat{$name} = defined($node) ? "$node" : '';
+		return;
+	};
+	$walk->($data, '');
+	my %readings;
+
+	for my $key (sort keys %flat) {
+		my $name = $prefix . $key;
+		next if defined($negFilter) && $negFilter ne '' && $name =~ /$negFilter/;
+
+		if (ref($map) eq 'HASH' && defined($map->{$name})) {
+			next if !$map->{$name};
+			$name = $map->{$name};
+		}
+		next if defined($filter) && $filter ne '' && $name !~ /$filter/;
+		$readings{$name} = $flat{$key};
+	}
+
+	return \%readings;
+}
+
 # Liefert die am ausloesenden Device gespeicherten FHEM-Ereignisse.
 sub deviceEvents {
 	my ($device, undef) = @_;

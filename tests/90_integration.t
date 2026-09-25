@@ -565,7 +565,6 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 	my $haupt = 'MQTT2_SchwimmbadEntfeuchter_Switch_CF9A44';
 	my $reading_list = attr_value($haupt, 'readingList');
 	my @expected = (
-		q{tele/tasmota_CF9A44/LWT:.* LWT},
 		q!tele/tasmota_CF9A44/STATE:.* { ! . $json_readings{state} . q! }!,
 		q!tele/tasmota_CF9A44/SENSOR:.* { ! . $json_readings{sensor} . q! }!,
 		q!tele/tasmota_CF9A44/INFO(?:1|2|3):.* { $EVENT =~ m,^..Info(?:1|2|3)..(.+).$, ?  MQTT2_DISCOVERY_jsonReadings($NAME,'info',$1) : !
@@ -577,9 +576,13 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 		is(scalar(grep { $_ eq $line } split /\n/, $reading_list), 1,
 			"readingList des Hauptgeraets enthaelt genau einmal: $line");
 	}
+	# Der letzte Wille erzeugt genau eine Zeile: die Quelle der Availability-Kette.
+	# Ein zusaetzliches rohes Reading LWT waere dieselbe Aussage ein zweites Mal.
+	is(scalar(grep { m{^tele/tasmota_CF9A44/LWT:} } split /\n/, $reading_list), 1,
+		'das LWT-Topic erzeugt genau eine Zeile');
 	like($reading_list,
 		qr{^tele/tasmota_CF9A44/LWT:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
-		'Tasmota-LWT speist zusaetzlich die allgemeine Availability-Auswertung');
+		'und die speist die Availability-Auswertung');
 	is(attr_value($haupt, 'setList'), undef, 'das Hauptgeraet schaltet nichts');
 
 	for my $kanal (1, 2) {

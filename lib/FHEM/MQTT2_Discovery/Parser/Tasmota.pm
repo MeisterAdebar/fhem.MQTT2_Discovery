@@ -168,9 +168,14 @@ sub _entity_base {
 		entity_key         => join('|', $args{discovery_topic}, $object_id),
 		unique_id          => join('_', 'tasmota', lc($args{mac}), $object_id),
 		name               => $args{name},
-		availability_topic => "$args{telemetry_base}/LWT",
-		payload_available  => defined($args{config}{onln}) ? "$args{config}{onln}" : 'Online',
-		payload_not_available => defined($args{config}{ofln}) ? "$args{config}{ofln}" : 'Offline',
+		# Das LWT-Topic ist der beim Broker angemeldete letzte Wille des Geraets,
+		# nicht die Aussage einer Bruecke ueber ein Geraet. Die Rolle macht daraus
+		# das in FHEM uebliche sichtbare Reading lwt.
+		availability => [
+			{ topic => "$args{telemetry_base}/LWT", role => 'lwt',
+				payload_available => defined($args{config}{onln}) ? "$args{config}{onln}" : 'Online',
+				payload_not_available => defined($args{config}{ofln}) ? "$args{config}{ofln}" : 'Offline' },
+		],
 		device             => $args{device},
 		json_autocreate    => 1,
 		raw_metadata       => {
@@ -668,8 +673,9 @@ sub _supplemental_signals {
 	my $config = $args{config};
 	my $relays = ref($config->{rl}) eq 'ARRAY' ? $config->{rl} : [];
 	my $numbered = _numbered_power_names($config, $relays);
+	# Fuer das LWT-Topic entsteht kein eigenes Signal mehr: Dieselbe Nachricht
+	# ergab sonst ein rohes Reading LWT neben der Quelle der Availability-Kette.
 	my @signals = (
-		{ type => 'payload', topic => "$args{telemetry_base}/LWT", name => 'LWT' },
 		(map { +{ type => 'json_flatten', topic => "$args{telemetry_base}/$_", name => $_ } }
 			qw(STATE SENSOR UPTIME)),
 		{

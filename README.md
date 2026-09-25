@@ -176,8 +176,18 @@ Mit `readings=parse` wertet das Modul die Nutzdaten selbst aus, statt sie ueber
 sodass jede Nachricht des IODev durch das Modul laeuft. Die gespeicherten Muster
 werden deshalb nicht linear durchsucht, sondern ueber einen Index nach Topic
 angesprochen; fremde Nachrichten kosten damit unter eine Mikrosekunde statt
-einiger hundert. Zeilen ohne Laufzeitreferenz bleiben in der `readingList`, sie
-lassen sich nicht in die eigene Auswertung uebernehmen.
+einiger hundert.
+
+Uebernommen werden beide Arten erzeugter Zeilen: die mit fester Feldliste ueber
+ihre Laufzeitreferenz und die Sammelzeilen, die einen ganzen JSON-Payload
+abflachen -- fuer sie liegen Namensraum und Umbenennungsliste strukturiert in
+der Registry. Im Attribut bleibt nur, was mehr ist als beides, etwa Tasmotas
+`INFO`-Zeile, die den Payload vor der Auswertung auspackt. Manuelle Zeilen des
+Anwenders bleiben ohnehin unberuehrt.
+
+Trifft eine Nachricht beide Arten, schreibt zuerst die Sammelzeile und danach
+die Laufzeitreferenz. Die ausdruecklich angekuendigte Zuordnung setzt sich damit
+gegen die rohe durch: `{"POWER":"ON"}` wird zu `state` mit `on`, nicht mit `ON`.
 
 Ein leerer Wert nimmt einen Schluessel auf seiner Ebene zurueck, sodass wieder
 die naechsthoehere gilt. `set <name> deviceKey <device> <schluessel>=<wert>`
@@ -191,6 +201,35 @@ bleiben als veraltete Schreibweise gueltig und wirken wie `style=fhem`,
 bleiben. Ein Geraet, das unter `style=fhem` entstanden ist, behaelt die
 Konvention auch dann, wenn der Schluessel spaeter wieder entfaellt; sonst
 kippten bestehende Readingwerte auf neue Namen.
+
+## Erreichbarkeit: lwt und availability
+
+Zwei verschiedene Aussagen, deshalb zwei Readings:
+
+- `lwt` ist der beim Broker angemeldete letzte Wille des Geraets selbst. Er
+  entsteht, sobald ein Adapter die Quelle als solche kennt, und traegt bei allen
+  Adaptern denselben Namen.
+- `availability` verdichtet alle Quellen eines Geraets und beruecksichtigt
+  zusaetzlich, ob FHEM gerade eine Brokerverbindung hat. Bei Brokerverlust steht
+  dort `offline`, waehrend der retained `lwt` weiter die letzte Aussage des
+  Geraets zeigt. Es entsteht nur mit `availability=combined`.
+
+Der einheitliche Name ist eine bewusste Entscheidung. Die Geraete selbst
+benennen dasselbe voellig verschieden; an einem Broker mit sechzehn Clients
+stehen fuer den letzten Willen sieben verschiedene Topic-Blaetter:
+
+```
+tele/tasmota_E768B3/LWT:Offline          shellies/shelly1-BA4327/online:false
+wled/18b3c8/status:offline               sonos/connected:0
+ebusd/global/running:false               inverter/mqtt:not connected
+valetudo/<name>/$state:lost
+```
+
+Ein Reading nach dem Topic-Blatt zu benennen hiesse, diese Zufaelligkeit in die
+Geraete zu tragen. Nicht jede Quelle ist ein letzter Wille: `zigbee2mqtt` meldet
+den eigenen unter `zigbee2mqtt/bridge/state`, waehrend
+`zigbee2mqtt/<geraet>/availability` eine Aussage der Bruecke ueber ein Geraet
+ist. Die bleibt eine gewoehnliche Quelle und damit versteckt.
 
 ## Geraetenamen
 

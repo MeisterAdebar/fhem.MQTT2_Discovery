@@ -19,6 +19,11 @@ our $TOPIC_CONVERSION = 0;
 # Mit availabilityReading none entfaellt das verdichtete sichtbare Reading;
 # Quellen und Regeln bleiben als interne Readings erhalten.
 our $AVAILABILITY_VISIBLE = 1;
+# Abgewaehlte Felder einer Sammelzeile. Ihr Name wird in der Umbenennungsliste
+# auf den leeren String abgebildet; json2nameValue verwirft solche Schluessel
+# (fhem.pl: next if(!$map->{$name})). Eine feste Feldliste hat eine Sammelzeile
+# nicht, deshalb ist das der einzige Weg, ein einzelnes Feld auszublenden.
+our $HIDDEN_JSON_KEYS = {};
 
 
 sub _regex_literal {
@@ -343,6 +348,12 @@ sub _render_device_automation_group {
 	}, $references);
 	return defined($expression)
 		? _regex($entry->{topic}, $device_topic, undef) . " $expression" : undef;
+}
+
+# Liefert die Umbenennungen, mit denen abgewaehlte Felder verworfen werden.
+sub _hidden_renames {
+	return map { ($_ => '') } grep { defined($_) && !ref($_) && $_ ne '' }
+		keys %{ ref($HIDDEN_JSON_KEYS) eq 'HASH' ? $HIDDEN_JSON_KEYS : {} };
 }
 
 # Rendert eine kompakte Wrapper-Zeile, die mehrere JSON-Readings automatisch erzeugt.
@@ -687,8 +698,14 @@ sub render_entries {
 		# Sequenz-JSON verwendet denselben kompakten Laufzeit-Wrapper wie die spaeter
 		# gruppierten JSON-Arten, obwohl jede Sequenz eine eigene Regex benoetigt.
 		if (ref($entry) eq 'HASH' && ($entry->{kind} || '') eq 'json_sequence') {
+			my %renames = _hidden_renames();
 			push @rendered, +{ %$entry,
-				line => _render_json_sequence($entry, $device_topic) };
+				line => _render_json_sequence($entry, $device_topic, \%renames),
+				json_readings => {
+					path => _json_path_name($entry), renames => { %renames },
+					unwrap => { key_prefix => $entry->{key_prefix},
+						parts => [ @{ $entry->{parts} || [] } ] },
+				} };
 			next;
 		}
 		push @rendered, +{ %$entry,
@@ -705,12 +722,16 @@ sub render_entries {
 		# Schaltzustand sowohl in RESULT als auch in der STATE-Telemetrie. Die
 		# Zuordnung eines anderen Topics gilt deshalb auch hier, die des eigenen
 		# Topics hat Vorrang.
-		my %renames = (%device_key_names, %{ $json_key_names{$topic} || {} });
+		my %renames = (%device_key_names, %{ $json_key_names{$topic} || {} }, _hidden_renames());
 
+		# Namensraum und Umbenennungsliste werden zusaetzlich strukturiert
+		# mitgegeben. Nur damit kann das Modul die Zeile in die eigene
+		# Auswertung uebernehmen, statt sie als Perl-Text zurueckzulesen.
 		push @rendered, {
 			kind => 'json_autocreate_group', name => '', names => [ sort keys %by_name ],
 			topic => $topic,
 			line => _render_json_autocreate($entries[0], $device_topic, \%renames),
+			json_readings => { path => _json_path_name($entries[0]), renames => { %renames } },
 		} if @entries;
 	}
 

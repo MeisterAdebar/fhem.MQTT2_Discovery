@@ -145,20 +145,33 @@ subtest 'Tasmota meldet seinen Schaltzustand nach state' => sub {
 	dispatch_message('mqtt', 'client1', 'stat/workshop_plug/POWER1', 'ON');
 	is($main::defs{$device}{READINGS}{state}{VAL}, 'on', 'auch POWER1 landet in state');
 
-	# Dasselbe gilt fuer die Sammelzeile: Ohne den Alias entstuende neben state
-	# ein zweites Reading POWER1 mit demselben Wert.
-	my ($result_line) = grep { m{^stat/workshop_plug/RESULT:} }
-		split /\n/, attr_value($device, 'readingList') // '';
-	like($result_line, qr/\Q"POWER1" => "state"\E/,
-		'die Sammelzeile benennt den zweiten Schluessel auf dasselbe Reading um');
-	like($result_line, qr/\Q"POWER" => "state"\E/, 'der erste Schluessel ebenso');
+	# Dasselbe gilt fuer die Sammelzeilen: Ohne den Alias entstuende neben state
+	# ein zweites Reading POWER1 mit demselben Wert. Die Zuordnung liegt mit
+	# readings=parse in der Registry, nicht mehr im Attribut.
+	my %renames = map {
+		($_->{regexp} => $_->{json}{renames})
+	} grep { ref($_->{json}) eq 'HASH' } @{ $record->{parse_readings} || [] };
+	is($renames{'stat/workshop_plug/RESULT:.*'}, { POWER => 'state', POWER1 => 'state' },
+		'die Sammelzeile benennt beide Schluessel auf dasselbe Reading um');
 
 	# Denselben Zustand meldet Tasmota auch in der STATE-Telemetrie; dort gilt
 	# dieselbe Zuordnung, sonst entstuende daneben ein Reading POWER1.
-	my ($state_line) = grep { m{^tele/workshop_plug/STATE:} }
-		split /\n/, attr_value($device, 'readingList') // '';
-	like($state_line, qr/\Q"POWER1" => "state"\E/,
+	is($renames{'tele/workshop_plug/STATE:.*'}, { POWER => 'state', POWER1 => 'state' },
 		'die Telemetriezeile benennt denselben Schluessel gleich um');
+	unlike(attr_value($device, 'readingList') // '', qr{^stat/workshop_plug/RESULT:}m,
+		'die Sammelzeile steht nicht mehr im Attribut');
+
+	# Die ausdrueckliche Zuordnung eines Topics schlaegt seine Sammelzeile: Beide
+	# treffen state, aber nur die Referenz bildet ON auf on ab.
+	dispatch_message('mqtt', 'client1', 'stat/workshop_plug/RESULT', '{"POWER":"ON"}');
+	is($main::defs{$device}{READINGS}{state}{VAL}, 'on', 'aus der Sammelzeile wird state on');
+	ok(!$main::defs{$device}{READINGS}{POWER}, 'daneben entsteht kein Reading POWER');
+
+	# Mit SetOption26 traegt dieselbe Nachricht POWER1. Die Referenz liest nur
+	# POWER, sodass hier die Umbenennung der Sammelzeile den Wert liefert.
+	dispatch_message('mqtt', 'client1', 'stat/workshop_plug/RESULT', '{"POWER1":"OFF"}');
+	is($main::defs{$device}{READINGS}{state}{VAL}, 'OFF', 'auch POWER1 landet in state');
+	ok(!$main::defs{$device}{READINGS}{POWER1}, 'und erzeugt kein zweites Reading');
 };
 
 done_testing();

@@ -132,4 +132,104 @@ subtest 'selectReadings filtert Entities und ueberlebt den Geraetedatensatz' => 
 		'nach einer erneuten Erkennung bleibt die Auswahl wirksam');
 };
 
+subtest 'auch Felder einer Sammelzeile lassen sich abwaehlen' => sub {
+	reset_env();
+	add_iodev('mqtt', 'MQTT2_SERVER');
+	my ($hash, $error) = define_discovery('discovery', 'mqtt');
+	die $error if $error;
+	FHEM::MQTT2_DISCOVERY::activate($hash);
+	dispatch_message('mqtt', 'client1', 'tasmota/discovery/AABBCCDDEEFF/config',
+		'{"dn":"Keller","fn":["Pumpe",null],"mac":"AABBCCDDEEFF","md":"Generic",'
+			. '"state":["OFF","ON"],"t":"tasmota_DDEEFF","ft":"%prefix%/%topic%/",'
+			. '"tp":["cmnd","stat","tele"],"rl":[1,0],"so":{"4":0},"ver":1}');
+	my $device = 'Keller_Pumpe';
+	my ($record) = grep {
+		ref($_) eq 'HASH' && ($_->{name} // '') eq $device
+	} values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
+
+	# Vor der ersten Nachricht kennt niemand die Felder: Eine Sammelzeile kuendigt
+	# keine an, sie flacht ab, was ankommt.
+	ok(!grep({ $_ eq 'Heap' } FHEM::MQTT2_DISCOVERY::selectable_readings($hash, $record)),
+		'vor der ersten Nachricht steht das Feld in keiner Liste');
+
+	# Mit der eigenen Auswertung merkt sich das Modul, was eine Sammelzeile
+	# erzeugt hat.
+	$main::attr{discovery}{keys} = 'readings=parse';
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', $device);
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/STATE',
+		'{"Heap":24,"LoadAvg":19}');
+	is($main::defs{$device}{READINGS}{Heap}{VAL}, 24, 'das Feld entsteht');
+	ok(grep({ $_ eq 'Heap' } FHEM::MQTT2_DISCOVERY::selectable_readings($hash, $record)),
+		'danach bietet selectReadings es an');
+
+	# Abgewaehlt wird es ueber die Umbenennungsliste, die den Schluessel verwirft.
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'selectReadings', $device,
+		'Heap=0', 'LoadAvg=1'), undef, 'die Auswahl wird angenommen');
+	ok(!exists($main::defs{$device}{READINGS}{Heap}), 'der alte Wert bleibt nicht stehen');
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/STATE',
+		'{"Heap":25,"LoadAvg":20}');
+	ok(!exists($main::defs{$device}{READINGS}{Heap}), 'und es entsteht auch nicht neu');
+	is($main::defs{$device}{READINGS}{LoadAvg}{VAL}, 20, 'das andere Feld laeuft weiter');
+
+	# Ein eigenes jsonMap am Zielgeraet benennt vor der Auswahl um. Der Dialog
+	# zeigt dann den fertigen Namen, verworfen werden muss aber der Schluessel
+	# aus der Nachricht.
+	$main::defs{$device}{JSONMAP} = { LoadAvg => 'last' };
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', $device);
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/STATE', '{"LoadAvg":21}');
+	is($main::defs{$device}{READINGS}{last}{VAL}, 21, 'die eigene Umbenennung wirkt weiter');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'selectReadings', $device, 'last=0'), undef,
+		'der umbenannte Name laesst sich abwaehlen');
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/STATE', '{"LoadAvg":22}');
+	ok(!exists($main::defs{$device}{READINGS}{last}), 'und das Feld bleibt weg');
+
+	# Umgekehrte Reihenfolge: erst abwaehlen, dann umbenennen. Ohne Neuaufbau
+	# darf der Name trotzdem nicht wieder auftauchen, sonst muesste der Anwender
+	# nach jeder Aenderung an jsonMap an den Neuaufbau denken.
+	delete $main::defs{$device}{JSONMAP};
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', $device);
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'selectReadings', $device, 'last=0'), undef,
+		'der Name wird abgewaehlt, bevor es ihn gibt');
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/STATE', '{"LoadAvg":23}');
+	is($main::defs{$device}{READINGS}{LoadAvg}{VAL}, 23, 'unter seinem alten Namen laeuft das Feld');
+	$main::defs{$device}{JSONMAP} = { LoadAvg => 'last' };
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/STATE', '{"LoadAvg":24}');
+	ok(!exists($main::defs{$device}{READINGS}{last}),
+		'das geaenderte jsonMap greift ohne Neuaufbau');
+};
+
+subtest 'eine Aenderung an jsonMap raeumt das alte Reading ab' => sub {
+	reset_env();
+	add_iodev('mqtt', 'MQTT2_SERVER');
+	my ($hash, $error) = define_discovery('discovery', 'mqtt');
+	die $error if $error;
+	FHEM::MQTT2_DISCOVERY::activate($hash);
+	$main::attr{discovery}{keys} = 'readings=parse';
+	dispatch_message('mqtt', 'client1', 'tasmota/discovery/AABBCCDDEEFF/config',
+		'{"dn":"Keller","fn":["Pumpe",null],"mac":"AABBCCDDEEFF","md":"Generic",'
+			. '"state":["OFF","ON"],"t":"tasmota_DDEEFF","ft":"%prefix%/%topic%/",'
+			. '"tp":["cmnd","stat","tele"],"rl":[1,0],"so":{"4":0},"ver":1}');
+	my $device = 'Keller_Pumpe';
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/STATE', '{"Heap":24}');
+	is($main::defs{$device}{READINGS}{Heap}{VAL}, 24, 'das Feld steht unter seinem Namen');
+
+	# So meldet FHEM eine Attributaenderung; MQTT2_DEVICE hat JSONMAP da bereits
+	# aus dem Attribut gebaut.
+	$main::defs{$device}{JSONMAP} = { Heap => 'speicher' };
+	$main::defs{global} = { NAME => 'global',
+		CHANGED => ["ATTR $device jsonMap Heap:speicher"] };
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $main::defs{global});
+	ok(!exists($main::defs{$device}{READINGS}{Heap}),
+		'das Reading unter dem alten Namen ist weg');
+	dispatch_message('mqtt', 'client1', 'tele/tasmota_DDEEFF/STATE', '{"Heap":25}');
+	is($main::defs{$device}{READINGS}{speicher}{VAL}, 25, 'der neue Name laeuft weiter');
+
+	# Ein abgewaehlter Name bleibt in der Auswahl, ein ueberholter verschwindet.
+	my ($record) = grep {
+		ref($_) eq 'HASH' && ($_->{name} // '') eq $device
+	} values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
+	ok(!grep({ $_ eq 'Heap' } FHEM::MQTT2_DISCOVERY::selectable_readings($hash, $record)),
+		'der ueberholte Name wird nicht mehr angeboten');
+};
+
 done_testing();
