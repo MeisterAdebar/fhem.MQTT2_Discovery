@@ -18,10 +18,13 @@ die $! if !defined $loaded;
 subtest 'Initialize und Define' => sub {
 	reset_env();
 	my $module = $main::modules{MQTT2_DISCOVERY};
-	is($module->{DefFn}, 'MQTT2_DISCOVERY_Define', 'DefFn registriert');
-	is($module->{GetFn}, 'MQTT2_DISCOVERY_Get', 'GetFn registriert');
-	is($module->{ParseFn}, 'MQTT2_DISCOVERY_Parse', 'ParseFn registriert');
-	is($module->{NotifyFn}, 'MQTT2_DISCOVERY_Notify', 'NotifyFn registriert');
+	# Die Schnittstellen sind Code-Referenzen in dieses Paket, keine Namen in main.
+	is($module->{DefFn}, \&FHEM::MQTT2_DISCOVERY::Define, 'DefFn registriert');
+	is($module->{GetFn}, \&FHEM::MQTT2_DISCOVERY::Get, 'GetFn registriert');
+	is($module->{ParseFn}, \&FHEM::MQTT2_DISCOVERY::Parse, 'ParseFn registriert');
+	is($module->{NotifyFn}, \&FHEM::MQTT2_DISCOVERY::Notify, 'NotifyFn registriert');
+	is($main::data{MQTT2_DEVICE}{SetExtensionsFn}, 'MQTT2_DISCOVERY_SetExtensions',
+		'der Hook traegt den in main sichtbaren Namen ein');
 	is($module->{FW_deviceOverview}, 1, 'kontextbezogene FHEMWEB-Hilfe ist aktiviert');
 	like($module->{Match}, qr/config/, 'globales Match erfasst Config-Topics');
 	like($module->{Match}, qr/sensors/, 'globales Match erfasst native Tasmota-Sensor-Topics');
@@ -46,7 +49,7 @@ subtest 'Initialize und Define' => sub {
 	is($first_error, undef, 'Server-Discovery wird definiert');
 	is($first->{NOTIFYDEV}, 'global,server',
 		'Notify ist auf Lebenszyklus und gebundenes IODev begrenzt');
-	is(main::MQTT2_DISCOVERY_prefixes($first), ['homeassistant', 'tasmota/discovery', 'sonos2mqtt'],
+	is(FHEM::MQTT2_DISCOVERY::prefixes($first), ['homeassistant', 'tasmota/discovery', 'sonos2mqtt'],
 		'Home Assistant, Tasmota und Sonos2mqtt Discovery sind standardmaessig aktiv');
 	is($main::modules{MQTT2_DISCOVERY}{defptr}{server}, $first, 'Registry enthaelt IODev-Zuordnung');
 	my ($second, $second_error) = define_discovery('discovery2', 'server');
@@ -55,7 +58,7 @@ subtest 'Initialize und Define' => sub {
 	add_iodev('client', 'MQTT2_CLIENT');
 	my ($other, $other_error) = define_discovery('discoveryClient', 'client');
 	is($other_error, undef, 'anderes IODev darf eigene Instanz haben');
-	is(main::MQTT2_DISCOVERY_Undef($other, 'discoveryClient'), undef, 'Undef erfolgreich');
+	is(FHEM::MQTT2_DISCOVERY::Undef($other, 'discoveryClient'), undef, 'Undef erfolgreich');
 	ok(!exists $main::modules{MQTT2_DISCOVERY}{defptr}{client}, 'Undef entfernt nur eigenen Registry-Eintrag');
 	is($main::modules{MQTT2_DISCOVERY}{defptr}{server}, $first, 'andere Registry-Zuordnung bleibt erhalten');
 };
@@ -69,7 +72,7 @@ subtest 'modify wechselt IODev ohne veraltete Registrierung' => sub {
 	$hash->{helper}{queue} = { order => [], messages => {}, scheduled => 1 };
 
 	$hash->{OLDDEF} = 'serverA';
-	my $modify_error = main::MQTT2_DISCOVERY_Define(
+	my $modify_error = FHEM::MQTT2_DISCOVERY::Define(
 		$hash, 'discovery MQTT2_DISCOVERY serverB'
 	);
 	delete $hash->{OLDDEF};
@@ -93,7 +96,7 @@ subtest 'fehlgeschlagenes modify erhaelt bisherige Registrierung' => sub {
 	is($occupied_error, undef, 'zweite Ausgangsdefinition ist gueltig');
 
 	$hash->{OLDDEF} = 'serverA';
-	my $modify_error = main::MQTT2_DISCOVERY_Define(
+	my $modify_error = FHEM::MQTT2_DISCOVERY::Define(
 		$hash, 'discoveryA MQTT2_DISCOVERY serverB'
 	);
 	delete $hash->{OLDDEF};
@@ -137,7 +140,7 @@ subtest 'Get devices trennt verwaltete und nicht verwaltete MQTT-Devices' => sub
 	$main::defs{NotMqtt} = {
 		NAME => 'NotMqtt', TYPE => 'dummy', IODev => $server, READINGS => {},
 	};
-	my $registry = main::MQTT2_DISCOVERY_registry($hash);
+	my $registry = FHEM::MQTT2_DISCOVERY::registry($hash);
 	$registry->{devices} = {
 		adopted => {
 			name => 'A&Managed', created => 0, io => 'server',
@@ -164,14 +167,14 @@ subtest 'Get devices trennt verwaltete und nicht verwaltete MQTT-Devices' => sub
 			cid => 'wrong-io', entities => { state => {} },
 		},
 	};
-	main::MQTT2_DISCOVERY_registry($other_hash)->{devices} = {
+	FHEM::MQTT2_DISCOVERY::registry($other_hash)->{devices} = {
 		other => {
 			name => 'OtherBroker.Device', created => 1, io => 'otherServer',
 			cid => 'other-cid', entities => { state => {} },
 		},
 	};
 
-	my ($managed, $unmanaged) = main::MQTT2_DISCOVERY_device_groups($hash);
+	my ($managed, $unmanaged) = FHEM::MQTT2_DISCOVERY::device_groups($hash);
 	is($managed, ['A&Managed', 'Renamed.Device', 'Z.Managed'],
 		'angelegte, uebernommene und eindeutig umbenannte Registry-Ziele sind verwaltet');
 	is($unmanaged, ['B<Unmanaged', 'M.Unmanaged', 'WrongIo.Record'],
@@ -181,7 +184,7 @@ subtest 'Get devices trennt verwaltete und nicht verwaltete MQTT-Devices' => sub
 	my $registry_before = $json->encode($registry);
 	my $readings_before = $json->encode($hash->{READINGS});
 	my $commands_before = [ @{ command_log() } ];
-	my $html = main::MQTT2_DISCOVERY_Get($hash, 'discovery', 'devices');
+	my $html = FHEM::MQTT2_DISCOVERY::Get($hash, 'discovery', 'devices');
 	like($html, qr{\A<html>.*</html>\z}s, 'Get liefert den FHEMWEB-Popup-Wrapper');
 	like($html, qr/MQTT2-Devices an server/, 'Popup nennt das gebundene IODev');
 	like($html, qr/Verwaltet \(3\)/, 'verwaltete Gruppe zeigt ihre Anzahl');
@@ -192,9 +195,9 @@ subtest 'Get devices trennt verwaltete und nicht verwaltete MQTT-Devices' => sub
 		'nicht verwalteter Link verhindert HTML-Injektion');
 	my $byte_name = "K\xC3\xBCche";
 	my $wide_name = Encode::decode('UTF-8', $byte_name);
-	is(main::MQTT2_DISCOVERY_url_encode($wide_name), 'K%C3%BCche',
+	is(FHEM::MQTT2_DISCOVERY::url_encode($wide_name), 'K%C3%BCche',
 		'Unicode-Zeichenkette wird einmal als UTF-8 codiert');
-	is(main::MQTT2_DISCOVERY_url_encode($byte_name), 'K%C3%BCche',
+	is(FHEM::MQTT2_DISCOVERY::url_encode($byte_name), 'K%C3%BCche',
 		'FHEM-Bytestream wird nicht doppelt als UTF-8 codiert');
 	unlike($html, qr/Missing\.Device|OtherBroker\.Device|NotMqtt/,
 		'verwaiste, fremde und typfremde Devices fehlen');
@@ -207,11 +210,11 @@ subtest 'Get devices trennt verwaltete und nicht verwaltete MQTT-Devices' => sub
 	is($json->encode($registry), $registry_before, 'Get veraendert die Registry nicht');
 	is($json->encode($hash->{READINGS}), $readings_before, 'Get veraendert keine Readings');
 	is(command_log(), $commands_before, 'Get fuehrt keine FHEM-Kommandos aus');
-	like(main::MQTT2_DISCOVERY_Get($hash, 'discovery'), qr/devices:noArg/,
+	like(FHEM::MQTT2_DISCOVERY::Get($hash, 'discovery'), qr/devices:noArg/,
 		'fehlender Get-Befehl nennt die Auswahl');
-	like(main::MQTT2_DISCOVERY_Get($hash, 'discovery', 'unknown'), qr/devices:noArg/,
+	like(FHEM::MQTT2_DISCOVERY::Get($hash, 'discovery', 'unknown'), qr/devices:noArg/,
 		'unbekannter Get-Befehl nennt die Auswahl');
-	like(main::MQTT2_DISCOVERY_Get($hash, 'discovery', 'devices', 'extra'), qr/devices:noArg/,
+	like(FHEM::MQTT2_DISCOVERY::Get($hash, 'discovery', 'devices', 'extra'), qr/devices:noArg/,
 		'devices lehnt Zusatzargumente ab');
 };
 
@@ -221,7 +224,7 @@ subtest 'Get devices zeigt auch leere Gruppen' => sub {
 	my ($hash, $error) = define_discovery('discovery', 'server');
 	is($error, undef, 'Discovery ohne MQTT2_DEVICEs wird definiert');
 	$main::attr{global}{language} = 'DE';
-	my $html = main::MQTT2_DISCOVERY_Get($hash, 'discovery', 'devices');
+	my $html = FHEM::MQTT2_DISCOVERY::Get($hash, 'discovery', 'devices');
 	like($html, qr/Verwaltet \(0\)/, 'leere verwaltete Gruppe bleibt sichtbar');
 	like($html, qr/Nicht verwaltet \(0\)/, 'leere nicht verwaltete Gruppe bleibt sichtbar');
 	is(() = $html =~ /Keine Devices/g, 2, 'beide leeren Gruppen erklaeren ihren Zustand');
@@ -242,7 +245,7 @@ subtest 'Get devices reserviert Direktnamen vor dem CID-Rename-Fallback' => sub 
 		};
 	}
 
-	main::MQTT2_DISCOVERY_registry($hash)->{devices} = {
+	FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} = {
 		a_stale => {
 			name => 'Old.Device', created => 1, io => 'server',
 			cid => 'shared-cid', entities => {},
@@ -253,7 +256,7 @@ subtest 'Get devices reserviert Direktnamen vor dem CID-Rename-Fallback' => sub 
 		},
 	};
 
-	my ($managed, $unmanaged) = main::MQTT2_DISCOVERY_device_groups($hash);
+	my ($managed, $unmanaged) = FHEM::MQTT2_DISCOVERY::device_groups($hash);
 	is($managed, ['Current.Device', 'Renamed.Device'],
 		'Direktname und danach eindeutiger Rename-Fallback sind verwaltet');
 	is($unmanaged, [], 'kein Registry-Ziel bleibt wegen der Identity-Sortierung uebrig');
@@ -286,41 +289,41 @@ subtest 'Attributvalidierung' => sub {
 	reset_env();
 	add_iodev('server');
 	define_discovery('discovery', 'server');
-	is(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'discoveryPrefixes', 'homeassistant, ha,homeassistant'), undef, 'mehrere Prefixe sind gueltig');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'discoveryPrefixes', 'homeassistant,,ha'), qr/nicht leer/, 'leerer Prefix wird abgelehnt');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'discoveryPrefixes', 'homeassistant/#'), qr/Ungueltiger/, 'Wildcard wird abgelehnt');
-	is(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'existingDevice', 'replace'), undef, 'replace ist gueltig');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'existingDevice', 'force'), qr/muss/, 'unbekannter Modus wird abgelehnt');
-	is(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'extraJsonReadings', 'ignore'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'discoveryPrefixes', 'homeassistant, ha,homeassistant'), undef, 'mehrere Prefixe sind gueltig');
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'discoveryPrefixes', 'homeassistant,,ha'), qr/nicht leer/, 'leerer Prefix wird abgelehnt');
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'discoveryPrefixes', 'homeassistant/#'), qr/Ungueltiger/, 'Wildcard wird abgelehnt');
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'existingDevice', 'replace'), undef, 'replace ist gueltig');
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'existingDevice', 'force'), qr/muss/, 'unbekannter Modus wird abgelehnt');
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'extraJsonReadings', 'ignore'), undef,
 		'extraJsonReadings=ignore ist gueltig');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'extraJsonReadings', 'strict'), qr/include oder ignore/,
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'extraJsonReadings', 'strict'), qr/include oder ignore/,
 		'extraJsonReadings akzeptiert nur die beiden dokumentierten Modi');
-	is(main::MQTT2_DISCOVERY_Attr(
+	is(FHEM::MQTT2_DISCOVERY::Attr(
 			'set', 'discovery', 'availabilityReading', 'MQTT2DiscoveryAvailability',
 		), undef, 'ein sicherer Availability-Readingname ist gueltig');
-	like(main::MQTT2_DISCOVERY_Attr(
+	like(FHEM::MQTT2_DISCOVERY::Attr(
 			'set', 'discovery', 'availabilityReading', 'bad reading',
 		), qr/darf nur/, 'Leerzeichen im Availability-Readingnamen werden abgelehnt');
-	like(main::MQTT2_DISCOVERY_Attr(
+	like(FHEM::MQTT2_DISCOVERY::Attr(
 			'set', 'discovery', 'availabilityReading', '2bad',
 		), qr/beginnen/, 'ungueltiger Anfang im Availability-Readingnamen wird abgelehnt');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'autoDelete', 'yes'), qr/0 oder 1/, 'Boolean wird validiert');
-	is(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'createReadings', '1'), undef,
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'autoDelete', 'yes'), qr/0 oder 1/, 'Boolean wird validiert');
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'createReadings', '1'), undef,
 		'createReadings=1 ist gueltig');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'createReadings', 'unknown'), qr/0 oder 1/,
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'createReadings', 'unknown'), qr/0 oder 1/,
 		'createReadings akzeptiert nur Boolean-Werte');
-	is(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'deviceNamePrefix', 'MQTT2_'), undef, 'sicherer Device-Prefix ist gueltig');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'deviceNamePrefix', 'bad prefix'), qr/darf nur/, 'Leerzeichen im Device-Prefix werden abgelehnt');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'deviceNamePrefix', '2bad'), qr/beginnen/, 'ungueltiger Anfang im Device-Prefix wird abgelehnt');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'disable', 'yes'), qr/0 oder 1/, 'disable wird validiert');
-	is(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'disable', '1'), undef, 'disable=1 ist gueltig');
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'deviceNamePrefix', 'MQTT2_'), undef, 'sicherer Device-Prefix ist gueltig');
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'deviceNamePrefix', 'bad prefix'), qr/darf nur/, 'Leerzeichen im Device-Prefix werden abgelehnt');
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'deviceNamePrefix', '2bad'), qr/beginnen/, 'ungueltiger Anfang im Device-Prefix wird abgelehnt');
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'disable', 'yes'), qr/0 oder 1/, 'disable wird validiert');
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'disable', '1'), undef, 'disable=1 ist gueltig');
 	is(reading_value('discovery', 'state'), 'disabled', 'disable=1 wird im Status sichtbar');
-	is(main::MQTT2_DISCOVERY_Attr('del', 'discovery', 'disable'), undef, 'disable kann geloescht werden');
+	is(FHEM::MQTT2_DISCOVERY::Attr('del', 'discovery', 'disable'), undef, 'disable kann geloescht werden');
 	is(reading_value('discovery', 'state'), 'inactive', 'Loeschen stellt den Parserstatus wieder her');
 };
 
 subtest 'sicher vorhersagbare Reading-Namen' => sub {
-	is(main::MQTT2_DISCOVERY_expected_reading_names([
+	is(FHEM::MQTT2_DISCOVERY::expected_reading_names([
 		{ kind => 'reading', name => 'state' },
 		{ kind => 'json_reading', name => 'temperature' },
 		{ kind => 'json_autocreate', name => 'POWER', json_key => 'POWER' },
@@ -340,7 +343,7 @@ subtest 'gespeichertes disable gilt bereits beim Define' => sub {
 	my ($hash, $error) = define_discovery('startupDiscovery', 'server');
 	is($error, undef, 'Device wird mit vorhandenem disable-Attribut definiert');
 	is(reading_value('startupDiscovery', 'state'), 'disabled', 'Startzustand ist disabled');
-	is(main::MQTT2_DISCOVERY_Set($hash, 'startupDiscovery', 'activate'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'startupDiscovery', 'activate'), undef,
 		'Parserposition kann trotz disable vorbereitet werden');
 	is(reading_value('startupDiscovery', 'state'), 'disabled', 'activate umgeht disable nicht');
 };
@@ -350,12 +353,12 @@ subtest 'activate und deactivate erhalten fremde Clients' => sub {
 	my $io = add_iodev('server');
 	$io->{Clients} = ':CUSTOM:MQTT2_DEVICE:MQTT_GENERIC_BRIDGE:';
 	my ($hash) = define_discovery('discovery', 'server');
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'activate'), undef, 'activate erfolgreich');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'activate'), undef, 'activate erfolgreich');
 	is(attr_value('server', 'clientOrder'), 'CUSTOM MQTT2_DISCOVERY MQTT2_DEVICE MQTT_GENERIC_BRIDGE', 'Discovery wird vor MQTT2_DEVICE eingefuegt');
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'activate'), undef, 'zweites activate erfolgreich');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'activate'), undef, 'zweites activate erfolgreich');
 	is(attr_value('server', 'clientOrder'), 'CUSTOM MQTT2_DISCOVERY MQTT2_DEVICE MQTT_GENERIC_BRIDGE', 'activate ist idempotent');
 	is(reading_value('discovery', 'state'), 'active', 'Status ist active');
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'deactivate'), undef, 'deactivate erfolgreich');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deactivate'), undef, 'deactivate erfolgreich');
 	is(attr_value('server', 'clientOrder'), 'CUSTOM MQTT2_DEVICE MQTT_GENERIC_BRIDGE', 'nur eigener Eintrag wird entfernt');
 };
 
@@ -378,7 +381,7 @@ subtest 'passendes IODev-ignoreRegexp wird einmalig geloggt' => sub {
 
 	# INITIALIZED prueft gespeicherte Attribute erneut, darf dieselbe Warnung
 	# innerhalb desselben Laufs jedoch nicht vervielfachen.
-	main::MQTT2_DISCOVERY_Notify($client_hash, {
+	FHEM::MQTT2_DISCOVERY::Notify($client_hash, {
 		NAME => 'global', CHANGED => ['INITIALIZED'],
 	});
 	@client_warnings = grep {
@@ -391,7 +394,7 @@ subtest 'passendes IODev-ignoreRegexp wird einmalig geloggt' => sub {
 	my ($server_hash, $server_error) = define_discovery('serverDiscovery', 'server');
 	is($server_error, undef, 'Server-Discovery startet ohne Filterwarnung');
 	$main::attr{server}{ignoreRegexp} = 'tasmota/discovery/.+/sensors';
-	main::MQTT2_DISCOVERY_Notify($server_hash, {
+	FHEM::MQTT2_DISCOVERY::Notify($server_hash, {
 		NAME => 'global',
 		CHANGED => ['ATTR server ignoreRegexp tasmota/discovery/.+/sensors'],
 	});
@@ -407,7 +410,7 @@ subtest 'Rescan-Grenzen' => sub {
 	reset_env();
 	add_iodev('client', 'MQTT2_CLIENT');
 	my ($client_hash) = define_discovery('clientDiscovery', 'client');
-	like(main::MQTT2_DISCOVERY_Set($client_hash, 'clientDiscovery', 'rescan'), qr/keinen lokalen Retain-Cache/, 'Client meldet ehrliche Grenze');
+	like(FHEM::MQTT2_DISCOVERY::Set($client_hash, 'clientDiscovery', 'rescan'), qr/keinen lokalen Retain-Cache/, 'Client meldet ehrliche Grenze');
 
 	my $server = add_iodev('server', 'MQTT2_SERVER');
 	$server->{retain}{'homeassistant/sensor/node/temp/config'} = {
@@ -418,7 +421,7 @@ subtest 'Rescan-Grenzen' => sub {
 	};
 	my ($server_hash) = define_discovery('serverDiscovery', 'server');
 	my $before_rescan = scalar @{ command_log() };
-	is(main::MQTT2_DISCOVERY_Set($server_hash, 'serverDiscovery', 'rescan'), undef, 'Server-Rescan verarbeitet Cache');
+	is(FHEM::MQTT2_DISCOVERY::Set($server_hash, 'serverDiscovery', 'rescan'), undef, 'Server-Rescan verarbeitet Cache');
 	my @rescan_commands = @{ command_log() }[$before_rescan .. $#{ command_log() }];
 	is(reading_value('serverDiscovery', 'discoveredEntities'), 2, 'Rescan hat beide Entities registriert');
 	is(reading_value('serverDiscovery', 'lastRescan'), 'processed=2 failed=0', 'Rescan-Ergebnis ist nachvollziehbar');
@@ -426,7 +429,7 @@ subtest 'Rescan-Grenzen' => sub {
 		'Rescan schreibt readingList pro Zieldevice nur einmal');
 
 	$main::attr{serverDiscovery}{disable} = 1;
-	like(main::MQTT2_DISCOVERY_Set($server_hash, 'serverDiscovery', 'rescan'), qr/deaktiviert/,
+	like(FHEM::MQTT2_DISCOVERY::Set($server_hash, 'serverDiscovery', 'rescan'), qr/deaktiviert/,
 		'deaktiviertes Modul fuehrt keinen Rescan aus');
 };
 
@@ -443,7 +446,7 @@ subtest 'Rescan verarbeitet retained Tasmota config und sensors gemeinsam' => su
 	is($error, undef, 'Tasmota-Discovery wird definiert');
 
 	my $before_rescan = scalar @{ command_log() };
-	is(main::MQTT2_DISCOVERY_Set($hash, 'tasmotaDiscovery', 'rescan'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'tasmotaDiscovery', 'rescan'), undef,
 		'Server-Rescan verarbeitet beide Tasmota-Topics');
 	my @rescan_commands = @{ command_log() }[$before_rescan .. $#{ command_log() }];
 
@@ -468,11 +471,11 @@ subtest 'Tasmota-Neuaufbau und echtes Delete verwenden getrennte Logstufen' => s
 	my $payload = '{"dn":"Log Plug","fn":["Relay"],"mac":"AABBCCDDEEFF",'
 		. '"t":"log_plug","ft":"%prefix%/%topic%/","tp":["cmnd","stat","tele"],'
 		. '"rl":[1],"state":["OFF","ON"],"so":{"4":0},"ver":1}';
-	is(main::MQTT2_DISCOVERY_process($hash, 'tasmota', $topic, $payload),
+	is(FHEM::MQTT2_DISCOVERY::process($hash, 'tasmota', $topic, $payload),
 		'consumed', 'Ausgangsmodell wird angelegt');
 
 	@{ log_entries() } = ();
-	is(main::MQTT2_DISCOVERY_process($hash, 'tasmota', $topic, $payload),
+	is(FHEM::MQTT2_DISCOVERY::process($hash, 'tasmota', $topic, $payload),
 		'consumed', 'identisches Tasmota-Modell wird intern neu aufgebaut');
 	my @rebuild_logs = grep {
 		$_->[2] =~ /temporarily removed .* during internal rebuild/
@@ -483,7 +486,7 @@ subtest 'Tasmota-Neuaufbau und echtes Delete verwenden getrennte Logstufen' => s
 		'interner Neuaufbau erzeugt keine sichtbare Level-2-Loeschmeldung');
 
 	@{ log_entries() } = ();
-	is(main::MQTT2_DISCOVERY_process($hash, 'tasmota', $topic, ''),
+	is(FHEM::MQTT2_DISCOVERY::process($hash, 'tasmota', $topic, ''),
 		'consumed', 'leerer Config-Payload wird als echtes Delete verarbeitet');
 	my @delete_logs = grep {
 		$_->[2] =~ /removed .* discovery entity\/entities from Log_Plug_Relay/
@@ -498,7 +501,7 @@ subtest 'rebuildDevice ersetzt beide Listen unabhaengig vom Bestandsmodus' => su
 	my ($hash) = define_discovery('discovery', 'server');
 	my $payload = '{"stat_t":"node/state","cmd_t":"node/set","uniq_id":"node_power",'
 		. '"dev":{"ids":["node"],"name":"Node"}}';
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 			$hash, 'client', 'homeassistant/switch/node/power/config', $payload,
 		), 'consumed', 'Ausgangs-Discovery wird verarbeitet');
 	my $generated_reading = attr_value('Node', 'readingList');
@@ -516,7 +519,7 @@ subtest 'rebuildDevice ersetzt beide Listen unabhaengig vom Bestandsmodus' => su
 			= "$generated_reading\nmanual/topic:.* manual";
 		$main::attr{Node}{setList}
 			= "$generated_set\nmanualSet:noArg manual/topic 1";
-		is(main::MQTT2_DISCOVERY_Set(
+		is(FHEM::MQTT2_DISCOVERY::Set(
 				$hash, 'discovery', 'rebuildDevice', 'Node',
 			), undef, "rebuildDevice ist im Modus $mode erfolgreich");
 		is(attr_value('Node', 'readingList'), $generated_reading,
@@ -531,7 +534,7 @@ subtest 'rebuildDevice ersetzt beide Listen unabhaengig vom Bestandsmodus' => su
 		'andere manuelle Attribute bleiben unveraendert');
 	is(reading_value('Node', 'state'), 'ON',
 		'vorhandene Readingwerte bleiben unveraendert');
-	like(main::MQTT2_DISCOVERY_Set(
+	like(FHEM::MQTT2_DISCOVERY::Set(
 			$hash, 'discovery', 'rebuildDevice', 'Unmanaged',
 		), qr/nicht verwaltet/, 'nicht verwaltete Devices werden abgelehnt');
 
@@ -541,8 +544,8 @@ subtest 'rebuildDevice ersetzt beide Listen unabhaengig vom Bestandsmodus' => su
 	$main::defs{Node}{READINGS}{'.internal'} = {
 		VAL => 'keep', TIME => '2026-08-18 12:00:00',
 	};
-	my $availability = main::MQTT2_DISCOVERY_availability_reading($hash);
-	is(main::MQTT2_DISCOVERY_Set(
+	my $availability = FHEM::MQTT2_DISCOVERY::availability_reading($hash);
+	is(FHEM::MQTT2_DISCOVERY::Set(
 			$hash, 'discovery', 'rebuildDevice', 'Node', 'clearReadings',
 		), undef, 'clearReadings ist nach erfolgreichem Listen-Neuaufbau erfolgreich');
 	ok(!exists($main::defs{Node}{READINGS}{state}),
@@ -557,7 +560,7 @@ subtest 'rebuildDevice ersetzt beide Listen unabhaengig vom Bestandsmodus' => su
 		'clearReadings veraendert die neu erzeugte readingList nicht');
 	is(attr_value('Node', 'setList'), $generated_set,
 		'clearReadings veraendert die neu erzeugte setList nicht');
-	like(main::MQTT2_DISCOVERY_Set(
+	like(FHEM::MQTT2_DISCOVERY::Set(
 			$hash, 'discovery', 'rebuildDevice', 'Node', 'clear',
 		), qr/Unknown argument/, 'unbekannte Rebuild-Optionen werden abgelehnt');
 };
@@ -574,10 +577,10 @@ subtest 'rebuildDevice normalisiert devicetopic eines uebernommenen Devices' => 
 	$main::attr{Node}{devicetopic} = 'root';
 	my $payload = '{"stat_t":"root/node/state","cmd_t":"root/node/set","uniq_id":"node_power",'
 		. '"dev":{"ids":["node"],"name":"Node"}}';
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 			$hash, 'client', 'homeassistant/switch/node/power/config', $payload,
 		), 'consumed', 'bestehendes MQTT2_DEVICE wird uebernommen');
-	my ($record) = values %{ main::MQTT2_DISCOVERY_registry($hash)->{devices} };
+	my ($record) = values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
 	is($record->{created}, 0, 'Registry kennzeichnet das Ziel als uebernommenes Device');
 	is($record->{owned_devicetopic}, undef,
 		'bestehendes devicetopic gehoert vor dem Neuaufbau nicht dem Modul');
@@ -588,7 +591,7 @@ subtest 'rebuildDevice normalisiert devicetopic eines uebernommenen Devices' => 
 	like(attr_value('Node', 'setList'), qr{\$DEVICETOPIC/node/set},
 		'Bestands-devicetopic wird vor dem Neuaufbau in der setList beruecksichtigt');
 
-	is(main::MQTT2_DISCOVERY_Set(
+	is(FHEM::MQTT2_DISCOVERY::Set(
 			$hash, 'discovery', 'rebuildDevice', 'Node',
 		), undef, 'rebuildDevice normalisiert das uebernommene Device');
 	is(attr_value('Node', 'devicetopic'), 'root/node',
@@ -609,7 +612,7 @@ subtest 'rebuildDevice rollt einen unvollstaendigen ActionPlan sofort zurueck' =
 	my ($hash) = define_discovery('discovery', 'server');
 	my $payload = '{"stat_t":"root/node/state","cmd_t":"root/node/set","uniq_id":"node_power",'
 		. '"dev":{"ids":["node"],"name":"Node"}}';
-	main::MQTT2_DISCOVERY_process(
+	FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'client', 'homeassistant/switch/node/power/config', $payload,
 	);
 	$main::attr{Node}{devicetopic} = 'root';
@@ -621,7 +624,7 @@ subtest 'rebuildDevice rollt einen unvollstaendigen ActionPlan sofort zurueck' =
 	my $old_device_topic = attr_value('Node', 'devicetopic');
 	my $old_reading = attr_value('Node', 'readingList');
 	my $old_set = attr_value('Node', 'setList');
-	my ($record) = values %{ main::MQTT2_DISCOVERY_registry($hash)->{devices} };
+	my ($record) = values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
 	my $old_owned_device_topic = $record->{owned_devicetopic};
 	my $old_owned_reading = [ @{ $record->{owned_reading} } ];
 	my $old_owned_set = [ @{ $record->{owned_set} } ];
@@ -635,7 +638,7 @@ subtest 'rebuildDevice rollt einen unvollstaendigen ActionPlan sofort zurueck' =
 			return 'simulierter setList-Fehler' if $definition =~ /^Node setList /;
 			return $command_attr->(@_);
 		};
-		like(main::MQTT2_DISCOVERY_Set(
+		like(FHEM::MQTT2_DISCOVERY::Set(
 				$hash, 'discovery', 'rebuildDevice', 'Node', 'clearReadings',
 			), qr/simulierter setList-Fehler/, 'ActionPlan-Fehler wird zurueckgegeben');
 	}
@@ -661,7 +664,7 @@ subtest 'Bestandsmodi und autoCreate' => sub {
 	my ($hash) = define_discovery('discovery', 'server');
 	$main::attr{discovery}{autoCreate} = 0;
 	my $payload = '{"stat_t":"node/state","cmd_t":"node/set","uniq_id":"node_power","dev":{"ids":["node"],"name":"Node"}}';
-	main::MQTT2_DISCOVERY_process($hash, 'c', 'homeassistant/switch/node/power/config', $payload);
+	FHEM::MQTT2_DISCOVERY::process($hash, 'c', 'homeassistant/switch/node/power/config', $payload);
 	ok(!$main::defs{Node}, 'autoCreate=0 legt kein Device an');
 	like(reading_value('discovery', 'lastError'), qr/autoCreate/, 'autoCreate-Konflikt ist sichtbar');
 
@@ -670,7 +673,7 @@ subtest 'Bestandsmodi und autoCreate' => sub {
 	($hash) = define_discovery('discovery', 'server');
 	$main::defs{Node} = { NAME => 'Node', TYPE => 'MQTT2_DEVICE', READINGS => {} };
 	$main::attr{discovery}{existingDevice} = 'ignore';
-	main::MQTT2_DISCOVERY_process($hash, 'c', 'homeassistant/switch/node/power/config', $payload);
+	FHEM::MQTT2_DISCOVERY::process($hash, 'c', 'homeassistant/switch/node/power/config', $payload);
 	like(reading_value('discovery', 'lastError'), qr/ignore-Modus/, 'ignore veraendert bestehendes Device nicht');
 	ok(!attr_value('Node', 'setList'), 'ignore erzeugt keine Attribute');
 
@@ -680,7 +683,7 @@ subtest 'Bestandsmodi und autoCreate' => sub {
 	$main::defs{Node} = { NAME => 'Node', TYPE => 'MQTT2_DEVICE', READINGS => {} };
 	$main::attr{Node}{setList} = "power:on,off manual/topic value\nreboot:noArg manual/reboot 1";
 	$main::attr{discovery}{existingDevice} = 'replace';
-	is(main::MQTT2_DISCOVERY_process($hash, 'c', 'homeassistant/switch/node/power/config', $payload), 'consumed', 'replace uebernimmt vorhandenes MQTT2_DEVICE');
+	is(FHEM::MQTT2_DISCOVERY::process($hash, 'c', 'homeassistant/switch/node/power/config', $payload), 'consumed', 'replace uebernimmt vorhandenes MQTT2_DEVICE');
 	like(attr_value('Node', 'setList'), qr/reboot:noArg manual\/reboot 1/, 'replace erhaelt nicht kollidierende manuelle Zeile');
 	unlike(attr_value('Node', 'setList'), qr/manual\/topic/, 'replace ersetzt kollidierende manuelle Zeile');
 };
@@ -696,7 +699,7 @@ subtest 'FHEM-Autocreate-Identitaet folgt CID und bridgeRegexp statt Device-Name
 		CID => 'RINCON_804AF2CB96C201400', DEF => 'RINCON_804AF2CB96C201400',
 		IODev => $io, READINGS => {},
 	};
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'RINCON_804AF2CB96C201400',
 		'homeassistant/switch/sonos/power/config', $payload,
 	), 'consumed', 'vorhandene FHEM-CID wird unabhaengig vom Namen erkannt');
@@ -710,7 +713,7 @@ subtest 'FHEM-Autocreate-Identitaet folgt CID und bridgeRegexp statt Device-Name
 	$renamed->{NAME} = $new_name;
 	$main::defs{$new_name} = $renamed;
 	$main::attr{$new_name} = delete($main::attr{$old_name}) || {};
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'RINCON_804AF2CB96C201400',
 		'homeassistant/switch/sonos/power/config', $payload,
 	), 'consumed', 'umbenanntes MQTT2_DEVICE wird ueber seine CID wiedergefunden');
@@ -728,7 +731,7 @@ subtest 'FHEM-Autocreate-Identitaet folgt CID und bridgeRegexp statt Device-Name
 		},
 	};
 	my $zigbee_payload = '{"stat_t":"zigbee2mqtt/0x00124b/state","uniq_id":"z2m_temp","dev":{"ids":["z2m_0x00124b"],"name":"Temperatursensor"}}';
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'zigbee2mqtt',
 		'homeassistant/sensor/z2m_0x00124b/temperature/config', $zigbee_payload,
 	), 'consumed', 'bridgeRegexp wird auf das Discovery-State-Topic angewandt');
@@ -746,10 +749,10 @@ subtest 'MQTT2_CLIENT erhaelt stabile virtuelle Discovery-CIDs' => sub {
 	my $node = '{"stat_t":"node/state","uniq_id":"node_state","dev":{"ids":["node"],"name":"Node"}}';
 	my $other = '{"stat_t":"other/state","uniq_id":"other_state","dev":{"ids":["other"],"name":"Other"}}';
 
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'shared_client', 'homeassistant/sensor/node/state/config', $node,
 	), 'consumed', 'erstes Client-Device wird verarbeitet');
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'shared_client', 'homeassistant/sensor/other/state/config', $other,
 	), 'consumed', 'zweites Client-Device wird verarbeitet');
 
@@ -764,7 +767,7 @@ subtest 'MQTT2_CLIENT erhaelt stabile virtuelle Discovery-CIDs' => sub {
 		'gemeinsame MQTT2_CLIENT-Transport-CID registriert kein Discovery-Ziel');
 
 	my $first_cid = $node_cid;
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'changed_transport', 'homeassistant/sensor/node/state/config', $node,
 	), 'consumed', 'wiederholte Discovery bleibt trotz anderer Transport-CID gueltig');
 	is($main::defs{Node}{DEF}, $first_cid,
@@ -776,7 +779,7 @@ subtest 'MQTT2_CLIENT erhaelt stabile virtuelle Discovery-CIDs' => sub {
 	$main::modules{MQTT2_DEVICE}{defptr}{bridge} = {
 		'node/state:.*' => { name => '"bridge_node"', parent => 'general_bridge' },
 	};
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'shared_client', 'homeassistant/sensor/node/state/config', $node,
 	), 'consumed', 'Client-Discovery mit passender Bridge-Regel wird verarbeitet');
 	is($main::defs{Node}{DEF}, 'bridge_node',
@@ -785,7 +788,7 @@ subtest 'MQTT2_CLIENT erhaelt stabile virtuelle Discovery-CIDs' => sub {
 	reset_env();
 	add_iodev('server', 'MQTT2_SERVER');
 	($hash) = define_discovery('discovery', 'server');
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, '', 'homeassistant/sensor/node/state/config', $node,
 	), 'consumed', 'Discovery ohne Transport-CID wird verarbeitet');
 	like($main::defs{Node}{DEF}, qr/^mqtt2_discovery_[0-9a-f]{16}$/,
@@ -810,7 +813,7 @@ subtest 'optionales SemanticUI-Fertig-Signal folgt dem Device-Aufbau' => sub {
 			return 1;
 		},
 	);
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'c', 'homeassistant/switch/node/power/config', $payload,
 	), 'consumed', 'Discovery mit optionaler SemanticUI-Schnittstelle ist erfolgreich');
 	is(\@integration, [
@@ -823,12 +826,12 @@ subtest 'Registry roundtrippt als nicht ausfuehrbares JSON' => sub {
 	add_iodev('server');
 	my ($hash) = define_discovery('discovery', 'server');
 	my $payload = '{"stat_t":"node/state","uniq_id":"node_state","unit_of_meas":"\\u00b0C","dev":{"ids":["node"],"name":"Node"}}';
-	is(main::MQTT2_DISCOVERY_process($hash, 'c', 'homeassistant/sensor/node/state/config', $payload),
+	is(FHEM::MQTT2_DISCOVERY::process($hash, 'c', 'homeassistant/sensor/node/state/config', $payload),
 		'consumed', 'Unicode-Metadaten werden verarbeitet');
 	my $stored = reading_value('discovery', '.registry');
 	like($stored, qr/^\{/, 'Registry ist JSON');
 	delete $hash->{helper}{registry};
-	my $restored = main::MQTT2_DISCOVERY_registry($hash);
+	my $restored = FHEM::MQTT2_DISCOVERY::registry($hash);
 	is($restored->{version}, 1, 'Registry wird aus Reading wiederhergestellt');
 	is(scalar keys %{ $restored->{devices} }, 1, 'Registry mit Unicode bleibt beim Roundtrip erhalten');
 	my ($record) = values %{ $restored->{devices} };
@@ -839,7 +842,7 @@ subtest 'Registry roundtrippt als nicht ausfuehrbares JSON' => sub {
 	utf8::encode($stored_bytes);
 	$hash->{READINGS}{'.registry'}{VAL} = $stored_bytes;
 	delete $hash->{helper}{registry};
-	my $restored_bytes = main::MQTT2_DISCOVERY_registry($hash);
+	my $restored_bytes = FHEM::MQTT2_DISCOVERY::registry($hash);
 	($record) = values %{ $restored_bytes->{devices} };
 	($mapping) = values %{ $record->{entities} };
 	is($mapping->{metadata}{unit}, "\x{b0}C", 'UTF-8-Bytefolge bleibt nach Neustart unveraendert');
@@ -850,7 +853,7 @@ subtest 'Registry roundtrippt als nicht ausfuehrbares JSON' => sub {
 	utf8::downgrade($stored_bytestream, 1);
 	$hash->{READINGS}{'.registry'}{VAL} = $stored_bytestream;
 	delete $hash->{helper}{registry};
-	my $restored_bytestream = main::MQTT2_DISCOVERY_registry($hash);
+	my $restored_bytestream = FHEM::MQTT2_DISCOVERY::registry($hash);
 	($record) = values %{ $restored_bytestream->{devices} };
 	($mapping) = values %{ $record->{entities} };
 	is($mapping->{metadata}{unit}, "\x{b0}C",
@@ -858,16 +861,16 @@ subtest 'Registry roundtrippt als nicht ausfuehrbares JSON' => sub {
 };
 
 subtest 'Device-Availability verdichtet Entity-Regeln ohne falsches Offline' => sub {
-	is(main::MQTT2_DISCOVERY_device_availability_status(
+	is(FHEM::MQTT2_DISCOVERY::device_availability_status(
 			[qw(online offline unknown)]), 'online',
 		'mindestens eine verfuegbare Entity haelt das zusammengefasste Device online');
-	is(main::MQTT2_DISCOVERY_device_availability_status(
+	is(FHEM::MQTT2_DISCOVERY::device_availability_status(
 			[qw(offline offline)]), 'offline',
 		'ausschliesslich ausgefallene Entities setzen das Device offline');
-	is(main::MQTT2_DISCOVERY_device_availability_status(
+	is(FHEM::MQTT2_DISCOVERY::device_availability_status(
 			[qw(offline unknown)]), 'unknown',
 		'eine unbekannte Entity verhindert einen unbelegten Deviceausfall');
-	is(main::MQTT2_DISCOVERY_device_availability_status([]), 'unknown',
+	is(FHEM::MQTT2_DISCOVERY::device_availability_status([]), 'unknown',
 		'ohne Entity-Regel ist die Verdichtung selbst unbekannt');
 };
 
@@ -881,10 +884,10 @@ subtest 'IODev-Verbindung ueberlagert alle verwalteten Availability-Zustaende' =
 	my $guarded = '{"stat_t":"guarded/state","avty_t":"guarded/availability",'
 		. '"uniq_id":"guarded_state","dev":{"ids":["guarded"],'
 		. '"name":"Guarded"}}';
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'client', 'homeassistant/sensor/plain/state/config', $plain,
 	), 'consumed', 'Device ohne eigene Availability wird angelegt');
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'client', 'homeassistant/sensor/guarded/state/config', $guarded,
 	), 'consumed', 'Device mit eigener Availability wird angelegt');
 	is(reading_value('Plain', '.availability_io'), 'online',
@@ -893,13 +896,13 @@ subtest 'IODev-Verbindung ueberlagert alle verwalteten Availability-Zustaende' =
 		'Device ohne eigene Regel folgt der offenen Brokerverbindung');
 	is(reading_value('Guarded', 'availability'), 'unknown',
 		'Device mit noch unbekannter eigener Regel bleibt unknown');
-	my $registry = main::MQTT2_DISCOVERY_registry($hash);
+	my $registry = FHEM::MQTT2_DISCOVERY::registry($hash);
 	my ($guarded_record) = grep { $_->{name} eq 'Guarded' }
 		values %{ $registry->{devices} };
-	my $policies = main::MQTT2_DISCOVERY_availability_policies($guarded_record);
+	my $policies = FHEM::MQTT2_DISCOVERY::availability_policies($guarded_record);
 	is(scalar(@$policies), 1, 'eigene Availability-Regel ist in der Registry auffindbar');
 	$main::defs{Guarded}{READINGS}{ $policies->[0] } = { VAL => 'online' };
-	main::MQTT2_DISCOVERY_sync_target_availability($hash, $guarded_record, 1);
+	FHEM::MQTT2_DISCOVERY::sync_target_availability($hash, $guarded_record, 1);
 	is(reading_value('Guarded', 'availability'), 'online',
 		'eigene Online-Regel und Brokerzugang ergeben gemeinsam online');
 
@@ -910,7 +913,7 @@ subtest 'IODev-Verbindung ueberlagert alle verwalteten Availability-Zustaende' =
 	$client->{STATE} = 'disconnected';
 	$client->{READINGS}{state}{VAL} = 'disconnected';
 	$client->{CHANGED} = ['state: disconnected'];
-	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $client);
 	is(reading_value('Plain', 'availability'), 'offline',
 		'Verbindungsverlust setzt ein Device ohne eigene Regel offline');
 	is(reading_value('Guarded', 'availability'), 'offline',
@@ -921,25 +924,25 @@ subtest 'IODev-Verbindung ueberlagert alle verwalteten Availability-Zustaende' =
 	$client->{STATE} = 'opened';
 	$client->{READINGS}{state}{VAL} = 'opened';
 	$client->{CHANGED} = ['state: opened'];
-	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $client);
 	is(reading_value('Plain', 'availability'), 'online',
 		'Reconnect setzt ein Device ohne eigene Regel wieder online');
 	is(reading_value('Guarded', 'availability'), 'online',
 		'Reconnect wertet den erhaltenen eigenen Zustand erneut aus');
 
 	$main::defs{Guarded}{READINGS}{ $policies->[0] }{VAL} = 'offline';
-	main::MQTT2_DISCOVERY_sync_target_availability($hash, $guarded_record, 1);
+	FHEM::MQTT2_DISCOVERY::sync_target_availability($hash, $guarded_record, 1);
 	$client->{STATE} = 'disconnected';
 	$client->{READINGS}{state}{VAL} = 'disconnected';
-	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $client);
 	$client->{STATE} = 'opened';
 	$client->{READINGS}{state}{VAL} = 'opened';
-	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $client);
 	is(reading_value('Guarded', 'availability'), 'offline',
 		'Reconnect ersetzt einen erhaltenen eigenen Offline-Zustand nicht');
 
 	$main::attr{client}{disable} = 1;
-	main::MQTT2_DISCOVERY_Notify($hash, {
+	FHEM::MQTT2_DISCOVERY::Notify($hash, {
 		NAME => 'global', CHANGED => ['ATTR client disable 1'],
 	});
 	is(reading_value('Plain', 'availability'), 'offline',
@@ -967,7 +970,7 @@ subtest 'Availability-Topics erhalten deduplizierte Retained-Timer' => sub {
 		. '{"t":"zigbee2mqtt/bridge/state"}],'
 		. '"avty_mode":"all","uniq_id":"node_state",'
 		. '"dev":{"ids":["node"],"name":"Node"}}';
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'client', 'homeassistant/sensor/node/state/config', $payload,
 	), 'consumed', 'Device mit zwei Availability-Topics wird fertig angewendet');
 	is(reading_value('Node', 'availability'), 'unknown',
@@ -975,17 +978,17 @@ subtest 'Availability-Topics erhalten deduplizierte Retained-Timer' => sub {
 	is([map { $_->[0] } @scheduled], [60, 60],
 		'pro neuem Topic wird genau ein Timer mit 60 Sekunden Verzoegerung angelegt');
 	is([map { $_->[2] } @scheduled], [
-		'MQTT2_DISCOVERY_refresh_availability_topic',
-		'MQTT2_DISCOVERY_refresh_availability_topic',
+		\&FHEM::MQTT2_DISCOVERY::refresh_availability_topic,
+		\&FHEM::MQTT2_DISCOVERY::refresh_availability_topic,
 	], 'beide Timer verwenden den gezielten Availability-Callback');
-	my ($record) = values %{ main::MQTT2_DISCOVERY_registry($hash)->{devices} };
+	my ($record) = values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
 	is($record->{availability_topics}, [
 		'zigbee2mqtt/bridge/state', 'zigbee2mqtt/node/availability',
 	], 'angewendete Topics werden fuer spaetere Discovery-Wiederholungen gespeichert');
 
 	# Dieselbe Retained-Discovery darf waehrend der laufenden Timer keinen zweiten
 	# Satz Abrufe erzeugen.
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$hash, 'client', 'homeassistant/sensor/node/state/config', $payload,
 	), 'consumed', 'identische Discovery wird erneut verarbeitet');
 	is(scalar(@scheduled), 2, 'identische Topics erzeugen keine weiteren Timer');
@@ -993,20 +996,14 @@ subtest 'Availability-Topics erhalten deduplizierte Retained-Timer' => sub {
 	# Ein zu frueh laufender Topic-Timer wartet auf den Abschluss des Queue-Batches.
 	$hash->{helper}{queue} = { order => [], messages => {}, scheduled => 1 };
 	my $first = $scheduled[0];
-	{
-		no strict 'refs';
-		&{ "main::$first->[2]" }($first->[1]);
-	}
+	$first->[2]->($first->[1]);
 	is(scalar(@refreshes), 0, 'laufende Queue verhindert den Brokerabruf');
 	is($scheduled[-1][0], 10, 'derselbe Topic-Timer wird kurz zurueckgestellt');
 	my $retry = $scheduled[-1];
 	delete $hash->{helper}{queue};
 	$client->{STATE} = 'disconnected';
 	$client->{READINGS}{state}{VAL} = 'disconnected';
-	{
-		no strict 'refs';
-		&{ "main::$retry->[2]" }($retry->[1]);
-	}
+	$retry->[2]->($retry->[1]);
 	is(scalar(@scheduled), 3, 'getrennter Client erzeugt kein Polling');
 	ok($retry->[1]{waiting_for_io}, 'Topic-Timer wartet ereignisbasiert auf den Client');
 
@@ -1014,20 +1011,14 @@ subtest 'Availability-Topics erhalten deduplizierte Retained-Timer' => sub {
 	$client->{STATE} = 'opened';
 	$client->{READINGS}{state}{VAL} = 'opened';
 	$client->{CHANGED} = ['state: opened'];
-	main::MQTT2_DISCOVERY_Notify($hash, $client);
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $client);
 	is($scheduled[-1][0], 10, 'Reconnect plant den geparkten Abruf einmal neu');
 	my $resumed = $scheduled[-1];
-	{
-		no strict 'refs';
-		&{ "main::$resumed->[2]" }($resumed->[1]);
-	}
+	$resumed->[2]->($resumed->[1]);
 	is($refreshes[0][1], 'zigbee2mqtt/bridge/state',
 		'nach Queue und Reconnect wird genau das erste Topic angefordert');
 	my $second = $scheduled[1];
-	{
-		no strict 'refs';
-		&{ "main::$second->[2]" }($second->[1]);
-	}
+	$second->[2]->($second->[1]);
 	is([map { $_->[1] } @refreshes], [
 		'zigbee2mqtt/bridge/state', 'zigbee2mqtt/node/availability',
 	], 'jeder Topic-Timer fordert nur sein eigenes Retained-Topic an');
@@ -1047,7 +1038,7 @@ subtest 'geloeschtes IODev stoppt Arbeit und setzt Registry-Ziele offline' => su
 		is($error, undef, "$io_type wird fuer den Loeschtest definiert");
 		my $payload = '{"stat_t":"node/state","uniq_id":"node_state",'
 			. '"dev":{"ids":["node"],"name":"' . $target_name . '"}}';
-		is(main::MQTT2_DISCOVERY_process(
+		is(FHEM::MQTT2_DISCOVERY::process(
 			$hash, 'cid', 'homeassistant/sensor/node/state/config', $payload,
 		), 'consumed', "$io_type erzeugt ein verwaltetes Ziel");
 		is(reading_value($target_name, 'availability'), 'online',
@@ -1057,7 +1048,7 @@ subtest 'geloeschtes IODev stoppt Arbeit und setzt Registry-Ziele offline' => su
 		};
 		delete $main::defs{$io_name};
 		delete $main::attr{$io_name};
-		main::MQTT2_DISCOVERY_Notify($hash, {
+		FHEM::MQTT2_DISCOVERY::Notify($hash, {
 			NAME => 'global', CHANGED => ["DELETED $io_name"],
 		});
 		is(reading_value($target_name, '.availability_io'), 'offline',
@@ -1068,7 +1059,7 @@ subtest 'geloeschtes IODev stoppt Arbeit und setzt Registry-Ziele offline' => su
 			"Discovery am geloeschten $io_type wird inactive");
 		ok(!exists($hash->{helper}{queue}),
 			"ausstehende Arbeit des geloeschten $io_type wird verworfen");
-		is(main::MQTT2_DISCOVERY_iodev_available($hash), 0,
+		is(FHEM::MQTT2_DISCOVERY::iodev_available($hash), 0,
 			"verbliebene Perl-Referenz des $io_type gilt nicht als verfuegbar");
 	}
 };
@@ -1078,7 +1069,7 @@ subtest 'Registry wird beim Start erst nach dem statefile gecacht' => sub {
 	add_iodev('server');
 	my ($running) = define_discovery('discovery', 'server');
 	my $payload = '{"stat_t":"node/data","val_tpl":"{{ value_json.temperature }}","uniq_id":"node_temperature","dev":{"ids":["node"],"name":"Node"}}';
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$running, 'c', 'homeassistant/sensor/node/temperature/config', $payload,
 	), 'consumed', 'Ausgangszustand fuer den simulierten Neustart wird erzeugt');
 	my $stored_registry = reading_value('discovery', '.registry');
@@ -1102,12 +1093,12 @@ subtest 'Registry wird beim Start erst nach dem statefile gecacht' => sub {
 	$restarted->{READINGS}{'.registry'} = { VAL => $stored_registry, TIME => '2026-08-22 12:00:00' };
 	$main::init_done = 1;
 
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$restarted, 'c', 'homeassistant/sensor/node/temperature/config', $payload,
 	), 'consumed', 'retained Discovery wird nach INITIALIZED erneut verarbeitet');
 	is(attr_value('Node', 'readingList'), $reading_list,
 		'komplexe JSON-readingList-Zeile wird nach dem Neustart nicht dupliziert');
-	my $registry = main::MQTT2_DISCOVERY_registry($restarted);
+	my $registry = FHEM::MQTT2_DISCOVERY::registry($restarted);
 	my ($record) = values %{ $registry->{devices} };
 	ok($record->{created}, 'urspruenglicher Besitzstatus bleibt aus dem statefile erhalten');
 };
@@ -1118,7 +1109,7 @@ subtest 'INITIALIZED synchronisiert restaurierte Ziele mit dem IODev' => sub {
 	my ($running) = define_discovery('discovery', 'client');
 	my $payload = '{"stat_t":"node/state","uniq_id":"node_state",'
 		. '"dev":{"ids":["node"],"name":"Node"}}';
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 		$running, 'client', 'homeassistant/sensor/node/state/config', $payload,
 	), 'consumed', 'Ausgangsregistry fuer einen Neustart wird erzeugt');
 	my $stored_registry = reading_value('discovery', '.registry');
@@ -1138,7 +1129,7 @@ subtest 'INITIALIZED synchronisiert restaurierte Ziele mit dem IODev' => sub {
 		VAL => $stored_registry, TIME => '2026-08-23 12:00:00',
 	};
 	$main::init_done = 1;
-	main::MQTT2_DISCOVERY_Notify($restarted, {
+	FHEM::MQTT2_DISCOVERY::Notify($restarted, {
 		NAME => 'global', CHANGED => ['INITIALIZED'],
 	});
 	is(reading_value('Node', '.availability_io'), 'offline',
@@ -1153,7 +1144,7 @@ subtest 'Registry-Klonfehler wird kontrolliert behandelt' => sub {
 	my ($hash) = define_discovery('discovery', 'server');
 	$hash->{helper}{registry}{ungueltig} = sub { return };
 	my $status = eval {
-		main::MQTT2_DISCOVERY_process(
+		FHEM::MQTT2_DISCOVERY::process(
 			$hash, 'c', 'homeassistant/sensor/node/state/config',
 			'{"stat_t":"node/state","uniq_id":"node_state","dev":{"ids":["node"],"name":"Node"}}',
 		);
@@ -1174,7 +1165,7 @@ subtest 'Unerwartete Verarbeitungsfehler bleiben innerhalb des Moduls' => sub {
 		no warnings qw(once redefine);
 		local *MQTT2_Discovery::Mapper::map_model = sub { die "simulierter Mapperfehler\n" };
 		$status = eval {
-			main::MQTT2_DISCOVERY_process(
+			FHEM::MQTT2_DISCOVERY::process(
 				$hash, 'c', 'homeassistant/sensor/node/state/config',
 				'{"stat_t":"node/state","uniq_id":"node_state","dev":{"ids":["node"],"name":"Node"}}',
 			);
@@ -1191,8 +1182,8 @@ subtest 'Unerwartete Verarbeitungsfehler bleiben innerhalb des Moduls' => sub {
 subtest 'Logging- und Registry-Schutz' => sub {
 	{
 		no warnings qw(once redefine);
-		local *main::MQTT2_DISCOVERY_log_redacted = sub { die "simulierter Loggingfehler\n" };
-		is(main::MQTT2_DISCOVERY_log_payload('{}'), '<invalid or unloggable JSON; length=2>',
+		local *FHEM::MQTT2_DISCOVERY::log_redacted = sub { die "simulierter Loggingfehler\n" };
+		is(FHEM::MQTT2_DISCOVERY::log_payload('{}'), '<invalid or unloggable JSON; length=2>',
 			'Loggingfehler wird durch einen sicheren Platzhalter ersetzt');
 	}
 
@@ -1201,9 +1192,9 @@ subtest 'Logging- und Registry-Schutz' => sub {
 	my ($hash) = define_discovery('discovery', 'server');
 	$hash->{READINGS}{'.registry'}{VAL} = '{"version":1,"devices":{"defekt":"kein Objekt"}}';
 	delete $hash->{helper}{registry};
-	my $registry = main::MQTT2_DISCOVERY_registry($hash);
+	my $registry = FHEM::MQTT2_DISCOVERY::registry($hash);
 	is($registry->{devices}, {}, 'strukturell defekte Registry wird verworfen');
-	is(eval { main::MQTT2_DISCOVERY_update_counts($hash); 1 }, 1,
+	is(eval { FHEM::MQTT2_DISCOVERY::update_counts($hash); 1 }, 1,
 		'Zaehler bleiben bei defekter gespeicherter Registry stabil');
 };
 
@@ -1211,7 +1202,7 @@ subtest 'Discovery-Fehler bleiben ihrem Topic zugeordnet' => sub {
 	reset_env();
 	add_iodev('server');
 	my ($hash) = define_discovery('discovery', 'server');
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 			$hash, 'c', 'homeassistant/sensor/node/bad/config', '{'),
 		'error', 'defekte HA-Discovery wird abgelehnt');
 	is(reading_value('discovery', 'errorCount'), 1, 'Fehlerzaehler wird gesetzt');
@@ -1219,7 +1210,7 @@ subtest 'Discovery-Fehler bleiben ihrem Topic zugeordnet' => sub {
 	is(reading_value('discovery', 'lastErrorTopic'),
 		'homeassistant/sensor/node/bad/config', 'fehlerhaftes Topic ist sichtbar');
 
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 			$hash, 'c', 'homeassistant/sensor/node/good/config',
 			'{"stat_t":"node/good","dev":{"ids":["node"],"name":"Node"}}'),
 		'consumed', 'anderes gueltiges Topic wird verarbeitet');
@@ -1227,7 +1218,7 @@ subtest 'Discovery-Fehler bleiben ihrem Topic zugeordnet' => sub {
 		'fremder Erfolg verdeckt den bestehenden Fehler nicht');
 	isnt(reading_value('discovery', 'lastError'), 'none', 'Fehlerstatus bleibt sichtbar');
 
-	is(main::MQTT2_DISCOVERY_process(
+	is(FHEM::MQTT2_DISCOVERY::process(
 			$hash, 'c', 'homeassistant/sensor/node/bad/config',
 			'{"stat_t":"node/bad","dev":{"ids":["node"],"name":"Node"}}'),
 		'consumed', 'korrigiertes Topic wird verarbeitet');
@@ -1241,7 +1232,7 @@ subtest 'Logging folgt verbose 1 bis 5 und schwärzt Payloads' => sub {
 	my ($hash) = define_discovery('discovery', 'server');
 	$main::attr{discovery}{verbose} = 1;
 	@{ log_entries() } = ();
-	is(main::MQTT2_DISCOVERY_process($hash, 'c', 'homeassistant/sensor/node/temp/config', '{'), 'error',
+	is(FHEM::MQTT2_DISCOVERY::process($hash, 'c', 'homeassistant/sensor/node/temp/config', '{'), 'error',
 		'Parserfehler wird verarbeitet');
 	is(scalar(@{ log_entries() }), 1, 'verbose 1 schreibt nur den Fehler');
 	is(log_entries()->[0][1], 1, 'Fehler verwendet Log-Level 1');
@@ -1255,7 +1246,7 @@ subtest 'Logging folgt verbose 1 bis 5 und schwärzt Payloads' => sub {
 		@{ log_entries() } = ();
 		my $payload = '{"stat_t":"node/temp","uniq_id":"temp","password":"very-secret",'
 			. '"dev":{"ids":["node"],"name":"Node","api_token":"also-secret"}}';
-		is(main::MQTT2_DISCOVERY_process($hash, 'client', 'homeassistant/sensor/node/temp/config', $payload),
+		is(FHEM::MQTT2_DISCOVERY::process($hash, 'client', 'homeassistant/sensor/node/temp/config', $payload),
 			'consumed', "verbose $verbose verarbeitet Discovery");
 		ok(!(grep { $_->[1] > $verbose } @{ log_entries() }), "verbose $verbose unterdrueckt hoehere Stufen");
 		ok((grep { $_->[1] == $verbose } @{ log_entries() }), "verbose $verbose erzeugt Meldungen seiner Stufe");

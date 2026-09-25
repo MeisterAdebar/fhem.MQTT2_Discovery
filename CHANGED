@@ -1,6 +1,20 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 3d7da73f03d23dcb61286966b3cd7014beb5ed16f55b6df0c0ea91fc5b84eb33
+# Msg-SHA256: abef444f7a2d625b5bfdbf4f32383d116e426ffbf0d716ec4e64ce205f44cada
+- change: MQTT2_DISCOVERY: Paket, Kanalaufteilung und ein Index statt eines
+  Vergleichs je Muster
+  - Das Modul liegt im Paket FHEM::MQTT2_DISCOVERY und bezieht die Symbole des
+    Hauptprogramms ueber GPUtils.
+  - Ein mehrkanaliges Geraet wird in ein Hauptgeraet und je Kanal ein Geraet
+    aufgeteilt. Geraeteweite Werte bleiben beim Hauptgeraet.
+  - Die Zuordnung einer Nachricht laeuft ueber einen Index nach Topic statt
+    ueber einen Vergleich je Muster und Geraet. Bei 20000 Nachrichten und 40
+    Geraeten mit je vier Mustern sind das 18 ms statt 11977 ms.
+  - Der weite Match bleibt auch nach einem reload weit, sonst sieht die ParseFn
+    die Nutzdatentopics nicht mehr.
+  - Selbst geschriebene Readings erzeugen wieder Ereignisse: Die ParseFn gibt
+    die Namen der geschriebenen Geraete zurueck, damit Dispatch den Trigger
+    nachholt.
 - change: MQTT2_DISCOVERY: Nutzdaten eines Geraets ausgeben und wieder
   einspielen
   - get payloads gibt die Discovery-Nachrichten aus, aus denen ein verwaltetes

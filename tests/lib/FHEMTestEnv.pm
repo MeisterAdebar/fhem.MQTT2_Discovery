@@ -29,7 +29,7 @@ sub reset_env {
 	@LOG_ENTRIES = ();
 	$main::readingFnAttributes = '';
 	$main::init_done = 1;
-	main::MQTT2_DISCOVERY_Initialize($main::modules{MQTT2_DISCOVERY});
+	FHEM::MQTT2_DISCOVERY::Initialize($main::modules{MQTT2_DISCOVERY});
 }
 
 # Legt ein minimales MQTT2-IODev fuer Modul- und Integrationstests an.
@@ -52,7 +52,7 @@ sub define_discovery {
 	my ($name, $io_name) = @_;
 	my $hash = { NAME => $name, TYPE => 'MQTT2_DISCOVERY', READINGS => {} };
 	$main::defs{$name} = $hash;
-	my $error = main::MQTT2_DISCOVERY_Define($hash, "$name MQTT2_DISCOVERY $io_name");
+	my $error = FHEM::MQTT2_DISCOVERY::Define($hash, "$name MQTT2_DISCOVERY $io_name");
 	return ($hash, $error);
 }
 
@@ -69,7 +69,7 @@ sub dispatch_message {
 		next if $message !~ /$main::modules{$module}{Match}/s;
 		push @seen, $module;
 		if ($module eq 'MQTT2_DISCOVERY') {
-			my @result = main::MQTT2_DISCOVERY_Parse($io, $message);
+			my @result = FHEM::MQTT2_DISCOVERY::Parse($io, $message);
 			next if @result && $result[0] eq '[NEXT]';
 			last if @result && defined $result[0];
 		}

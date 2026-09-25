@@ -47,7 +47,7 @@ sub setup {
 			return undef;
 		},
 	);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	return $hash;
 }
 
@@ -55,7 +55,7 @@ sub setup {
 sub discover {
 	my ($hash) = @_;
 	@published = ();
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id);
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id);
 
 	for my $result ($info, configuration(), status()) {
 		my $request = shift @published;
@@ -81,7 +81,7 @@ sub readings_for {
 		next if "$topic:$payload" !~ /^$pattern$/s;
 		my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
 		next if !defined($reference);
-		my $values = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $payload);
+		my $values = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $payload);
 		%updates = (%updates, %$values) if ref($values) eq 'HASH';
 	}
 
@@ -114,7 +114,7 @@ subtest 'Publish-Topics bleiben unveraendert' => sub {
 	my ($set) = grep { /^switch_0:/ } split /\n/, (attr_value($target, 'setList') // '');
 	my ($reference) = ($set // '') =~ /'(r_[a-f0-9]+)'/;
 	ok($reference, 'Schaltbefehl liegt als Runtime-Referenz vor');
-	my $publish = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, 'switch_0 on');
+	my $publish = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, 'switch_0 on');
 	like($publish, qr{^\Q$id/rpc\E }, 'der Schaltbefehl verwendet unveraendert das Geraetetopic');
 };
 

@@ -92,8 +92,19 @@ sub _entity {
 	my ($state_topic, $value_template) = $pushes_status
 		? ("$prefix/status/$component", "{{ value_json.$path }}")
 		: ($reply_signal->{topic}, $reply_signal->{template});
+	# Aktoren tragen ihre Kanalnummer aus dem Komponentenschluessel; daraus wird
+	# beim Aufteilen ein eigenes Geraet je Kanal.
+	my ($channel_kind, $channel_index) = $component =~ /\A([a-z]+):(\d+)\z/;
+	my $channel = defined($channel_index)
+		&& $channel_kind =~ /\A(?:switch|cover|light|cct|rgb|rgbw)\z/
+		? $channel_index + 1 : undef;
+	my $component_config = ref($context->{config}) eq 'HASH' ? $context->{config}{$component} : undef;
 	return {
 		operation => 'upsert', format => 'shelly', prefix => 'shelly',
+		(defined($channel) ? (channel => $channel) : ()),
+		(defined($channel) && ref($component_config) eq 'HASH'
+			&& defined($component_config->{name}) && !ref($component_config->{name})
+			? (channel_name => $component_config->{name}) : ()),
 		component => $kind, component_key => $name, object_id => $name,
 		preferred_entity_name => $leaf, name => $name,
 		unique_id => "$context->{info}{id}_$name", device => $context->{device},

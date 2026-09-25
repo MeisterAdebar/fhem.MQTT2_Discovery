@@ -404,7 +404,9 @@ sub _actuator_entities {
 			++$shutter;
 			my $object_id = $shutter == 1 ? 'shutter' : "shutter_$shutter";
 			my $name = _scalar_string($friendly->[$offset]) || "Shutter $shutter";
-			my $entity = _entity_base(%args, component => 'cover', object_id => $object_id, name => $name);
+				my $entity = _entity_base(%args, component => 'cover', object_id => $object_id, name => $name);
+			$entity->{channel} = $shutter;
+			$entity->{channel_name} = _scalar_string($friendly->[$offset]);
 			$entity->{command_topic} = "$args{command_base}/Backlog";
 			$entity->{payload_open} = "ShutterOpen$shutter";
 			$entity->{payload_close} = "ShutterClose$shutter";
@@ -447,6 +449,23 @@ sub _actuator_entities {
 		my $name = _scalar_string($friendly->[$offset])
 			|| (($args{device}{name} || 'Tasmota') . ($index == 1 ? '' : " $index"));
 		my $entity = _entity_base(%args, component => $component, object_id => $object_id, name => $name);
+
+		# Der Kanal traegt spaeter ein eigenes Geraet, wenn es mehrere gibt.
+		$entity->{channel} = $index;
+		$entity->{channel_name} = _scalar_string($friendly->[$offset]);
+
+		# Das skalare Statustopic dieses Kanals gehoert zu ihm und nicht zu den
+		# geraeteweiten Zusatzsignalen. SetOption26 gehoert nicht zum
+		# Discovery-Protokoll: Die Nachricht nennt nur die Optionen 4, 11, 13,
+		# 17, 20, 30, 68, 73, 82, 114 und 117. Ob Tasmota den ersten Kanal als
+		# POWER oder als POWER1 meldet, steht darin also nicht; beide Topics
+		# fuehren deshalb auf dasselbe Reading.
+		$entity->{supplemental_signals} = [
+			{ type => 'payload', topic => "$args{stat_base}/$command", name => $command },
+			(!$numbered_power_names && $index == 1
+				? ({ type => 'payload', topic => "$args{stat_base}/${command}1", name => $command })
+				: ()),
+		];
 		$entity->{state_topic} = $state_topic;
 		$entity->{value_template} = $value_template if defined $value_template;
 		if (!defined $value_template) {
@@ -660,26 +679,6 @@ sub _supplemental_signals {
 		{ type => 'json_flatten', topic => "$args{stat_base}/RESULT", name => 'RESULT' },
 	);
 
-	# Jeder vorhandene Relaykanal ergaenzt sein skalares POWER-Statussignal; die
-	# konkrete Tasmota-Namensregel bleibt damit vollstaendig im Tasmota-Adapter.
-	for my $offset (0 .. $#$relays) {
-		my $type = $relays->[$offset];
-		next if !defined($type) || ref($type) || $type !~ /^\d+$/ || ($type != 1 && $type != 2);
-		my $command = _power_name($offset + 1, $numbered);
-		push @signals, {
-			type => 'payload', topic => "$args{stat_base}/$command", name => $command,
-		};
-
-		# SetOption26 gehoert nicht zum Discovery-Protokoll: Die Nachricht nennt
-		# nur die Optionen 4, 11, 13, 17, 20, 30, 68, 73, 82, 114 und 117. Ob
-		# Tasmota den ersten Kanal als POWER oder als POWER1 meldet, steht darin
-		# also nicht. Beide Topics fuehren deshalb auf dasselbe Reading; nur eins
-		# von beiden sendet das Geraet.
-		push @signals, {
-			type => 'payload', topic => "$args{stat_base}/${command}1", name => $command,
-		} if !$numbered && $offset == 0;
-	}
-
 	return \@signals;
 }
 
@@ -707,11 +706,13 @@ sub _rebuild {
 	);
 	my ($actuators, $actuator_warnings) = _actuator_entities(%common);
 	my ($sensors, $sensor_warnings) = _sensor_entities(%common, sensors => $args{entry}{sensors});
-	my ($profile_owner) = (@$actuators, @$sensors);
+	# Die geraeteweiten Zusatzsignale gehoeren an ein Entity ohne Kanal, sonst
+	# landen sie beim Aufteilen in einem beliebigen Kanalgeraet.
+	my ($profile_owner) = (@$sensors, @$actuators);
 
 	# Ein einziges Entity transportiert die geraeteweiten Zusatzsignale; beim
 	# Zusammenfassen landet es trotzdem genau einmal am Zieldevice.
-	$profile_owner->{supplemental_signals} = _supplemental_signals(%common)
+	push @{ $profile_owner->{supplemental_signals} }, @{ _supplemental_signals(%common) }
 		if $profile_owner;
 	my $delete = {
 		operation => 'delete_device', prefix => $args{prefix}, format => 'tasmota',

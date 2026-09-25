@@ -60,7 +60,7 @@ sub setup {
 			return undef;
 		},
 	);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	@published = ();
 	return $hash;
 }
@@ -68,7 +68,7 @@ sub setup {
 sub discover {
 	my ($hash) = @_;
 	@published = ();
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id);
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id);
 
 	for my $result ($info, configuration(), status()) {
 		my $request = shift @published;
@@ -83,77 +83,77 @@ sub discover {
 # Liefert den Registry-Datensatz des erkannten Geraets.
 sub record {
 	my ($hash) = @_;
-	my $registry = main::MQTT2_DISCOVERY_registry($hash);
+	my $registry = FHEM::MQTT2_DISCOVERY::registry($hash);
 	my ($identity) = sort keys %{ $registry->{devices} || {} };
 	return $registry->{devices}{$identity};
 }
 
 subtest 'Schreibweise wird gegen den Schluesselraum geprueft' => sub {
-	is(main::MQTT2_DISCOVERY_check_keys('style=fhem sets=hook', 1), undef, 'bekannte Schluessel');
-	is(main::MQTT2_DISCOVERY_check_keys('shelly:sets=hook', 1), undef, 'Familie global erlaubt');
-	is(main::MQTT2_DISCOVERY_check_keys('hide=temperature,rssi', 1), undef, 'Listen bleiben ungeprueft');
-	like(main::MQTT2_DISCOVERY_check_keys('quatsch=1', 1), qr/Unbekannter Schluessel/, 'unbekannt');
-	like(main::MQTT2_DISCOVERY_check_keys('style=bunt', 1), qr/Ungueltiger Wert/, 'falscher Wert');
-	like(main::MQTT2_DISCOVERY_check_keys('style', 1), qr/Ungueltige Angabe/, 'keine Zuweisung');
+	is(FHEM::MQTT2_DISCOVERY::check_keys('style=fhem sets=hook', 1), undef, 'bekannte Schluessel');
+	is(FHEM::MQTT2_DISCOVERY::check_keys('shelly:sets=hook', 1), undef, 'Familie global erlaubt');
+	is(FHEM::MQTT2_DISCOVERY::check_keys('hide=temperature,rssi', 1), undef, 'Listen bleiben ungeprueft');
+	like(FHEM::MQTT2_DISCOVERY::check_keys('quatsch=1', 1), qr/Unbekannter Schluessel/, 'unbekannt');
+	like(FHEM::MQTT2_DISCOVERY::check_keys('style=bunt', 1), qr/Ungueltiger Wert/, 'falscher Wert');
+	like(FHEM::MQTT2_DISCOVERY::check_keys('style', 1), qr/Ungueltige Angabe/, 'keine Zuweisung');
 
 	# Am Zielgeraet gilt nur die eigene Ebene, eine Familie waere dort sinnlos.
-	like(main::MQTT2_DISCOVERY_check_keys('shelly:sets=hook', 0),
+	like(FHEM::MQTT2_DISCOVERY::check_keys('shelly:sets=hook', 0),
 		qr/Familie ist hier nicht erlaubt/, 'Familie nur am Discovery-Device');
 };
 
 subtest 'AttrFn prueft beide Attribute' => sub {
 	my $hash = setup();
-	is(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'keys', 'shelly:sets=hook'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'keys', 'shelly:sets=hook'), undef,
 		'das Attribut am Discovery-Device nimmt eine Familie an');
-	like(main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'keys', 'style=bunt'),
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'keys', 'style=bunt'),
 		qr/Ungueltiger Wert/, 'ein falscher Wert wird abgewiesen');
 
 	# Ueber addToDevAttrList mit Pruefinstanz landet auch das Attribut des
 	# Zielgeraets in dieser AttrFn; $name ist dann das fremde Device.
-	like(main::MQTT2_DISCOVERY_Attr('set', $target, 'mqttDiscoveryKeys', 'shelly:readings=parse'),
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', $target, 'mqttDiscoveryKeys', 'shelly:readings=parse'),
 		qr/Familie ist hier nicht erlaubt/, 'am Geraet ohne Familie');
 
 	# Von Hand gesetzt wird das Attribut abgewiesen; der Anwender soll den
 	# Set-Befehl nehmen, der die Schreibweise selbst erzeugt.
-	like(main::MQTT2_DISCOVERY_Attr('set', $target, 'mqttDiscoveryKeys', 'readings=parse'),
+	like(FHEM::MQTT2_DISCOVERY::Attr('set', $target, 'mqttDiscoveryKeys', 'readings=parse'),
 		qr/deviceKey/, 'ohne den Set-Befehl bleibt das Attribut zu');
 	$hash->{helper}{own_device_attribute} = 1;
-	is(main::MQTT2_DISCOVERY_Attr('set', $target, 'mqttDiscoveryKeys', 'readings=parse'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', $target, 'mqttDiscoveryKeys', 'readings=parse'), undef,
 		'mit dem Vermerk des Moduls geht es durch');
 	delete $hash->{helper}{own_device_attribute};
 
 	# Beim Laden der Konfiguration gibt es kein Kommando, das den Vermerk setzen
 	# koennte; gespeicherte Werte muessen trotzdem zurueckkommen.
 	local $main::init_done = 0;
-	is(main::MQTT2_DISCOVERY_Attr('set', $target, 'mqttDiscoveryKeys', 'readings=parse'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', $target, 'mqttDiscoveryKeys', 'readings=parse'), undef,
 		'beim Start kommt der gespeicherte Wert zurueck');
-	is(main::MQTT2_DISCOVERY_Attr('del', $target, 'mqttDiscoveryKeys'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Attr('del', $target, 'mqttDiscoveryKeys'), undef,
 		'beim Loeschen wird nicht geprueft');
 };
 
 subtest 'set deviceKey fuehrt den Anwender' => sub {
 	my $hash = setup();
 	discover($hash);
-	like(main::MQTT2_DISCOVERY_set_list($hash), qr/deviceKey:\Q$target\E/,
+	like(FHEM::MQTT2_DISCOVERY::set_list($hash), qr/deviceKey:\Q$target\E/,
 		'der Befehl bietet die verwalteten Geraete an');
-	like(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'deviceKey', $target, 'sets=quatsch'),
+	like(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deviceKey', $target, 'sets=quatsch'),
 		qr/Ungueltiger Wert/, 'ein falscher Wert kommt nicht ins Attribut');
-	like(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'deviceKey', 'gibtsnicht', 'sets=hook'),
+	like(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deviceKey', 'gibtsnicht', 'sets=hook'),
 		qr/kein MQTT2_DEVICE/, 'ein fremdes Ziel wird abgewiesen');
 
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'deviceKey', $target, 'sets=hook'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deviceKey', $target, 'sets=hook'), undef,
 		'der Schluessel wird gesetzt');
 	is(attr_value($target, 'mqttDiscoveryKeys'), 'sets=hook', 'er steht am Zielgeraet');
 
 	# Ein zweiter Aufruf ergaenzt, statt den bestehenden Schluessel zu ersetzen.
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'deviceKey', $target, 'readings=parse'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deviceKey', $target, 'readings=parse'), undef,
 		'ein weiterer Schluessel kommt hinzu');
 	is(attr_value($target, 'mqttDiscoveryKeys'), 'readings=parse sets=hook', 'beide stehen dort');
 
 	# Ein leerer Wert nimmt genau einen Schluessel zurueck.
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'deviceKey', $target, 'sets=');
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deviceKey', $target, 'sets=');
 	is(attr_value($target, 'mqttDiscoveryKeys'), 'readings=parse', 'der andere bleibt stehen');
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'deviceKey', $target, 'readings=');
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deviceKey', $target, 'readings=');
 	is(attr_value($target, 'mqttDiscoveryKeys'), undef, 'das leere Attribut entfaellt');
 };
 
@@ -162,21 +162,21 @@ subtest 'Vorgabe, global, Familie und Geraet in dieser Reihenfolge' => sub {
 	discover($hash);
 	my $record = record($hash);
 	is($record->{adapter}, 'shelly', 'der Datensatz kennt seine Familie');
-	is(main::MQTT2_DISCOVERY_key($hash, $record, 'sets'), 'list', 'ohne Angabe gilt die Vorgabe');
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'ohne Angabe gilt die Vorgabe');
 
 	$main::attr{discovery}{keys} = 'sets=hook';
-	is(main::MQTT2_DISCOVERY_key($hash, $record, 'sets'), 'hook', 'global schlaegt die Vorgabe');
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'hook', 'global schlaegt die Vorgabe');
 
 	$main::attr{discovery}{keys} = 'sets=hook shelly:sets=list';
-	is(main::MQTT2_DISCOVERY_key($hash, $record, 'sets'), 'list', 'die Familie schlaegt global');
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'die Familie schlaegt global');
 
 	$main::attr{$target}{mqttDiscoveryKeys} = 'sets=hook';
-	is(main::MQTT2_DISCOVERY_key($hash, $record, 'sets'), 'hook', 'das Geraet schlaegt die Familie');
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'hook', 'das Geraet schlaegt die Familie');
 
 	# Eine andere Familie darf das Geraet nicht betreffen.
 	delete $main::attr{$target}{mqttDiscoveryKeys};
 	$main::attr{discovery}{keys} = 'tasmota:sets=hook';
-	is(main::MQTT2_DISCOVERY_key($hash, $record, 'sets'), 'list', 'fremde Familie wirkt nicht');
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'fremde Familie wirkt nicht');
 };
 
 subtest 'Die alten Einzelattribute bleiben gueltig' => sub {
@@ -185,16 +185,16 @@ subtest 'Die alten Einzelattribute bleiben gueltig' => sub {
 	my $record = record($hash);
 
 	$main::attr{discovery}{setsViaHook} = 1;
-	is(main::MQTT2_DISCOVERY_key($hash, $record, 'sets'), 'hook', 'das alte Attribut wirkt weiter');
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'hook', 'das alte Attribut wirkt weiter');
 
 	$main::attr{discovery}{keys} = 'sets=list';
-	is(main::MQTT2_DISCOVERY_key($hash, $record, 'sets'), 'list', 'der Schluessel hat Vorrang');
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'der Schluessel hat Vorrang');
 
 	# Das alte Attribut hat immer nur die Verdichtung unterdrueckt und die
 	# Quellen stehen lassen; das heisst jetzt source.
 	$main::attr{discovery}{availabilityReading} = 'none';
 	delete $main::attr{discovery}{keys};
-	is(main::MQTT2_DISCOVERY_key($hash, $record, 'availability'), 'source',
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'availability'), 'source',
 		'availabilityReading none entspricht source');
 };
 
@@ -225,11 +225,11 @@ subtest 'readings=parse stellt den Match weit' => sub {
 	# Ohne weiten Match sieht ParseFn die Nutzdatentopics des Geraets nie, und
 	# die selbst geschriebenen Readings blieben aus.
 	$main::attr{discovery}{keys} = 'readings=parse';
-	main::MQTT2_DISCOVERY_update_match();
+	FHEM::MQTT2_DISCOVERY::update_match();
 	is($main::modules{MQTT2_DISCOVERY}{Match}, '.*', 'mit dem Schluessel sieht das Modul alles');
 
 	delete $main::attr{discovery}{keys};
-	main::MQTT2_DISCOVERY_update_match();
+	FHEM::MQTT2_DISCOVERY::update_match();
 	is($main::modules{MQTT2_DISCOVERY}{Match}, $eng, 'danach wieder eng');
 
 	# Nach einem Neustart rendert niemand neu; der Match muss trotzdem stehen,
@@ -240,37 +240,56 @@ subtest 'readings=parse stellt den Match weit' => sub {
 	is($main::modules{MQTT2_DISCOVERY}{Match}, $eng, 'frisch geladen ist der Match eng');
 	define_discovery('discovery', 'mqtt');
 	is($main::modules{MQTT2_DISCOVERY}{Match}, '.*', 'die Definition stellt ihn wieder her');
+
+	# Ein reload ruft Initialize erneut auf und setzt den Match zurueck; die
+	# bestehende Instanz braucht ihn weiterhin weit.
+	# CommandReload fuellt ein neues Modulhash und haengt es erst danach ein;
+	# der Match muss deshalb in genau dieses Hash geschrieben werden.
+	my %neu = (LOADED => 1);
+	FHEM::MQTT2_DISCOVERY::Initialize(\%neu);
+	is($neu{Match}, '.*', 'auch nach einem reload bleibt er weit');
 };
 
-subtest 'der Namensraum kommt erst bei Kollision zurueck' => sub {
+subtest 'mehrere Kanaele werden in eigene Geraete aufgeteilt' => sub {
 	my $hash = setup();
 	discover($hash);
-	like(attr_value($target, 'readingList'), qr/'r_/, 'die Zeilen entstehen');
-	my $eins = attr_value($target, 'readingList');
-
-	# Bei einem Kanal genuegt das Blatt; die Komponente steht im Topic.
-	like($eins, qr{status/switch_0:}, 'das Topic nennt den Kanal');
+	is([sort grep { ($main::defs{$_}{TYPE} // '') eq 'MQTT2_DEVICE' } keys %main::defs],
+		[$target], 'ein Kanal bleibt ein Geraet');
 
 	$zweiter_kanal = 1;
 	$hash = setup();
 	discover($hash);
-	my $record = record($hash);
-	my %namen;
-
-	for my $descriptor (values %{ $record->{runtime_refs} || {} }) {
-		next if ref($descriptor) ne 'HASH';
-		$namen{ $descriptor->{name} } = 1 if defined($descriptor->{name});
-
-		for my $reading (@{ $descriptor->{configuration}{readings} || [] }) {
-			$namen{ $reading->{name} } = 1 if ref($reading) eq 'HASH' && defined($reading->{name});
-		}
-	}
+	my @alle = sort grep { ($main::defs{$_}{TYPE} // '') eq 'MQTT2_DEVICE' } keys %main::defs;
 	$zweiter_kanal = 0;
 
-	# Zwei Kanaele liefern beide eine Temperatur; jetzt braucht es den Namensraum.
-	ok($namen{switch_0_temperature} && $namen{switch_1_temperature},
-		'beide Temperaturen tragen ihren Kanal');
-	ok(!$namen{temperature}, 'das blosse Blatt bliebe mehrdeutig und entsteht nicht');
+	# Drei Geraete: das Hauptgeraet mit WLAN, Laufzeit und Erreichbarkeit, dazu
+	# je Kanal eines.
+	is(scalar(@alle), 3, 'zwei Kanaele ergeben ein Haupt- und zwei Kanalgeraete');
+	ok($main::defs{$target}, 'das Hauptgeraet behaelt seinen Namen');
+	my @geraete = grep { $_ ne $target } @alle;
+	like($geraete[0], qr/\Q$target\E_1\z/, 'das erste Kanalgeraet traegt seine Nummer');
+	like($geraete[1], qr/\Q$target\E_2\z/, 'das zweite ebenso');
+
+	# Jeder Kanal hat sein eigenes Geraet und damit seinen eigenen Namensraum;
+	# die Temperatur heisst in beiden schlicht temperature.
+	for my $geraet (@geraete) {
+		my ($record) = grep {
+			ref($_) eq 'HASH' && ($_->{name} // '') eq $geraet
+		} values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} || {} };
+		my %namen;
+
+		for my $descriptor (values %{ $record->{runtime_refs} || {} }) {
+			next if ref($descriptor) ne 'HASH';
+			$namen{ $descriptor->{name} } = 1 if defined($descriptor->{name});
+
+			for my $reading (@{ $descriptor->{configuration}{readings} || [] }) {
+				$namen{ $reading->{name} } = 1 if ref($reading) eq 'HASH' && defined($reading->{name});
+			}
+		}
+		ok($namen{temperature}, "$geraet hat seine eigene Temperatur");
+		ok(!$namen{switch_0_temperature} && !$namen{switch_1_temperature},
+			"$geraet braucht keinen Kanal im Readingnamen");
+	}
 };
 
 subtest 'hide blendet Readings aus' => sub {
@@ -325,11 +344,11 @@ subtest 'forceNEXT gibt auch konsumierte Nachrichten weiter' => sub {
 
 	# Ohne den Schluessel verschluckt das Modul die Discovery-Nachricht, damit
 	# MQTT2_DEVICE daraus kein Fremd-Device anlegt.
-	is(main::MQTT2_DISCOVERY_Parse($main::defs{mqtt}, $message), '',
+	is([FHEM::MQTT2_DISCOVERY::Parse($main::defs{mqtt}, $message)], [''],
 		'die Nachricht endet hier');
 
 	$main::attr{discovery}{keys} = 'forceNEXT=1';
-	is(main::MQTT2_DISCOVERY_Parse($main::defs{mqtt}, $message), '[NEXT]',
+	is([FHEM::MQTT2_DISCOVERY::Parse($main::defs{mqtt}, $message)], ['[NEXT]'],
 		'mit forceNEXT laeuft die Parserkette weiter');
 };
 
@@ -342,7 +361,7 @@ subtest 'Die Konvention haengt am Datensatz, nicht am Attribut' => sub {
 	# Wird der Schluessel spaeter zurueckgenommen, behaelt das bestehende Geraet
 	# sein Verhalten; sonst kippten laufende Readingnamen.
 	delete $main::attr{discovery}{keys};
-	is(main::MQTT2_DISCOVERY_key($hash, record($hash), 'style'), 'fhem',
+	is(FHEM::MQTT2_DISCOVERY::key($hash, record($hash), 'style'), 'fhem',
 		'ein bestehendes Geraet bleibt bei seiner Konvention');
 
 	$hash = setup();

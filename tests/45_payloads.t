@@ -26,21 +26,21 @@ sub setup {
 	add_iodev('mqtt', 'MQTT2_SERVER');
 	my ($hash, $error) = define_discovery('discovery', 'mqtt');
 	die $error if $error;
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	return $hash;
 }
 
 subtest 'Geheimnisse werden ersetzt, alles andere bleibt' => sub {
 	my $payload = '{"wifi":{"sta":{"ssid":"MeinWLAN","pass":"geheim"}},'
 		. '"mqtt":{"user":"fhem","pass":"auchgeheim","topic_prefix":"shelly1"}}';
-	my $redacted = main::MQTT2_DISCOVERY_redact_payload($payload);
+	my $redacted = FHEM::MQTT2_DISCOVERY::redact_payload($payload);
 	like($redacted, qr/"pass":"xxx"/, 'das WLAN-Passwort ist ersetzt');
 	unlike($redacted, qr/geheim/, 'kein Geheimnis bleibt uebrig');
 	like($redacted, qr/"ssid":"MeinWLAN"/, 'die SSID bleibt, sie ist kein Geheimnis');
 	like($redacted, qr/"topic_prefix":"shelly1"/, 'das Topic bleibt, es wird zum Nachstellen gebraucht');
 
 	# Ein einfacher Wert ist kein JSON und bleibt unveraendert.
-	is(main::MQTT2_DISCOVERY_redact_payload('true'), 'true', 'ein einfacher Wert bleibt');
+	is(FHEM::MQTT2_DISCOVERY::redact_payload('true'), 'true', 'ein einfacher Wert bleibt');
 };
 
 subtest 'get payloads liefert die Nachrichten des Geraets' => sub {
@@ -48,15 +48,15 @@ subtest 'get payloads liefert die Nachrichten des Geraets' => sub {
 	dispatch_message('mqtt', 'client1', $config_topic, $config);
 	dispatch_message('mqtt', 'client1', $sensors_topic, $sensors);
 	ok($main::defs{$device}, 'das Geraet entsteht');
-	my $block = main::MQTT2_DISCOVERY_Get($hash, 'discovery', 'payloads', $device);
+	my $block = FHEM::MQTT2_DISCOVERY::Get($hash, 'discovery', 'payloads', $device);
 	like($block, qr/^# MQTT2_DISCOVERY .*Adapter tasmota/m, 'der Kopf nennt Geraet und Adapter');
 	like($block, qr{^\Q$config_topic\E \{"dn":"Tasmota"}m, 'die Konfiguration steht drin');
 	like($block, qr{^\Q$sensors_topic\E \{"sn":}m, 'die Sensoren stehen drin');
 
 	# Ein unbekanntes Geraet wird benannt, nicht stillschweigend uebergangen.
-	like(main::MQTT2_DISCOVERY_Get($hash, 'discovery', 'payloads', 'gibtsnicht'),
+	like(FHEM::MQTT2_DISCOVERY::Get($hash, 'discovery', 'payloads', 'gibtsnicht'),
 		qr/kein von dieser Instanz verwaltetes Geraet/, 'ein fremder Name wird abgewiesen');
-	like(main::MQTT2_DISCOVERY_Get($hash, 'discovery', '?'), qr/payloads:\Q$device\E/,
+	like(FHEM::MQTT2_DISCOVERY::Get($hash, 'discovery', '?'), qr/payloads:\Q$device\E/,
 		'die Auswahl nennt die verwalteten Geraete');
 };
 
@@ -64,7 +64,7 @@ subtest 'replayPayloads baut das Geraet ohne die Hardware nach' => sub {
 	my $hash = setup();
 	dispatch_message('mqtt', 'client1', $config_topic, $config);
 	dispatch_message('mqtt', 'client1', $sensors_topic, $sensors);
-	my $block = main::MQTT2_DISCOVERY_Get($hash, 'discovery', 'payloads', $device);
+	my $block = FHEM::MQTT2_DISCOVERY::Get($hash, 'discovery', 'payloads', $device);
 	my $file = File::Temp->new(SUFFIX => '.txt');
 	print {$file} "$block\n" or die $!;
 	close $file or die $!;
@@ -72,12 +72,12 @@ subtest 'replayPayloads baut das Geraet ohne die Hardware nach' => sub {
 	# Eine frische Instanz kennt das Geraet nicht; der Block allein genuegt.
 	$hash = setup();
 	ok(!$main::defs{$device}, 'nach dem Neuaufbau gibt es das Geraet nicht mehr');
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'replayPayloads', "$file"), undef,
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'replayPayloads', "$file"), undef,
 		'der Block wird ohne Fehler eingespielt');
 	ok($main::defs{$device}, 'das Geraet entsteht aus den Nachrichten');
 	is(reading_value('discovery', 'lastReplay'), 'processed=2 failed=0', 'beide Nachrichten zaehlen');
 
-	like(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'replayPayloads', '/tmp/../etc/passwd'),
+	like(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'replayPayloads', '/tmp/../etc/passwd'),
 		qr/nicht aus dem Verzeichnis herausfuehren/, 'ein Pfad mit .. wird abgewiesen');
 };
 

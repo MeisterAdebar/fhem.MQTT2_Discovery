@@ -34,7 +34,7 @@ is(\@load_warnings, [], 'Laden erzeugt keine Import- oder Prototypwarnung');
 is(\&main::decode_json, $foreign_decoder, 'Fremder JSON-Decoder bleibt unveraendert');
 is(prototype('main::decode_json'), '$', 'Fremder Funktionsprototyp bleibt erhalten');
 
-is(main::MQTT2_DISCOVERY_log_payload('{"value":42,"password":"secret"}'),
+is(FHEM::MQTT2_DISCOVERY::log_payload('{"value":42,"password":"secret"}'),
 	'{"password":"[REDACTED]","value":42}', 'Payload-Logging verwendet den eigenen JSON-Decoder');
 
 # Ein noch laufender FHEM-Start haelt Nachrichten in der Queue und vermeidet Timeraktionen.
@@ -46,13 +46,13 @@ my $hash = $main::defs{json_isolation} = {
 		'.registry' => { VAL => '{"version":1,"devices":{"node":{"entities":{}}}}' },
 	},
 };
-is(main::MQTT2_DISCOVERY_registry($hash),
+is(FHEM::MQTT2_DISCOVERY::registry($hash),
 	{ version => 1, devices => { node => { entities => {} } } },
 	'Registry wird trotz fremdem JSON-Decoder vollstaendig geladen');
 
-main::MQTT2_DISCOVERY_enqueue($hash, 'first', 'shellies/announce',
+FHEM::MQTT2_DISCOVERY::enqueue($hash, 'first', 'shellies/announce',
 	'{"id":"shelly1g4-112233445566","gen":4,"model":"S4SW-001X16EU"}');
-main::MQTT2_DISCOVERY_enqueue($hash, 'second', 'shellies/announce',
+FHEM::MQTT2_DISCOVERY::enqueue($hash, 'second', 'shellies/announce',
 	'{"id":"shelly1g4-aabbccddeeff","gen":4,"model":"S4SW-001X16EU"}');
 is(scalar(keys %{ $hash->{helper}{queue}{messages} }), 2,
 	'Shelly-Announcements behalten trotz fremdem JSON-Decoder getrennte Queue-Eintraege');

@@ -165,8 +165,11 @@ subtest 'Tasmota gewinnt vor dem HA-Fallback und liefert generische Zusatzsignal
 	my ($upsert) = grep { $_->{operation} eq 'upsert' } @{ $result->{events} };
 	ok($upsert, 'Tasmota liefert ein kanonisches Upsert');
 	is($upsert->{schema_version}, 1, 'auch Tasmota verwendet dieselbe Modellversion');
+	# Der Schaltkanal traegt seine eigenen Statustopics. Ohne Sensoren gibt es
+	# kein Entity ohne Kanal, deshalb haengt die geraeteweite Telemetrie hier
+	# ebenfalls an ihm.
 	is([map { $_->{type} } @{ $upsert->{extensions}{supplemental_signals} }],
-		[qw(payload json_flatten json_flatten json_flatten json_sequence json_flatten payload payload)],
+		[qw(payload payload payload json_flatten json_flatten json_flatten json_sequence json_flatten)],
 		'Tasmota-Profil ist als allgemeine Signaltypen normalisiert');
 	ok(!grep({ exists($_->{codec}) } @{ $upsert->{commands} }),
 		'Tasmota-Commands erhalten keine HA-JSON-Codecs');

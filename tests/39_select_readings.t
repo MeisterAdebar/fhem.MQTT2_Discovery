@@ -58,7 +58,7 @@ sub setup {
 			return undef;
 		},
 	);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	@published = ();
 	return $hash;
 }
@@ -69,7 +69,7 @@ sub discover {
 
 	# Die Statusabfrage nach dem Apply bleibt sonst als Rest in der Warteschlange.
 	@published = ();
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id);
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id);
 
 	for my $result ($info, configuration(%ntf), status()) {
 		my $request = shift @published;
@@ -94,7 +94,7 @@ sub readings_for {
 		next if "$topic:$payload" !~ /^$pattern$/s;
 		my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
 		next if !defined($reference);
-		my $values = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $payload);
+		my $values = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $payload);
 		%updates = (%updates, %$values) if ref($values) eq 'HASH';
 	}
 
@@ -106,7 +106,7 @@ subtest 'selectReadings filtert Entities und ueberlebt den Geraetedatensatz' => 
 	my $hash = setup();
 	discover($hash, status => 1);
 	like(attr_value($target, 'readingList'), qr{\Qstatus/wifi\E}, 'die WLAN-Zeile entsteht zunaechst');
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'selectReadings', $target,
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'selectReadings', $target,
 		'switch_0=1', 'temperature=1', 'rssi=0', 'uptime=0'), undef,
 		'die Auswahl wird uebernommen');
 	my $reading_list = attr_value($target, 'readingList');
@@ -122,7 +122,7 @@ subtest 'selectReadings filtert Entities und ueberlebt den Geraetedatensatz' => 
 	is($values->{switch_0}, 'true', 'die gewaehlten Readings bleiben erhalten');
 
 	# Die Auswahl liegt neben den Geraetedatensaetzen und ueberdauert deren Verlust.
-	my $registry = main::MQTT2_DISCOVERY_registry($hash);
+	my $registry = FHEM::MQTT2_DISCOVERY::registry($hash);
 	is([sort @{ $registry->{selections}{$target} }], ['rssi', 'uptime'],
 		'die Auswahl steht ausserhalb des Geraetedatensatzes');
 	delete $registry->{devices}{$_} for keys %{ $registry->{devices} };

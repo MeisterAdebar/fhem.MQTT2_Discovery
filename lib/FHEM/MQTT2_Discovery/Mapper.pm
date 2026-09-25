@@ -370,7 +370,7 @@ sub _device_names {
 		push @general, $part if join('_', @general) !~ /(?:\A|_)\Q$part\E(?:_|\z)/i;
 	}
 	my $general = join('_', @general);
-	return (defined($friendly) ? "${base}_$friendly" : $general, $general);
+	return (defined($friendly) ? "${base}_$friendly" : $general, $general, $base);
 }
 
 # Nimmt nur brauchbare Namensbestandteile an.
@@ -662,9 +662,10 @@ sub _map_canonical_entity {
 	my $identity = _identity($entity, $io_name);
 	my $device = $entity->{device} || {};
 	my $name_prefix = defined($args{name_prefix}) ? $args{name_prefix} : '';
-	my ($preferred, $fallback_name) = _device_names($device, $entity, $component);
+	my ($preferred, $fallback_name, $device_base) = _device_names($device, $entity, $component);
 	my $proposed_name = safe_name($name_prefix . $preferred, 'device');
 	my $alternate_name = safe_name($name_prefix . $fallback_name, 'device');
+	my $device_base_name = safe_name($name_prefix . $device_base, 'device');
 	my $reading_path = _logical_reading_path($entity);
 	my $reading_name = $reading_path->[-1];
 	my $command_set_name = _command_set_name($entity, $reading_name);
@@ -1150,6 +1151,9 @@ sub _map_canonical_entity {
 		identity        => $identity,
 		strong_identity => (ref($device->{identifiers}) eq 'ARRAY' && @{ $device->{identifiers} })
 			|| (ref($device->{connections}) eq 'ARRAY' && @{ $device->{connections} }) ? 1 : 0,
+		device_base     => $device_base_name,
+		channel         => $entity->{channel},
+		channel_name    => $entity->{channel_name},
 		proposed_name   => $proposed_name,
 		alternate_name  => $alternate_name ne $proposed_name ? $alternate_name : undef,
 		reading_name    => $reading_name,

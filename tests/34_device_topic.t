@@ -59,7 +59,7 @@ sub setup {
 			return undef;
 		},
 	);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	@published = ();
 	return $hash;
 }
@@ -70,7 +70,7 @@ sub discover {
 
 	# Die Statusabfrage nach dem Apply bleibt sonst als Rest in der Warteschlange.
 	@published = ();
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id);
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id);
 
 	for my $result ($info, configuration(%ntf), status()) {
 		my $request = shift @published;
@@ -95,7 +95,7 @@ sub readings_for {
 		next if "$topic:$payload" !~ /^$pattern$/s;
 		my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
 		next if !defined($reference);
-		my $values = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $payload);
+		my $values = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $payload);
 		%updates = (%updates, %$values) if ref($values) eq 'HASH';
 	}
 

@@ -50,7 +50,7 @@ sub setup {
 			return undef;
 		},
 	);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	@published = ();
 	return $hash;
 }
@@ -70,7 +70,7 @@ sub reply {
 # Liefert den statischen Snapshot; bei BTHome bleibt die Komponentenabfrage noch offen.
 sub discover {
 	my ($hash, $config, $status) = @_;
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $prefix), undef, 'Discovery gestartet');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $prefix), undef, 'Discovery gestartet');
 	reply($info, 'Shelly.GetDeviceInfo');
 	reply($config || config(), 'Shelly.GetConfig');
 	reply($status || status(), 'Shelly.GetStatus');
@@ -89,7 +89,7 @@ sub readings {
 		next if "$topic:$payload" !~ /^$pattern$/s;
 		my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
 		next if !defined($reference);
-		my $values = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $payload);
+		my $values = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $payload);
 		@updates{keys %$values} = values %$values if ref($values) eq 'HASH';
 	}
 
@@ -102,7 +102,7 @@ sub command {
 	my ($line) = grep { /^\Q$name\E:/ } split /\n/, attr_value($target, 'setList');
 	my ($reference) = ($line || '') =~ /'(r_[a-f0-9]+)'/;
 	return undef if !defined($reference);
-	my $message = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, "$name $value");
+	my $message = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, "$name $value");
 	return undef if !defined($message);
 	my ($topic, $payload) = split / /, $message, 2;
 	is($topic, "$prefix/rpc", 'Befehl erreicht den individuellen Shelly-Prefix');
@@ -224,7 +224,7 @@ subtest 'BLU-Seiten, schlafende Sensoren, Initialwerte und Ereignisarrays' => su
 	unlike(reading_value('discovery', '.registry'), qr/darf-nicht-in-den-cache|verwerfen/, 'Registry enthaelt keine unbenoetigten Konfigurationswerte');
 	unlike(encode_json($hash->{helper}{formats}{shelly}), qr/darf-nicht-in-den-cache|verwerfen/, 'Adaptercache enthaelt keine unbenoetigten Konfigurationswerte');
 	$main::attr{discovery}{extraJsonReadings} = 'ignore';
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'rebuildDevice', $target), undef, 'Neuaufbau im restriktiven JSON-Modus');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', $target), undef, 'Neuaufbau im restriktiven JSON-Modus');
 	$values = readings("$prefix/events/rpc", { params => { events => [{ component => 'bthomedevice:200', event => 'single_push' }] } });
 	is($values->{bthomedevice_200_event}, 'single_push', 'explizite BLU-Ereignisse bleiben bei extraJsonReadings ignore erhalten');
 };
@@ -263,13 +263,13 @@ subtest 'Manuelle BLU-Auswertung bleibt konservativ erhalten, Rebuild ist expliz
 	is(attr_value($target, 'userReadings'), 'blu_alt:.* { 1 }', 'manuelle userReadings bleiben erhalten');
 	is(readings("$prefix/events/rpc", { params => { events => [{ component => 'bthomedevice:200', event => 'single_push' }] } }),
 		{}, 'kein zweiter generierter Event-Handler neben der manuellen Sammelregel');
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'rebuildDevice', $target), undef, 'expliziter Neuaufbau ersetzt Listen');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', $target), undef, 'expliziter Neuaufbau ersetzt Listen');
 	unlike(attr_value($target, 'readingList'), qr/\Q$manual\E/, 'manuelle Listenregel wird nur beim expliziten Rebuild verworfen');
 	is(reading_value($target, 'blu_alt'), 42, 'Rebuild ohne clearReadings behaelt vorhandene Werte');
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'rebuildDevice', $target, 'clearReadings'), undef, 'explizites Loeschen der Readings');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', $target, 'clearReadings'), undef, 'explizites Loeschen der Readings');
 	ok(!exists($main::defs{$target}{READINGS}{blu_alt}), 'clearReadings loescht den manuellen Wert');
 	is(main::CommandDefine(undef, 'Unmanaged MQTT2_DEVICE other-client mqtt'), undef, 'zweites lokales Bestandsgeraet');
-	like(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'rebuildDevice', 'Unmanaged'), qr/nicht verwaltet/, 'rebuildDevice bleibt auf verwaltete Geraete beschraenkt');
+	like(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', 'Unmanaged'), qr/nicht verwaltet/, 'rebuildDevice bleibt auf verwaltete Geraete beschraenkt');
 };
 
 done_testing;

@@ -19,7 +19,7 @@ jobs:
       - name: Install test dependencies
         run: cpanm --installdeps .
       - name: Compile production modules
-        run: find lib FHEM -name '*.pm' -print0 | xargs -0 -n1 perl -Ilib/FHEM -c
+        run: find lib FHEM -name '*.pm' -print0 | xargs -0 -n1 perl -Ilib/FHEM -Itests/lib -c
       - name: Run tests with fatal warnings
         run: prove --exec 'perl -Mwarnings=FATAL -Itests/lib' -lv tests
 

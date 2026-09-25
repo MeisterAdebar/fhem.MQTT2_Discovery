@@ -58,7 +58,7 @@ sub setup {
 			return undef;
 		},
 	);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	@published = ();
 	return $hash;
 }
@@ -69,7 +69,7 @@ sub discover {
 
 	# Die Statusabfrage nach dem Apply bleibt sonst als Rest in der Warteschlange.
 	@published = ();
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id);
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id);
 
 	for my $result ($info, configuration(%ntf), status()) {
 		my $request = shift @published;
@@ -94,7 +94,7 @@ sub readings_for {
 		next if "$topic:$payload" !~ /^$pattern$/s;
 		my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
 		next if !defined($reference);
-		my $values = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $payload);
+		my $values = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $payload);
 		%updates = (%updates, %$values) if ref($values) eq 'HASH';
 	}
 
@@ -104,13 +104,13 @@ sub readings_for {
 subtest 'Ein verwaister Registry-Eintrag blockiert die Erkennung nicht' => sub {
 	my $hash = setup();
 	discover($hash, status => 1);
-	my $registry = main::MQTT2_DISCOVERY_registry($hash);
+	my $registry = FHEM::MQTT2_DISCOVERY::registry($hash);
 	is(scalar(keys %{ $registry->{devices} }), 1, 'ein Datensatz ist vorhanden');
 
 	# Ein von Hand geloeschtes Zieldevice hinterlaesst einen Datensatz ohne Device.
 	delete $main::defs{$target};
 	my ($record) = values %{ $registry->{devices} };
-	is(main::MQTT2_DISCOVERY_apply_device_lines($hash, $record), undef,
+	is(FHEM::MQTT2_DISCOVERY::apply_device_lines($hash, $record), undef,
 		'das Anwenden meldet keinen Fehler mehr');
 	is(scalar(keys %{ $registry->{devices} }), 0, 'der verwaiste Datensatz wurde verworfen');
 

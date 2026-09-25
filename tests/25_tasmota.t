@@ -41,10 +41,20 @@ subtest 'config und sensors werden in beliebiger Reihenfolge zusammengefuehrt' =
 	is($switch->{command_topic}, 'cmnd/workshop_plug/POWER', 'Commandtopic aus ft/t/tp expandiert');
 	is($switch->{value_template}, '{{ value_json.POWER }}', 'RESULT-Payload wird sicher gelesen');
 	is($switch->{device}{identifiers}, ['tasmota_AABBCCDDEEFF'], 'MAC liefert stabile Device-Identitaet');
-	my ($signal_owner) = grep { ref($_->{supplemental_signals}) eq 'ARRAY' } @{ $result->{entities} };
+	# Die geraeteweite Telemetrie haengt an einem Entity ohne Kanal, damit sie
+	# beim Aufteilen nicht in einem beliebigen Kanalgeraet landet.
+	my ($signal_owner) = grep {
+		ref($_->{supplemental_signals}) eq 'ARRAY' && !defined($_->{channel})
+	} @{ $result->{entities} };
 	is([map { $_->{type} } @{ $signal_owner->{supplemental_signals} }],
-		[qw(payload json_flatten json_flatten json_flatten json_sequence json_flatten payload payload)],
+		[qw(payload json_flatten json_flatten json_flatten json_sequence json_flatten)],
 		'Tasmota-Parser liefert seine Standardtelemetrie bereits als allgemeine Zusatzsignale');
+
+	# Das Statustopic eines Kanals gehoert zum Kanal; POWER1 ist der zweite
+	# Schluessel desselben Kanals, siehe SetOption26.
+	is([map { $_->{topic} } @{ $switch->{supplemental_signals} }],
+		['stat/workshop_plug/POWER', 'stat/workshop_plug/POWER1'],
+		'der Schaltkanal traegt seine eigenen Statustopics');
 
 	my %sensor_by_id = map { $_->{object_id} => $_ }
 		grep { ($_->{component} || '') eq 'sensor' } @{ $result->{entities} };

@@ -127,7 +127,7 @@ subtest 'ein belegter Name faellt auf Art und Kennung zurueck' => sub {
 	add_iodev('mqtt', 'MQTT2_SERVER');
 	my ($hash, $error) = define_discovery('discovery', 'mqtt');
 	die $error if $error;
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 
 	# Ein fremdes Geraet belegt den Namen, den der Kanalname ergeben wuerde.
 	$main::defs{Tasmota_Wasser} = { NAME => 'Tasmota_Wasser', TYPE => 'dummy', READINGS => {} };

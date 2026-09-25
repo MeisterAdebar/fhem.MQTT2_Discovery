@@ -12,7 +12,7 @@ use lib 'lib/FHEM', 'tests/lib';
 use FHEMTestEnv qw(reset_env add_iodev define_discovery receive_client_message
 	reading_value command_log);
 
-our (@TIMERS, $MQTT2_DISCOVERY_QUEUE_DELAY);
+our @TIMERS;
 
 # Liefert eine feste Zeitbasis fuer reproduzierbare Timertermine.
 sub main::gettimeofday { return 1_700_000_000 }
@@ -36,8 +36,7 @@ die $! if !defined $loaded;
 sub run_next_timer {
 	my $timer = shift @TIMERS or die 'Kein Timer eingeplant';
 	my $function = $timer->[1];
-	no strict 'refs';
-	&{ "main::$function" }($timer->[2]);
+	return $function->($timer->[2]);
 }
 
 # Erstellt fuer jeden Queue-Test eine frische Discovery- und IODev-Umgebung.
@@ -63,7 +62,7 @@ subtest 'Parse legt Arbeit ab und konsumiert Discovery sofort' => sub {
 	my $topic = 'homeassistant/sensor/node/temp/config';
 	my $payload = '{"uniq_id":"node_temp","stat_t":"node/temp","dev":{"ids":["node"],"name":"Node"}}';
 
-	is(main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload)), '',
+	is(FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $payload)), '',
 		'Discovery wird konsumiert');
 	ok(!$main::defs{MQTT2_Node}, 'Device wird nicht im MQTT-Dispatch angelegt');
 	is(scalar(@TIMERS), 1, 'genau ein Worker-Timer ist eingeplant');
@@ -94,7 +93,7 @@ subtest 'retained Discovery wartet beim Neustart auf INITIALIZED' => sub {
 
 	# Der erste Lauf erzeugt den Besitzstand, den FHEM beim Neustart erst aus dem
 	# statefile wiederherstellt.
-	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $payload));
 	run_next_timer() while @TIMERS;
 	my $target = 'MQTT2_Node';
 	my $stored_registry = reading_value('discovery', '.registry');
@@ -118,11 +117,11 @@ subtest 'retained Discovery wartet beim Neustart auf INITIALIZED' => sub {
 	is($define_error, undef, 'Discovery wird vor INITIALIZED definiert');
 	$main::attr{discovery}{deviceNamePrefix} = 'MQTT2_';
 
-	main::MQTT2_DISCOVERY_Parse($restart_io, mqtt_message($topic, $payload));
+	FHEM::MQTT2_DISCOVERY::Parse($restart_io, mqtt_message($topic, $payload));
 	is(scalar(@TIMERS), 0, 'vor INITIALIZED wird kein Polling-Timer eingeplant');
 	ok($restarted->{helper}{queue}{waiting_for_init},
 		'retained Discovery bleibt bis zum Lifecycle-Ereignis geparkt');
-	main::MQTT2_DISCOVERY_process_queue($restarted);
+	FHEM::MQTT2_DISCOVERY::process_queue($restarted);
 	is($main::attr{$target}{readingList}, $reading_list,
 		'defensiver Direktlauf vor INITIALIZED veraendert die readingList nicht');
 	ok(!exists($restarted->{helper}{registry}),
@@ -136,15 +135,15 @@ subtest 'retained Discovery wartet beim Neustart auf INITIALIZED' => sub {
 	};
 	$main::init_done = 1;
 	my ($reference) = $reading_list =~ /'(r_[a-f0-9]+)'/;
-	is(main::MQTT2_DISCOVERY_runtimeRef(
+	is(FHEM::MQTT2_DISCOVERY::runtimeRef(
 			$target, $reference, '{"temperature":21}'),
 		{ temperature => '21' },
 		'die Referenz wird nach Neustart direkt aus dem restaurierten Registry-Reading aufgeloest');
-	main::MQTT2_DISCOVERY_Notify($restarted, {
+	FHEM::MQTT2_DISCOVERY::Notify($restarted, {
 		NAME => 'global', CHANGED => ['INITIALIZED'],
 	});
 	is(scalar(@TIMERS), 1, 'INITIALIZED startet die geparkte Queue genau einmal');
-	main::MQTT2_DISCOVERY_Notify($restarted, {
+	FHEM::MQTT2_DISCOVERY::Notify($restarted, {
 		NAME => 'global', CHANGED => ['INITIALIZED'],
 	});
 	is(scalar(@TIMERS), 1, 'wiederholtes INITIALIZED erzeugt keinen zweiten Timer');
@@ -161,11 +160,11 @@ subtest 'retained Discovery wartet beim Neustart auf INITIALIZED' => sub {
 	my $humidity_payload = '{"stat_t":"node/data","val_tpl":"{{ value_json.humidity }}",'
 		. '"uniq_id":"node_humidity","dev":{"ids":["node"],"name":"Node"}}';
 	$main::init_done = 0;
-	main::MQTT2_DISCOVERY_Parse(
+	FHEM::MQTT2_DISCOVERY::Parse(
 		$restart_io, mqtt_message($humidity_topic, $humidity_payload),
 	);
 	is(scalar(@TIMERS), 0, 'auch vor REREADCFG bleibt neue Arbeit ohne Polling geparkt');
-	main::MQTT2_DISCOVERY_Notify($restarted, {
+	FHEM::MQTT2_DISCOVERY::Notify($restarted, {
 		NAME => 'global', CHANGED => ['REREADCFG'],
 	});
 	is(scalar(@TIMERS), 1, 'REREADCFG plant die geparkte Queue fuer den Eventloop');
@@ -196,7 +195,7 @@ subtest 'fehlendes Registry-Ziel wird nach Neustart neu aufgebaut' => sub {
 	# Die erste Verarbeitung erzeugt einen Registry-Eintrag fuer das bereits
 	# vorhandene Device, ohne dessen manuelle Herkunft zu veraendern.
 	for my $discovery (@discoveries) {
-		main::MQTT2_DISCOVERY_Parse($io, mqtt_message(@$discovery));
+		FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message(@$discovery));
 	}
 	run_next_timer() while @TIMERS;
 	my $stored_registry = reading_value('discovery', '.registry');
@@ -218,7 +217,7 @@ subtest 'fehlendes Registry-Ziel wird nach Neustart neu aufgebaut' => sub {
 	$main::init_done = 1;
 
 	for my $discovery (@discoveries) {
-		main::MQTT2_DISCOVERY_Parse($restart_io, mqtt_message(@$discovery));
+		FHEM::MQTT2_DISCOVERY::Parse($restart_io, mqtt_message(@$discovery));
 	}
 	run_next_timer() while @TIMERS;
 
@@ -246,13 +245,13 @@ subtest 'fehlendes Registry-Ziel respektiert autoCreate und bleibt wiederholbar'
 		. '"uniq_id":"node_temperature","dev":{"ids":["node"],"name":"Node"}}';
 	my $target = 'MQTT2_Node';
 
-	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $payload));
 	run_next_timer() while @TIMERS;
 	my $stored_registry = reading_value('discovery', '.registry');
 	is(main::CommandDelete(undef, $target), undef, 'verwaltetes Zieldevice wird manuell geloescht');
 	$main::attr{discovery}{autoCreate} = 0;
 
-	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $payload));
 	run_next_timer() while @TIMERS;
 	ok(!$main::defs{$target}, 'autoCreate=0 legt das fehlende Ziel nicht erneut an');
 	like(reading_value('discovery', 'lastError'), qr/autoCreate ist deaktiviert/,
@@ -261,7 +260,7 @@ subtest 'fehlendes Registry-Ziel respektiert autoCreate und bleibt wiederholbar'
 		'fehlgeschlagener Versuch behaelt den bisherigen Registry-Stand fuer einen Retry');
 
 	$main::attr{discovery}{autoCreate} = 1;
-	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $payload));
 	run_next_timer() while @TIMERS;
 	ok($main::defs{$target}, 'spaeter aktiviertes autoCreate baut dasselbe Ziel erfolgreich neu auf');
 	is(reading_value('discovery', 'lastError'), 'none', 'erfolgreicher Retry bereinigt den Topic-Fehler');
@@ -269,7 +268,7 @@ subtest 'fehlendes Registry-Ziel respektiert autoCreate und bleibt wiederholbar'
 
 subtest 'MQTT2_CLIENT verarbeitet Retained erst nach dem Neustart' => sub {
 	my ($running, $io) = setup('MQTT2_CLIENT');
-	is(main::MQTT2_DISCOVERY_Set($running, 'discovery', 'activate'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Set($running, 'discovery', 'activate'), undef,
 		'Discovery wird in die Parserreihenfolge des Clients aufgenommen');
 	my $client_order = $main::attr{mqtt}{clientOrder};
 	my $device = '"dev":{"ids":["z2m_light"],"name":"WZ_LIGHTSTRIP_LICHT"}';
@@ -350,7 +349,7 @@ subtest 'MQTT2_CLIENT verarbeitet Retained erst nach dem Neustart' => sub {
 	};
 	$main::attr{mqtt}{ignoreRegexp} = 'homeassistant/[^:"]+/config';
 	$main::init_done = 1;
-	main::MQTT2_DISCOVERY_Notify($restarted, {
+	FHEM::MQTT2_DISCOVERY::Notify($restarted, {
 		NAME => 'global', CHANGED => ['INITIALIZED'],
 	});
 	is(scalar(@TIMERS), 0,
@@ -371,7 +370,7 @@ subtest 'MQTT2_CLIENT verarbeitet Retained erst nach dem Neustart' => sub {
 	# fuehrt alle Entities einmal zusammen und ersetzt den alten Besitzstand. Die
 	# testweise Wartezeit von fuenf Sekunden veraendert nur den Timertermin.
 	delete $main::attr{mqtt}{ignoreRegexp};
-	local $MQTT2_DISCOVERY_QUEUE_DELAY = 5;
+	local $FHEM::MQTT2_DISCOVERY::QUEUE_DELAY = 5;
 	my $commands_before_replay = scalar @{ command_log() };
 	for my $discovery (@discoveries) {
 		is(receive_client_message('mqtt', 'z2m', @$discovery), ['MQTT2_DISCOVERY'],
@@ -398,7 +397,7 @@ subtest 'regulaeres Autocreate vor dem Discovery-Worker wird uebernommen' => sub
 	my $topic = 'homeassistant/sensor/node/temp/config';
 	my $payload = '{"uniq_id":"node_temp","stat_t":"node/temp","dev":{"ids":["node"],"name":"Node"}}';
 
-	is(main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload)), '',
+	is(FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $payload)), '',
 		'Discovery wird vor MQTT2_DEVICE konsumiert und eingeplant');
 	is(main::CommandDefine(undef, 'client MQTT2_DEVICE client mqtt'), undef,
 		'simuliertes State-Autocreate legt die Transport-CID vor dem Worker an');
@@ -418,9 +417,9 @@ subtest 'Burst wird portioniert und identische Topics werden zusammengefasst' =>
 	my $latest = '{"uniq_id":"node_temp","stat_t":"node/latest","dev":{"ids":["node"],"name":"Node"}}';
 	my $other = '{"uniq_id":"other_temp","stat_t":"other/temp","dev":{"ids":["other"],"name":"Other"}}';
 
-	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $first));
-	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $latest));
-	main::MQTT2_DISCOVERY_Parse($io,
+	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $first));
+	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $latest));
+	FHEM::MQTT2_DISCOVERY::Parse($io,
 		mqtt_message('homeassistant/sensor/other/temp/config', $other));
 	is(scalar(@TIMERS), 1, 'Burst plant nur einen Start-Timer');
 
@@ -461,7 +460,7 @@ subtest 'ein Burst persistiert die Registry nur einmal' => sub {
 		for my $index (1 .. 20) {
 			my $payload = qq({"uniq_id":"node_$index","stat_t":"node/$index",)
 				. qq("dev":{"ids":["node"],"name":"Node"}});
-			main::MQTT2_DISCOVERY_Parse($io,
+			FHEM::MQTT2_DISCOVERY::Parse($io,
 				mqtt_message("homeassistant/sensor/node/value_$index/config", $payload));
 		}
 		run_next_timer() while @TIMERS;
@@ -477,11 +476,11 @@ subtest 'retained Delete wird ebenfalls portioniert' => sub {
 	my $payload = '{"uniq_id":"node_temp","stat_t":"node/temp","dev":{"ids":["node"],"name":"Node"}}';
 	$main::attr{discovery}{autoDelete} = 1;
 
-	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $payload));
 	run_next_timer() while @TIMERS;
 	ok($main::defs{MQTT2_Node}, 'Ausgangsdevice wurde angelegt');
 
-	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, ''));
+	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, ''));
 	run_next_timer();
 	ok($main::defs{MQTT2_Node}, 'Topic-Tick entfernt das Device noch nicht im selben Event-Loop-Lauf');
 	is(scalar(@TIMERS), 1, 'Device-Aktualisierung des Deletes ist separat eingeplant');
@@ -497,18 +496,18 @@ subtest 'Lifecycle gleicht den bisherigen Availability-Default aus der Registry 
 	my $payload = '{"uniq_id":"node_temp","stat_t":"node/state",'
 		. '"val_tpl":"{{ value_json.temperature }}","avty_t":"node/status",'
 		. '"dev":{"ids":["node"],"name":"Node"}}';
-	main::MQTT2_DISCOVERY_Parse($io, mqtt_message($topic, $payload));
+	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $payload));
 	run_next_timer() while @TIMERS;
 	my ($record) = values %{ $hash->{helper}{registry}{devices} };
 	$record->{availability_reading} = 'deviceAvailability';
 	$record->{owned_availability_reading} = 'deviceAvailability';
 	$main::defs{MQTT2_Node}{READINGS}{deviceAvailability} = { VAL => 'unknown' };
 	delete $main::defs{MQTT2_Node}{READINGS}{availability};
-	ok(main::MQTT2_DISCOVERY_registry_rendering_outdated($hash),
+	ok(FHEM::MQTT2_DISCOVERY::registry_rendering_outdated($hash),
 		'der gespeicherte bisherige Default wird als veraltet erkannt');
 	$main::attr{MQTT2_Node}{readingList} .= "\nmanual/default:.* availability";
 
-	main::MQTT2_DISCOVERY_Notify($hash, {
+	FHEM::MQTT2_DISCOVERY::Notify($hash, {
 		NAME => 'global', CHANGED => ['INITIALIZED'],
 	});
 	is(scalar(@TIMERS), 0,
@@ -518,7 +517,7 @@ subtest 'Lifecycle gleicht den bisherigen Availability-Default aus der Registry 
 	$main::attr{MQTT2_Node}{readingList} = join("\n", grep {
 		$_ ne 'manual/default:.* availability'
 	} split /\n/, $main::attr{MQTT2_Node}{readingList});
-	main::MQTT2_DISCOVERY_Notify($hash, {
+	FHEM::MQTT2_DISCOVERY::Notify($hash, {
 		NAME => 'global', CHANGED => ['INITIALIZED'],
 	});
 	is(scalar(@TIMERS), 1,
@@ -528,7 +527,7 @@ subtest 'Lifecycle gleicht den bisherigen Availability-Default aus der Registry 
 		'der aktuelle Zustand steht nach dem Abgleich unter dem neuen Default');
 	ok(!exists($main::defs{MQTT2_Node}{READINGS}{deviceAvailability}),
 		'das nachweislich modulverwaltete alte Defaultreading wurde entfernt');
-	ok(!main::MQTT2_DISCOVERY_registry_rendering_outdated($hash),
+	ok(!FHEM::MQTT2_DISCOVERY::registry_rendering_outdated($hash),
 		'der aktualisierte Registry-Stand entspricht dem neuen Default');
 };
 
@@ -552,7 +551,7 @@ subtest 'Renderattribute werden registryweit und ohne neue Discovery angewendet'
 	# Beide Ziele werden einmalig aus Discovery aufgebaut; alle folgenden
 	# Umbenennungen muessen ausschliesslich aus der Registry erfolgen.
 	for my $discovery (@discoveries) {
-		main::MQTT2_DISCOVERY_Parse($io, mqtt_message(@$discovery));
+		FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message(@$discovery));
 	}
 
 	run_next_timer() while @TIMERS;
@@ -560,7 +559,7 @@ subtest 'Renderattribute werden registryweit und ohne neue Discovery angewendet'
 	is([map { reading_value($_, 'availability') } @targets], ['unknown', 'unknown'],
 		'der Ausgangszustand verwendet auf beiden Zielen das Standardreading');
 
-	is(main::MQTT2_DISCOVERY_Attr(
+	is(FHEM::MQTT2_DISCOVERY::Attr(
 			'set', 'discovery', 'availabilityReading', 'MQTT2DiscoveryAvailability',
 		), undef, 'ein sicherer globaler Availability-Name wird akzeptiert');
 	$main::attr{discovery}{availabilityReading} = 'MQTT2DiscoveryAvailability';
@@ -596,12 +595,12 @@ subtest 'Renderattribute werden registryweit und ohne neue Discovery angewendet'
 	# Ein manueller Anspruch auf einem einzigen Ziel verhindert die globale
 	# Umstellung, bevor irgendein Device teilweise geaendert werden kann.
 	$main::attr{MQTT2_Other}{readingList} .= "\nmanual/topic:.* ReservedAvailability";
-	like(main::MQTT2_DISCOVERY_Attr(
+	like(FHEM::MQTT2_DISCOVERY::Attr(
 			'set', 'discovery', 'availabilityReading', 'ReservedAvailability',
 		), qr/MQTT2_Other/, 'manueller Konflikt nennt das blockierende Zieldevice');
 	is(scalar(@TIMERS), 0, 'abgelehnte globale Umstellung plant keine Teilaktualisierung');
 
-	is(main::MQTT2_DISCOVERY_Attr(
+	is(FHEM::MQTT2_DISCOVERY::Attr(
 			'set', 'discovery', 'availabilityReading', 'RenamedAvailability',
 		), undef, 'der Availability-Name kann spaeter erneut geaendert werden');
 	$main::attr{discovery}{availabilityReading} = 'RenamedAvailability';
@@ -615,7 +614,7 @@ subtest 'Renderattribute werden registryweit und ohne neue Discovery angewendet'
 	}
 
 	$main::attr{MQTT2_Other}{readingList} .= "\nmanual/default:.* availability";
-	like(main::MQTT2_DISCOVERY_Attr(
+	like(FHEM::MQTT2_DISCOVERY::Attr(
 			'del', 'discovery', 'availabilityReading',
 		), qr/MQTT2_Other/,
 		'auch die Rueckkehr zum Default wird bei manueller Belegung global abgelehnt');
@@ -624,7 +623,7 @@ subtest 'Renderattribute werden registryweit und ohne neue Discovery angewendet'
 		$_ ne 'manual/default:.* availability'
 	} split /\n/, $main::attr{MQTT2_Other}{readingList});
 
-	is(main::MQTT2_DISCOVERY_Attr(
+	is(FHEM::MQTT2_DISCOVERY::Attr(
 			'del', 'discovery', 'availabilityReading',
 		), undef, 'Loeschen des Attributes wird akzeptiert');
 	delete $main::attr{discovery}{availabilityReading};
@@ -641,10 +640,10 @@ subtest 'Renderattribute werden registryweit und ohne neue Discovery angewendet'
 subtest 'deactivate verwirft noch nicht verarbeitete Arbeit' => sub {
 	my ($hash, $io) = setup();
 	my $payload = '{"uniq_id":"node_temp","stat_t":"node/temp","dev":{"ids":["node"],"name":"Node"}}';
-	main::MQTT2_DISCOVERY_Parse($io,
+	FHEM::MQTT2_DISCOVERY::Parse($io,
 		mqtt_message('homeassistant/sensor/node/temp/config', $payload));
 
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'deactivate'), undef,
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deactivate'), undef,
 		'deactivate ist erfolgreich');
 	is(scalar(@TIMERS), 0, 'Queue-Timer wurde entfernt');
 	ok(!$main::defs{MQTT2_Node}, 'verworfene Arbeit hat keine Nebenwirkung');

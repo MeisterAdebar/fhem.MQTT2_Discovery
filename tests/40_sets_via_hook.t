@@ -59,14 +59,14 @@ sub setup {
 			return undef;
 		},
 	);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	return $hash;
 }
 
 sub discover {
 	my ($hash) = @_;
 	@published = ();
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id);
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id);
 
 	for my $result ($info, configuration(), status()) {
 		my $request = shift @published;
@@ -99,7 +99,7 @@ subtest 'Mit setsViaHook entsteht kein setList-Attribut' => sub {
 	$main::attr{discovery}{setsViaHook} = 1;
 	discover($hash);
 	is(attr_value($target, 'setList'), undef, 'das Zielgeraet hat kein setList-Attribut');
-	my ($record) = values %{ main::MQTT2_DISCOVERY_registry($hash)->{devices} };
+	my ($record) = values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
 	is([map { $_->{name} } @{ $record->{hook_sets} }], ['switch_0'],
 		'die Befehle liegen strukturiert in der Registry');
 
@@ -116,19 +116,19 @@ subtest 'Der Hook bietet die Befehle an und fuehrt sie aus' => sub {
 	@published = ();
 
 	# Bei "?" ergaenzt der Hook die Auswahl und ueberlaesst die Antwort SetExtensions.
-	main::MQTT2_DISCOVERY_SetExtensions($main::defs{$target}, '', $target, '?');
+	FHEM::MQTT2_DISCOVERY::SetExtensions($main::defs{$target}, '', $target, '?');
 	is(scalar(@fallback), 1, 'unbekannter Befehl geht an SetExtensions');
 	like($fallback[0]{list}, qr/\bswitch_0:on,off\b/, 'die Befehle stehen in der Auswahl');
 
 	# Ein bekannter Befehl wird selbst ausgefuehrt.
-	is(main::MQTT2_DISCOVERY_SetExtensions($main::defs{$target}, '', $target, 'switch_0', 'on'),
+	is(FHEM::MQTT2_DISCOVERY::SetExtensions($main::defs{$target}, '', $target, 'switch_0', 'on'),
 		undef, 'der Schaltbefehl meldet keinen Fehler');
 	is(scalar(@published), 1, 'genau ein Publish');
 	is($published[0]{topic}, "$id/rpc", 'der Befehl geht an das RPC-Topic des Geraets');
 	like($published[0]{payload}, qr/"method":"Switch\.Set"/, 'der Payload schaltet die Komponente');
 	is($main::defs{$target}{READINGS}{state}{VAL}, 'switch_0 on',
 		'state folgt dem Befehl wie bei MQTT2_DEVICE_Set');
-	is(main::MQTT2_DISCOVERY_SetExtensions($main::defs{$target}, '', $target, 'switch_0', 'blau'),
+	is(FHEM::MQTT2_DISCOVERY::SetExtensions($main::defs{$target}, '', $target, 'switch_0', 'blau'),
 		'Unbekannter Wert fuer switch_0', 'ein unbekannter Wert wird abgelehnt');
 };
 
@@ -140,7 +140,7 @@ subtest 'Mit der FHEM-Konvention steht bis zur Rueckmeldung set_' => sub {
 
 	# Nach FHEM-Konvention meldet das Reading den Befehl erst als Absicht; die
 	# Rueckmeldung des Geraets ersetzt ihn spaeter durch den echten Zustand.
-	is(main::MQTT2_DISCOVERY_SetExtensions($main::defs{$target}, '', $target, 'on'),
+	is(FHEM::MQTT2_DISCOVERY::SetExtensions($main::defs{$target}, '', $target, 'on'),
 		undef, 'der Schaltbefehl meldet keinen Fehler');
 	is($main::defs{$target}{READINGS}{state}{VAL}, 'set_on',
 		'state zeigt den Uebergang');
@@ -152,7 +152,7 @@ subtest 'Fremde Devices bleiben unveraendert' => sub {
 	discover($hash);
 	@fallback = ();
 	$main::defs{fremd} = { NAME => 'fremd', TYPE => 'MQTT2_DEVICE', READINGS => {} };
-	main::MQTT2_DISCOVERY_SetExtensions($main::defs{fremd}, 'on:noArg', 'fremd', '?');
+	FHEM::MQTT2_DISCOVERY::SetExtensions($main::defs{fremd}, 'on:noArg', 'fremd', '?');
 	is(scalar(@fallback), 1, 'der Aufruf landet bei SetExtensions');
 	is($fallback[0]{list}, 'on:noArg', 'die Kommandoliste bleibt unveraendert');
 };

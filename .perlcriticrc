@@ -21,3 +21,7 @@ short_subroutine_statements = 2
 # bestimmte Stelle und kein pauschales Abschalten.
 [TestingAndDebugging::ProhibitNoWarnings]
 allow_with_category_restriction = 1
+
+# Ein FHEM-Modul heisst 10_<TYP>.pm und traegt intern das Paket
+# FHEM::<TYP>; beides kann nicht zusammenpassen.
+[-Modules::RequireFilenameMatchesPackage]

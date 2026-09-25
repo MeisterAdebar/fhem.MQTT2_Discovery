@@ -173,7 +173,7 @@ sub setup {
 			cancel_timer => sub { @timers = (); return; },
 		) : ()),
 	);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	is(\@published, [{ topic => 'shellies/command', payload => 'announce' }], 'Aktivierung startet native Erkennung');
 	@published = ();
 	return ($hash, $io);
@@ -186,8 +186,7 @@ sub drain {
 	while (@timers) {
 		die 'Timer-Endlosschleife' if ++$count > 50;
 		my $timer = shift @timers;
-		no strict 'refs';
-		&{ "main::$timer->[2]" }($timer->[1]);
+		$timer->[2]->($timer->[1]);
 	}
 
 }
@@ -195,7 +194,7 @@ sub drain {
 # Beantwortet die drei Discovery-Abfragen am simulierten MQTT-Dispatch.
 sub discover {
 	my ($hash, $prefix, $status) = @_;
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $prefix), undef, 'gezielte Erkennung gestartet');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $prefix), undef, 'gezielte Erkennung gestartet');
 
 	for my $result ($info, configuration($prefix), $status || status()) {
 		my $request = shift @published;
@@ -220,7 +219,7 @@ sub readings_for {
 		next if "$topic:$payload" !~ /^$pattern$/s;
 		my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
 		next if !defined($reference);
-		my $values = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $payload);
+		my $values = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $payload);
 		%updates = (%updates, %$values) if ref($values) eq 'HASH';
 	}
 
@@ -261,7 +260,7 @@ subtest 'SERVER und CLIENT funktionieren bis zu den echten Runtime-Bindings' => 
 		my ($set) = grep { /^switch_0:/ } split /\n/, attr_value($target, 'setList');
 		my ($reference) = ($set // '') =~ /'(r_[a-f0-9]+)'/;
 		ok($reference, 'Schaltbefehl ist als sichere Runtime-Referenz vorhanden');
-		is(main::MQTT2_DISCOVERY_runtimeRef($target, $reference, 'switch_0 on'),
+		is(FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, 'switch_0 on'),
 			'haus/licht/rpc {"id":1,"method":"Switch.Set","params":{"id":0,"on":true},"src":"haus/licht/events"}', 'on schaltet den richtigen Shelly-Kanal');
 		my ($relay_semantics) = grep { $_->{class} eq 'switch' } @{ $main::defs{$target}{SEMANTIC_METADATA}{entities} };
 		is($relay_semantics->{capabilities}{power}{valueMap}{read}, { true => 'on', false => 'off' }, 'Semantik verwendet dieselben Boolean-Zustaende wie die Runtime');
@@ -300,18 +299,18 @@ subtest 'Queue trennt Announcements und wartet mit Initialstatus auf den Apply' 
 subtest 'Neustart, Reconnect und Abbruch erhalten die Erkennungsgrenzen' => sub {
 	my ($hash, $io) = setup('MQTT2_CLIENT');
 	$io->{CHANGED} = ['state: opened'];
-	main::MQTT2_DISCOVERY_Notify($hash, $io);
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $io);
 	is(\@published, [], 'wiederholtes Online-Ereignis startet keinen zweiten Broadcast');
 	$io->{STATE} = 'disconnected';
-	main::MQTT2_DISCOVERY_Notify($hash, $io);
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $io);
 	$io->{STATE} = 'opened';
-	main::MQTT2_DISCOVERY_Notify($hash, $io);
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $io);
 	is(\@published, [{ topic => 'shellies/command', payload => 'announce' }], 'Reconnect startet eine neue Erkennung');
 	@published = ();
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id);
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id);
 	my $pending = shift @published;
-	main::MQTT2_DISCOVERY_deactivate($hash);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::deactivate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	@published = ();
 	my ($topic, $payload) = response($pending, $info);
 	dispatch_message('mqtt', 'client', $topic, $payload);
@@ -333,13 +332,15 @@ subtest 'MQTT-Gateway verwendet den echten FHEM-WriteFn-Vertrag' => sub {
 subtest 'Deaktivierung und fremde Antworten loesen keine Discovery aus' => sub {
 	my ($hash, $io) = setup();
 	$main::attr{discovery}{disable} = 1;
-	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id), 'MQTT2_DISCOVERY muss aktiv sein', 'disable blockiert manuelle Discovery');
-	is(main::MQTT2_DISCOVERY_Parse($io, "cid\0$id/online\0true"), '[NEXT]', 'disable blockiert keine Shelly-Laufzeitmeldungen');
+	is(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id), 'MQTT2_DISCOVERY muss aktiv sein', 'disable blockiert manuelle Discovery');
+	is([FHEM::MQTT2_DISCOVERY::Parse($io, "cid\0$id/online\0true")], ['[NEXT]'],
+		'disable blockiert keine Shelly-Laufzeitmeldungen');
 	is(\@published, [], 'disable sendet keine MQTT-Abfrage');
 	delete $main::attr{discovery}{disable};
-	is(main::MQTT2_DISCOVERY_Parse($io, "cid\0mqtt2_discovery/other/shelly/0123456789abcdef/info/rpc\0{}"), '[NEXT]', 'Antworten anderer Instanzen bleiben unangetastet');
+	is([FHEM::MQTT2_DISCOVERY::Parse($io, "cid\0mqtt2_discovery/other/shelly/0123456789abcdef/info/rpc\0{}")],
+		['[NEXT]'], 'Antworten anderer Instanzen bleiben unangetastet');
 	$io->{STATE} = 'closed';
-	like(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id), qr/nicht verbunden/, 'getrenntes IODev sendet keine Abfragen');
+	like(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id), qr/nicht verbunden/, 'getrenntes IODev sendet keine Abfragen');
 };
 
 done_testing;

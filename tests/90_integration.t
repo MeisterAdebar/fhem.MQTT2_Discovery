@@ -33,7 +33,7 @@ sub setup {
 		if exists($args{device_name_prefix}) && $args{device_name_prefix} ne '';
 	$main::attr{discovery}{createReadings} = $args{create_readings}
 		if exists $args{create_readings};
-	my $activate_error = main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'activate');
+	my $activate_error = FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'activate');
 	die $activate_error if $activate_error;
 	return $hash;
 }
@@ -129,11 +129,11 @@ subtest 'EMS-ESP Jinja-Fallback und Unicode-Payload bleiben hinter Referenzen' =
 	my $reading_descriptor = runtime_descriptor_for_line($target, $reading_line);
 	my $reading_name = $reading_descriptor->{configuration}{readings}[0]{name};
 	my ($reading_reference) = $reading_line =~ /'(r_[a-f0-9]+)'/;
-	is(main::MQTT2_DISCOVERY_runtimeRef(
+	is(FHEM::MQTT2_DISCOVERY::runtimeRef(
 			$target, $reading_reference, '{"heatingtemp":55}'),
 		{ $reading_name => '55' },
 		'is defined liefert den vorhandenen EMS-Wert als Reading');
-	is(main::MQTT2_DISCOVERY_runtimeRef($target, $reading_reference, '{}'),
+	is(FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reading_reference, '{}'),
 		{ $reading_name => '0' },
 		'is defined liefert bei fehlendem EMS-Feld den deklarierten Fallback');
 
@@ -145,7 +145,7 @@ subtest 'EMS-ESP Jinja-Fallback und Unicode-Payload bleiben hinter Referenzen' =
 		'setList enthaelt weder das Umlautzeichen noch dessen JSON-Escape');
 	my ($set_reference) = $set_line =~ /'(r_[a-f0-9]+)'/;
 	my ($set_name) = $set_line =~ /^([^: ]+)/;
-	my $command = main::MQTT2_DISCOVERY_runtimeRef(
+	my $command = FHEM::MQTT2_DISCOVERY::runtimeRef(
 		$target, $set_reference, "$set_name on",
 	);
 	my $expected = Encode::encode('UTF-8', "ems-esp/boiler/command hei${umlaut}");
@@ -177,14 +177,14 @@ subtest 'Runtime-Readings liefern Unicode genau einmal als UTF-8-Bytestrom' => s
 	my $reading_name = $descriptor->{configuration}{readings}[0]{name};
 	my ($reference) = $reading_line =~ /'(r_[a-f0-9]+)'/;
 	my $state = $json->encode({ errorDescription => $description });
-	my $result = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $state);
+	my $result = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $state);
 	my $expected = Encode::encode('UTF-8', $description);
 	is(unpack('H*', $result->{$reading_name}), unpack('H*', $expected),
 		'Topic-Referenz liefert das ae als korrekte UTF-8-Bytes');
 	ok(!utf8::is_utf8($result->{$reading_name}),
 		'Topic-Referenz liefert einen expliziten FHEM-Bytestrom');
 
-	my $already_encoded = main::MQTT2_DISCOVERY_mqttReadingBytes({
+	my $already_encoded = FHEM::MQTT2_DISCOVERY::mqttReadingBytes({
 		errorDescription => $expected,
 	});
 	is(unpack('H*', $already_encoded->{errorDescription}), unpack('H*', $expected),
@@ -264,7 +264,7 @@ subtest 'Alte Sonos-Discovery funktioniert ueber SERVER und CLIENT bis zur Laufz
 		my ($speaker_line) = grep { /^\$DEVICETOPIC:/ } split /\n/, $reading_list;
 		my ($reference) = $speaker_line =~ /'(r_[a-f0-9]+)'/;
 		my $state = '{"transportState":"PLAYING","volume":{"Master":23},"mute":{"Master":false}}';
-		is(main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $state),
+		is(FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $state),
 			{ transportState => 'PLAYING', volume => '23', mute => 'false' },
 			'gemeinsame Runtime liest Transportstatus, Lautstaerke und Mute');
 		like($set_list, qr/^play:noArg \$DEVICETOPIC\/control \{"command":"play"\}$/m,
@@ -273,14 +273,14 @@ subtest 'Alte Sonos-Discovery funktioniert ueber SERVER und CLIENT bis zur Laufz
 			'Lautstaerke verwendet denselben numerischen Setter wie das neue Format');
 		my ($mute_line) = grep { /^mute:/ } split /\n/, $set_list;
 		my ($mute_ref) = $mute_line =~ /'(r_[a-f0-9]+)'/;
-		is(main::MQTT2_DISCOVERY_runtimeRef($target, $mute_ref, 'mute off'),
+		is(FHEM::MQTT2_DISCOVERY::runtimeRef($target, $mute_ref, 'mute off'),
 			qq|sonos/$uuid/control {"command":"unmute"}|, 'Mute-Auswahl wird korrekt codiert');
 		my ($availability_line) = grep { /^sonos\/connected:/ } split /\n/, $reading_list;
 		my ($availability_ref) = $availability_line =~ /'(r_[a-f0-9]+)'/;
 
 		# Die alte payload_available-Angabe fuehrt zur selben dreistufigen Bridge-Auswertung.
 		for my $case ([0, 'offline'], [1, 'offline'], [2, 'online']) {
-			my $updates = main::MQTT2_DISCOVERY_runtimeRef($target, $availability_ref, "$case->[0]");
+			my $updates = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $availability_ref, "$case->[0]");
 			is($updates->{sonosStatus}, $case->[1],
 				'Availability wird unter dem konfigurierten Readingnamen ausgewertet');
 		}
@@ -292,7 +292,7 @@ subtest 'Alte Sonos-Discovery funktioniert ueber SERVER und CLIENT bis zur Laufz
 		# Nach dem Verwerfen der Laufzeitcaches muss die persistierte Registry ausreichen.
 		delete $hash->{helper}{registry};
 		delete $main::defs{$target}{helper}{mqtt2_discovery_runtime_refs};
-		is(main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $state),
+		is(FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $state),
 			{ transportState => 'PLAYING', volume => '23', mute => 'false' },
 			'Reading-Referenz wird aus der gespeicherten Registry wiederhergestellt');
 
@@ -410,11 +410,11 @@ subtest 'extraJsonReadings wechselt ohne neue Discovery zwischen offen und angek
 	like($inclusive, qr{^stat/strict_plug/POWER:\.\* POWER$}m,
 		'das explizit angekuendigte Power-Reading ist im Default enthalten');
 
-	is(main::MQTT2_DISCOVERY_Attr(
+	is(FHEM::MQTT2_DISCOVERY::Attr(
 			'set', 'discovery', 'extraJsonReadings', 'ignore',
 		), undef, 'der restriktive JSON-Modus wird akzeptiert');
 	$main::attr{discovery}{extraJsonReadings} = 'ignore';
-	main::MQTT2_DISCOVERY_process_queue($hash);
+	FHEM::MQTT2_DISCOVERY::process_queue($hash);
 	my $strict = attr_value($target, 'readingList');
 	unlike($strict, qr/MQTT2_DISCOVERY_jsonReadings/,
 		'ignore entfernt alle offenen JSON-Sammelhandler');
@@ -432,11 +432,11 @@ subtest 'extraJsonReadings wechselt ohne neue Discovery zwischen offen und angek
 
 	# Die Rueckkehr zu include rendert die offenen Felder aus der Registry neu;
 	# es wird bewusst keine zweite Discovery-Nachricht gesendet.
-	is(main::MQTT2_DISCOVERY_Attr(
+	is(FHEM::MQTT2_DISCOVERY::Attr(
 			'set', 'discovery', 'extraJsonReadings', 'include',
 		), undef, 'der inklusive Defaultmodus kann wiederhergestellt werden');
 	$main::attr{discovery}{extraJsonReadings} = 'include';
-	main::MQTT2_DISCOVERY_process_queue($hash);
+	FHEM::MQTT2_DISCOVERY::process_queue($hash);
 	like(attr_value($target, 'readingList'), qr/MQTT2_DISCOVERY_jsonReadings/,
 		'die Registry stellt die offenen JSON-Felder ohne neue Discovery wieder her');
 };
@@ -527,12 +527,18 @@ subtest 'SemanticUI filtert mehrkanalige Tasmota-Messwerte konservativ' => sub {
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/A1B2C3D4E5F6/config', $config);
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/A1B2C3D4E5F6/sensors', $sensors);
 
-	my %semantic = map { $_->{id} => $_ } @{ $main::defs{MQTT2_Meter_Switch_D4E5F6}{SEMANTIC_METADATA}{entities} };
-	is($semantic{power}{capabilities}{power}{read}, 'POWER1',
+	# Zwei Kanaele ergeben zwei Geraete; die Messwerte bleiben beim Hauptgeraet.
+	my %semantic = map { $_->{id} => $_ }
+		@{ $main::defs{MQTT2_Meter_Switch_D4E5F6}{SEMANTIC_METADATA}{entities} };
+	my %kanal1 = map { $_->{id} => $_ }
+		@{ $main::defs{MQTT2_Meter_Channel_1}{SEMANTIC_METADATA}{entities} };
+	my %kanal2 = map { $_->{id} => $_ }
+		@{ $main::defs{MQTT2_Meter_Channel_2}{SEMANTIC_METADATA}{entities} };
+	is($kanal1{power}{capabilities}{power}{read}, 'POWER1',
 		'erster Aktorkanal liest das tatsaechlich erzeugte nummerierte Reading');
-	is($semantic{power}{capabilities}{power}{write}, 'POWER1',
+	is($kanal1{power}{capabilities}{power}{write}, 'POWER1',
 		'erster Aktorkanal schreibt ueber denselben Namen wie sein Reading');
-	is($semantic{power2}{capabilities}{power}{read}, 'POWER2',
+	is($kanal2{power2}{capabilities}{power}{read}, 'POWER2',
 		'zweiter Aktorkanal liest sein nummeriertes Reading');
 	is([$semantic{energy_power_0}{device_class},
 			$semantic{energy_power_0}{capabilities}{value}{unit}],
@@ -554,7 +560,10 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/AABBCCCF9A44/config', $config);
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/AABBCCCF9A44/sensors', $sensors);
 
-	my $reading_list = attr_value('MQTT2_SchwimmbadEntfeuchter_Switch_CF9A44', 'readingList');
+	# Zwei Kanaele ergeben drei Geraete: Die geraeteweite Telemetrie bleibt beim
+	# Hauptgeraet, jeder Kanal bekommt sein eigenes mit Zustand und Befehl.
+	my $haupt = 'MQTT2_SchwimmbadEntfeuchter_Switch_CF9A44';
+	my $reading_list = attr_value($haupt, 'readingList');
 	my @expected = (
 		q{tele/tasmota_CF9A44/LWT:.* LWT},
 		q!tele/tasmota_CF9A44/STATE:.* { ! . $json_readings{state} . q! }!,
@@ -562,22 +571,26 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 		q!tele/tasmota_CF9A44/INFO(?:1|2|3):.* { $EVENT =~ m,^..Info(?:1|2|3)..(.+).$, ?  MQTT2_DISCOVERY_jsonReadings($NAME,'info',$1) : !
 			. $json_readings{info} . q! }!,
 		q!tele/tasmota_CF9A44/UPTIME:.* { ! . $json_readings{uptime} . q! }!,
-		q{stat/tasmota_CF9A44/POWER1:.* POWER1},
-		q{stat/tasmota_CF9A44/POWER2:.* POWER2},
 		q!stat/tasmota_CF9A44/RESULT:.* { ! . $json_readings{result} . q! }!,
 	);
 	for my $line (@expected) {
 		is(scalar(grep { $_ eq $line } split /\n/, $reading_list), 1,
-			"readingList enthaelt genau einmal: $line");
+			"readingList des Hauptgeraets enthaelt genau einmal: $line");
 	}
 	like($reading_list,
 		qr{^tele/tasmota_CF9A44/LWT:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
 		'Tasmota-LWT speist zusaetzlich die allgemeine Availability-Auswertung');
-	my $set_list = attr_value('MQTT2_SchwimmbadEntfeuchter_Switch_CF9A44', 'setList');
-	like($set_list, qr{^POWER1:ON,OFF\s+cmnd/tasmota_CF9A44/POWER1$}m,
-		'erster Set-Befehl entspricht exakt POWER1');
-	like($set_list, qr{^POWER2:ON,OFF\s+cmnd/tasmota_CF9A44/POWER2$}m,
-		'zweiter Set-Befehl entspricht exakt POWER2');
+	is(attr_value($haupt, 'setList'), undef, 'das Hauptgeraet schaltet nichts');
+
+	for my $kanal (1, 2) {
+		my $name = "MQTT2_SchwimmbadEntfeuchter_" . ($kanal == 1 ? 'Entfeuchter' : 'Luefter');
+		ok($main::defs{$name}, "Kanal $kanal traegt den Namen aus der Discovery");
+		like(attr_value($name, 'readingList'), qr{^stat/tasmota_CF9A44/POWER$kanal:\.\* POWER$kanal$}m,
+			"Kanal $kanal liest seinen eigenen Zustand");
+		is(attr_value($name, 'setList'),
+			"POWER$kanal:ON,OFF cmnd/tasmota_CF9A44/POWER$kanal",
+			"Kanal $kanal schaltet genau seinen Ausgang");
+	}
 };
 
 subtest 'Tasmota-Power-readings folgen allgemein der rl-Kanalposition' => sub {
@@ -617,9 +630,11 @@ subtest 'Tasmota-Power-readings folgen allgemein der rl-Kanalposition' => sub {
 			. '","ft":"%prefix%/%topic%/","tp":["cmnd","stat","tele"],"rl":'
 			. $case->{relays} . ',"so":' . $case->{options} . ',"ver":1}';
 		dispatch_message('mqtt', 'tasmota', "tasmota/discovery/$case->{mac}/config", $config);
-		my ($name) = grep { ($_->{TYPE} || '') eq 'MQTT2_DEVICE' } values %main::defs;
-		my $reading_list = attr_value($name->{NAME}, 'readingList');
-		my %lines = map { $_ => 1 } split /\n/, $reading_list;
+		# Mehrere Kanaele liegen in eigenen Geraeten; geprueft wird, welche Zeilen
+		# insgesamt entstehen, nicht in welchem Geraet sie stehen.
+		my %lines = map { $_ => 1 }
+			map { split /\n/, (attr_value($_, 'readingList') // '') }
+			grep { ($main::defs{$_}{TYPE} || '') eq 'MQTT2_DEVICE' } sort keys %main::defs;
 		ok($lines{$_}, "$case->{label}: $_") for @{ $case->{expected} };
 		ok(!$lines{$_}, "$case->{label}: nicht $_") for @{ $case->{forbidden} || [] };
 	}
@@ -628,7 +643,7 @@ subtest 'Tasmota-Power-readings folgen allgemein der rl-Kanalposition' => sub {
 subtest 'disable verhindert Verarbeitung bis zum Loeschen des Attributs' => sub {
 	my $hash = setup();
 	$main::attr{discovery}{disable} = 1;
-	main::MQTT2_DISCOVERY_Attr('set', 'discovery', 'disable', '1');
+	FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'disable', '1');
 	my $payload = switch_payload(id => 'disabled_node');
 	is(dispatch_message('mqtt', 'c', 'homeassistant/switch/disabled_node/power/config', $payload),
 		['MQTT2_DISCOVERY'], 'deaktivierte Discovery-Nachricht wird ohne Folgewirkung konsumiert');
@@ -636,7 +651,7 @@ subtest 'disable verhindert Verarbeitung bis zum Loeschen des Attributs' => sub 
 	is(reading_value('discovery', 'state'), 'disabled', 'Status zeigt disabled');
 
 	delete $main::attr{discovery}{disable};
-	main::MQTT2_DISCOVERY_Attr('del', 'discovery', 'disable');
+	FHEM::MQTT2_DISCOVERY::Attr('del', 'discovery', 'disable');
 	is(reading_value('discovery', 'state'), 'active', 'Loeschen von disable aktiviert den vorbereiteten Parser');
 	is(dispatch_message('mqtt', 'c', 'homeassistant/switch/disabled_node/power/config', $payload),
 		['MQTT2_DISCOVERY'], 'nach dem Loeschen wird Discovery wieder verarbeitet');
@@ -925,7 +940,7 @@ subtest 'Device-Discovery verdraengt funktional gleiche klassische PAC-Entities'
 		delete $mapping->{source_layout};
 	}
 
-	is(main::MQTT2_DISCOVERY_Set(
+	is(FHEM::MQTT2_DISCOVERY::Set(
 		$discovery, 'discovery', 'rebuildDevice', $name,
 	), undef, 'Neuaufbau erkennt Device-Discovery auch in einer alten Registry');
 	$reading_list = attr_value($name, 'readingList');
@@ -1270,8 +1285,8 @@ subtest 'zwei IODevs mit getrennten Prefixen' => sub {
 	my ($b) = define_discovery('discoveryB', 'mqttB');
 	$main::attr{discoveryA}{discoveryPrefixes} = 'haA';
 	$main::attr{discoveryB}{discoveryPrefixes} = 'haB';
-	main::MQTT2_DISCOVERY_Set($a, 'discoveryA', 'activate');
-	main::MQTT2_DISCOVERY_Set($b, 'discoveryB', 'activate');
+	FHEM::MQTT2_DISCOVERY::Set($a, 'discoveryA', 'activate');
+	FHEM::MQTT2_DISCOVERY::Set($b, 'discoveryB', 'activate');
 	dispatch_message('mqttA', 'a', 'haA/switch/nodeA/power/config', switch_payload(id => 'nodeA'));
 	dispatch_message('mqttB', 'b', 'haB/switch/nodeB/power/config', switch_payload(id => 'nodeB'));
 	is(reading_value('discoveryA', 'discoveredEntities'), 1, 'IODev A hat eigene Entity');
@@ -1281,29 +1296,29 @@ subtest 'zwei IODevs mit getrennten Prefixen' => sub {
 };
 
 subtest 'Runtime-Template und Command-Payload' => sub {
-	my $reading = main::MQTT2_Discovery_runtime(
+	my $reading = FHEM::MQTT2_DISCOVERY::runtime(
 		'reading', '{{ value_json.temperature | round(1) }}', '{"temperature":23.46}', 'temperature',
 	);
 	is($reading, { temperature => '23.5' }, 'lesbares Runtime-Reading wertet ein komplexes Template sicher aus');
-	is(main::MQTT2_Discovery_runtime('triggerReading',
+	is(FHEM::MQTT2_DISCOVERY::runtime('triggerReading',
 			'{{ trigger.value.raw }}', '{"value":42,"raw":"11427,1042,407"}', 'rf_event'),
 		{ rf_event => '11427,1042,407' }, 'Triggerkontext stellt den dekodierten JSON-Wert bereit');
-	is(main::MQTT2_Discovery_runtime('triggerReading',
+	is(FHEM::MQTT2_DISCOVERY::runtime('triggerReading',
 			'{{ trigger.payload }}', 'PRESS', 'rf_event'),
 		{ rf_event => 'PRESS' }, 'Triggerkontext behaelt das rohe MQTT-Payload');
-	is(main::MQTT2_Discovery_runtime('triggerReading',
+	is(FHEM::MQTT2_DISCOVERY::runtime('triggerReading',
 			'{{ trigger.value.raw }}', '{"value":42}', 'rf_event'),
 		undef, 'fehlender Triggerpfad erzeugt kein Reading');
 	my $trigger_filter = {
 		match_all => 0, payloads => [qw(OFF ON)],
 	};
-	is(main::MQTT2_Discovery_runtime('triggerReading',
+	is(FHEM::MQTT2_DISCOVERY::runtime('triggerReading',
 			'{{ trigger.value_json.action }}', '{"action":"ON"}', 'action', $trigger_filter),
 		{ action => 'ON' }, 'gruppierter Trigger filtert den bereits gerenderten Templatewert');
-	is(main::MQTT2_Discovery_runtime('triggerReading',
+	is(FHEM::MQTT2_DISCOVERY::runtime('triggerReading',
 			'{{ trigger.value_json.action }}', '{"action":"HOLD"}', 'action', $trigger_filter),
 		undef, 'nicht angekuendigter Templatewert erzeugt kein Reading');
-	is(main::MQTT2_Discovery_runtime('reading',
+	is(FHEM::MQTT2_DISCOVERY::runtime('reading',
 			'e3sgdmFsdWVfanNvbi50ZW1wZXJhdHVyZSB9fQ==', '{"temperature":23.5}', 'temperature'),
 		undef, 'Base64 wird nicht mehr als Runtime-Template akzeptiert');
 	my $topic_configuration = {
@@ -1316,47 +1331,47 @@ subtest 'Runtime-Template und Command-Payload' => sub {
 		log_level => 'INFO', version => '2.6.1',
 		config_schema => { description => q{topic 'zigbee2mqtt/my_bulb' payload '{"state": "ON"}'} },
 	});
-	is(main::MQTT2_Discovery_runtime('topic', 'RuntimeTopic', $bridge_info, $topic_configuration),
+	is(FHEM::MQTT2_DISCOVERY::runtime('topic', 'RuntimeTopic', $bridge_info, $topic_configuration),
 		{ log_level => 'info', version => '2.6.1' },
 		'Topic-Runtime liest Bridge-Info trotz escapeter JSON-Beispiele ohne Parserfehler');
-	my $command = main::MQTT2_Discovery_runtime('templatePublish', 'node/set', '{{ value }}', 'level 42');
+	my $command = FHEM::MQTT2_DISCOVERY::runtime('templatePublish', 'node/set', '{{ value }}', 'level 42');
 	is($command, 'node/set 42', 'Command-Wrapper trennt Set-Namen vom Wert');
-	is(main::MQTT2_Discovery_runtime('choice', 'node/set', { eco => 'ECO' }, 'mode eco'),
+	is(FHEM::MQTT2_DISCOVERY::runtime('choice', 'node/set', { eco => 'ECO' }, 'mode eco'),
 		'node/set ECO', 'Choice-Wrapper verwendet ein sichtbares Mapping');
-	is(main::MQTT2_Discovery_runtime('templateChoice',
+	is(FHEM::MQTT2_DISCOVERY::runtime('templateChoice',
 			'node/set', '{{ value | lower }}', { eco => 'ECO' }, 'mode eco'),
 		'node/set eco', 'Choice-Template verarbeitet erst das sichtbare Mapping und dann das Template');
-	is(main::MQTT2_Discovery_runtime('publish', 'node/set', 'PRESS'),
+	is(FHEM::MQTT2_DISCOVERY::runtime('publish', 'node/set', 'PRESS'),
 		'node/set PRESS', 'Publish-Wrapper verwendet Klartextargumente');
-	is(main::MQTT2_Discovery_runtime('jsonPublish', 'node/set', 'brightness', 'brightness 128'),
+	is(FHEM::MQTT2_DISCOVERY::runtime('jsonPublish', 'node/set', 'brightness', 'brightness 128'),
 		'node/set {"brightness":128}', 'JSON-Command wird kanonisch und ohne Stringverkettungs-Injection erzeugt');
-	is(main::MQTT2_Discovery_runtime('jsonChoice',
+	is(FHEM::MQTT2_DISCOVERY::runtime('jsonChoice',
 			'node/set', 'state', { on => 'ON', off => 'OFF' }, 'state on'),
 		'node/set {"state":"ON"}', 'JSON-Choice codiert nur den erlaubten gemappten Stringwert');
-	is(main::MQTT2_Discovery_runtime('jsonPublish',
+	is(FHEM::MQTT2_DISCOVERY::runtime('jsonPublish',
 			'node/set', 'input', 'volume 42', { command => 'volume' }),
 		'node/set {"command":"volume","input":42}',
 		'JSON-Command verbindet validierte Konstantfelder mit dem numerischen Wert');
-	is(main::MQTT2_Discovery_runtime('jsonChoice',
+	is(FHEM::MQTT2_DISCOVERY::runtime('jsonChoice',
 			'node/set', 'state', { on => 'ON' }, 'state on', { source => 'test' }),
 		'node/set {"source":"test","state":"ON"}',
 		'JSON-Choice behaelt optionale validierte Konstantfelder');
-	is(main::MQTT2_Discovery_runtime('jsonPublish',
+	is(FHEM::MQTT2_DISCOVERY::runtime('jsonPublish',
 			'node/set', 'input', 'volume 42', { input => 'collision' }), undef,
 		'dynamisches JSON-Feld kann nicht durch eine Konstante ueberschrieben werden');
 
-	is(main::MQTT2_Discovery_runtime('templatePublish', 'x', 'x', 'state value'), undef,
+	is(FHEM::MQTT2_DISCOVERY::runtime('templatePublish', 'x', 'x', 'state value'), undef,
 		'Template-Publish lehnt ein ungueltiges Klartext-Template ab');
-	is(main::MQTT2_Discovery_runtime('choice', 'x', 'x', 'state on'), undef,
+	is(FHEM::MQTT2_DISCOVERY::runtime('choice', 'x', 'x', 'state on'), undef,
 		'Choice-Publish lehnt ein ungueltiges Mapping ab');
-	is(main::MQTT2_Discovery_runtime('templateChoice', 'x', 'x', { on => 'ON' }, 'state on'), undef,
+	is(FHEM::MQTT2_DISCOVERY::runtime('templateChoice', 'x', 'x', { on => 'ON' }, 'state on'), undef,
 		'Choice-Template lehnt ein ungueltiges Template ab');
-	is(main::MQTT2_Discovery_runtime('jsonPublish', 'x', 'key', 'brightness invalid'), undef,
+	is(FHEM::MQTT2_DISCOVERY::runtime('jsonPublish', 'x', 'key', 'brightness invalid'), undef,
 		'JSON-Publish lehnt einen nichtnumerischen Wert ab');
-	is(main::MQTT2_Discovery_runtime('jsonChoice',
+	is(FHEM::MQTT2_DISCOVERY::runtime('jsonChoice',
 			'x', 'state', { on => 'ON' }, 'state invalid'), undef,
 		'JSON-Choice lehnt einen nicht deklarierten Auswahlwert ab');
-	my $json_map = main::MQTT2_DISCOVERY_runtimeJSONMap(
+	my $json_map = FHEM::MQTT2_DISCOVERY::runtimeJSONMap(
 		{ state => 'availability', battery => 'battery' },
 		{ availability => 'state_availability' },
 	);
@@ -1367,7 +1382,7 @@ subtest 'Runtime-Template und Command-Payload' => sub {
 	$main::defs{JSONMapRuntime} = {
 		NAME => 'JSONMapRuntime', JSONMAP => { state => 'availability' },
 	};
-	is(main::MQTT2_DISCOVERY_runtimeJSONMap(
+	is(FHEM::MQTT2_DISCOVERY::runtimeJSONMap(
 			'JSONMapRuntime', { availability => 'state_availability' }), {
 		state => 'state_availability', availability => 'state_availability',
 	}, 'der Runtime-Wrapper liest jsonMap ueber den von MQTT2_DEVICE bereitgestellten Devicenamen');
@@ -1378,7 +1393,7 @@ subtest 'Runtime-Template und Command-Payload' => sub {
 			return { event => $event, prefix => $prefix, mapping => $mapping };
 		};
 		$main::defs{JSONMapRuntime}{helper}{mqtt2_discovery_availability_reading} = 'availability';
-		is(main::MQTT2_DISCOVERY_jsonReadings(
+		is(FHEM::MQTT2_DISCOVERY::jsonReadings(
 				'JSONMapRuntime', 'STATE', '{"availability":"payload"}'), {
 			event => '{"availability":"payload"}', prefix => '', mapping => {
 				state => 'state_availability', availability => 'state_availability',
@@ -1388,14 +1403,14 @@ subtest 'Runtime-Template und Command-Payload' => sub {
 		$main::defs{JSONMapRuntime}{JSONMAP} = { state => 'deviceAvailability' };
 		$main::defs{JSONMapRuntime}{helper}{mqtt2_discovery_availability_reading}
 			= 'deviceAvailability';
-		is(main::MQTT2_DISCOVERY_jsonReadings(
+		is(FHEM::MQTT2_DISCOVERY::jsonReadings(
 				'JSONMapRuntime', 'UPTIME', '{"deviceAvailability":"payload"}'), {
 			event => '{"deviceAvailability":"payload"}', prefix => '', mapping => {
 				state => 'uptime_deviceAvailability',
 				deviceAvailability => 'uptime_deviceAvailability',
 			},
 		}, 'ein frei gewaehlter Availability-Name wird ebenso verbindlich reserviert');
-		is(main::MQTT2_DISCOVERY_jsonReadings(
+		is(FHEM::MQTT2_DISCOVERY::jsonReadings(
 				'JSONMapRuntime', 'UPTIME', '{}',
 				{ deviceAvailability => 'announced_availability' }), {
 			event => '{}', prefix => '', mapping => {
@@ -1438,24 +1453,24 @@ subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
 		};
 	};
 
-	my $device_online = main::MQTT2_Discovery_runtime('availability',
+	my $device_online = FHEM::MQTT2_DISCOVERY::runtime('availability',
 		$device, '{"state":"online"}', $configuration->($source_device));
 	is($device_online, {
 		$source_device => 'online', $policy_all => 'unknown', availability => 'unknown',
 	}, 'all bleibt unknown, solange die zweite Quelle noch unbekannt ist');
 	$apply->($device_online);
-	my $bridge_online = main::MQTT2_Discovery_runtime('availability',
+	my $bridge_online = FHEM::MQTT2_DISCOVERY::runtime('availability',
 		$device, '{"state":"online"}', $configuration->($source_bridge));
 	is($bridge_online, {
 		$source_bridge => 'online', $policy_all => 'online', availability => 'online',
 	}, 'all wird erst bei zwei verfuegbaren Quellen online');
 	$apply->($bridge_online);
-	my $bridge_offline = main::MQTT2_Discovery_runtime('availability',
+	my $bridge_offline = FHEM::MQTT2_DISCOVERY::runtime('availability',
 		$device, '{"state":"offline"}', $configuration->($source_bridge));
 	is($bridge_offline->{availability}, 'offline',
 		'all wird bei einer ausgefallenen Quelle wieder offline');
 	$main::defs{$device}{READINGS}{'.availability_io'} = { VAL => 'offline' };
-	my $broker_guard = main::MQTT2_Discovery_runtime('availability',
+	my $broker_guard = FHEM::MQTT2_DISCOVERY::runtime('availability',
 		$device, '{"state":"online"}', $configuration->($source_bridge));
 	is($broker_guard->{ $source_bridge }, 'online',
 		'Quellzustand wird trotz getrennter Brokerverbindung weiter ausgewertet');
@@ -1492,14 +1507,14 @@ subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
 			},
 		],
 	};
-	my $partially_supported = main::MQTT2_Discovery_runtime('availability',
+	my $partially_supported = FHEM::MQTT2_DISCOVERY::runtime('availability',
 		$device, '{"supported":1}', $field_configuration,
 	);
 	is([$partially_supported->{$policy_supported},
 			$partially_supported->{$policy_optional},
 			$partially_supported->{availability}], [qw(online offline online)],
 		'eine fehlende optionale Entity setzt ein erreichbares Sammeldevice nicht offline');
-	my $unsupported = main::MQTT2_Discovery_runtime('availability',
+	my $unsupported = FHEM::MQTT2_DISCOVERY::runtime('availability',
 		$device, '{}', $field_configuration,
 	);
 	is([$unsupported->{$policy_supported}, $unsupported->{$policy_optional},
@@ -1508,7 +1523,7 @@ subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
 
 	my $custom_configuration = $configuration->($source_device);
 	$custom_configuration->{reading} = 'MQTT2DiscoveryAvailability';
-	my $custom = main::MQTT2_Discovery_runtime(
+	my $custom = FHEM::MQTT2_DISCOVERY::runtime(
 		'availability', $device, '{"state":"online"}', $custom_configuration,
 	);
 	is($custom->{MQTT2DiscoveryAvailability}, 'online',
@@ -1525,7 +1540,7 @@ subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
 			sources => ['.availability_any_a', '.availability_any_b'],
 		}],
 	};
-	my $any = main::MQTT2_Discovery_runtime('availability', $device, 'up', $any_configuration);
+	my $any = FHEM::MQTT2_DISCOVERY::runtime('availability', $device, 'up', $any_configuration);
 	is($any->{availability}, 'online',
 		'any wird bereits durch eine einzelne verfuegbare Quelle online');
 
@@ -1538,11 +1553,11 @@ subtest 'Runtime-Availability verknuepft Quellen nach HA-Semantik' => sub {
 			sources => ['.availability_latest', '.availability_other'],
 		}],
 	};
-	my $latest = main::MQTT2_Discovery_runtime(
+	my $latest = FHEM::MQTT2_DISCOVERY::runtime(
 		'availability', $device, 'down', $latest_configuration);
 	is($latest->{availability}, 'offline',
 		'latest uebernimmt den Zustand der zuletzt empfangenen Quelle');
-	is(main::MQTT2_Discovery_runtime(
+	is(FHEM::MQTT2_DISCOVERY::runtime(
 			'availability', $device, 'unbekannt', $latest_configuration), {},
 		'nicht deklarierte Payloads veraendern keine Availability-Readings');
 };
@@ -1651,7 +1666,7 @@ subtest 'Zigbee2MQTT-Firmware-Update wird vollstaendig integriert' => sub {
 	my $reading_name = $descriptor->{configuration}{readings}[0]{name};
 	is($reading_name, 'update',
 		'die Root-Update-Entity wiederholt den Zigbee2MQTT-Devicenamen nicht als Reading');
-	is(main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $state), {
+	is(FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $state), {
 		$reading_name => '{"latest_version":"1.164.0","installed_version":"1.163.1","update_percentage":42,"in_progress":true}',
 	}, 'Update-State wird zur Laufzeit als gueltiges JSON ausgewertet');
 

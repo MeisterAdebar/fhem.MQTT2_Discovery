@@ -199,6 +199,8 @@ sub from_entity {
 			kind          => $component,
 			node_id       => $source->{node_id},
 			unique_id     => $source->{unique_id},
+			channel       => $source->{channel},
+			channel_name  => $source->{channel_name},
 			name          => $source->{name},
 			logical_name  => $source->{preferred_entity_name},
 			category      => $source->{entity_category},

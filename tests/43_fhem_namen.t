@@ -19,7 +19,7 @@ sub setup {
 	add_iodev('mqtt', 'MQTT2_SERVER');
 	my ($hash, $error) = define_discovery('discovery', 'mqtt');
 	die $error if $error;
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	return $hash;
 }
 
@@ -90,9 +90,9 @@ subtest 'binaere Batterie meldet ok und low' => sub {
 	is(reading_names(), ['batteryState'], 'der Name folgt der Richtlinie');
 	my ($line) = split /\n/, attr_value($target, 'readingList') // '';
 	my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
-	is(main::MQTT2_DISCOVERY_runtimeRef($target, $reference, 'ON'), { batteryState => 'low' },
+	is(FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, 'ON'), { batteryState => 'low' },
 		'ON bedeutet low');
-	is(main::MQTT2_DISCOVERY_runtimeRef($target, $reference, 'OFF'), { batteryState => 'ok' },
+	is(FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, 'OFF'), { batteryState => 'ok' },
 		'OFF bedeutet ok');
 };
 
@@ -128,7 +128,7 @@ subtest 'Tasmota meldet seinen Schaltzustand nach state' => sub {
 	ok($main::defs{$device}, 'das Zielgeraet entsteht');
 	my ($record) = grep {
 		ref($_) eq 'HASH' && ($_->{name} // '') eq $device
-	} values %{ main::MQTT2_DISCOVERY_registry($hash)->{devices} };
+	} values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
 
 	# Eine Zeile ohne Template hat keine Laufzeitreferenz. Sie wurde beim
 	# Umstellen auf parse stillschweigend weggelassen, womit die Rueckmeldung

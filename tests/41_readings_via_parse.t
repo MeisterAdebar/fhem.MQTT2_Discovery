@@ -47,7 +47,7 @@ sub setup {
 			return undef;
 		},
 	);
-	main::MQTT2_DISCOVERY_activate($hash);
+	FHEM::MQTT2_DISCOVERY::activate($hash);
 	return $hash;
 }
 
@@ -55,7 +55,7 @@ sub setup {
 sub discover {
 	my ($hash) = @_;
 	@published = ();
-	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id);
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'discoverShelly', $id);
 
 	for my $result ($info, configuration(), status()) {
 		my $request = shift @published;
@@ -79,7 +79,7 @@ sub readings_for {
 		next if "$topic:$payload" !~ /^$pattern$/s;
 		my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
 		next if !defined($reference);
-		my $values = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $payload);
+		my $values = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $reference, $payload);
 		%updates = (%updates, %$values) if ref($values) eq 'HASH';
 	}
 
@@ -92,7 +92,7 @@ subtest 'Ohne readingList schreibt das Modul die Readings selbst' => sub {
 	discover($hash);
 	is(attr_value($target, 'readingList'), undef, 'am Zielgeraet entsteht kein readingList-Attribut');
 	is($main::modules{MQTT2_DISCOVERY}{Match}, '.*', 'das Modul sieht dafuer alle Nachrichten');
-	my ($record) = values %{ main::MQTT2_DISCOVERY_registry($hash)->{devices} };
+	my ($record) = values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
 	ok(scalar(@{ $record->{parse_readings} || [] }), 'die Zeilen liegen in der Registry');
 
 	# Eine gewoehnliche Nutzdatennachricht muss die Readings aktualisieren.
@@ -113,6 +113,48 @@ subtest 'Ohne das Attribut bleibt alles beim Alten' => sub {
 	my $reading_list = discover($hash);
 	like($reading_list, qr{\$DEVICETOPIC/status/switch_0:}, 'die readingList entsteht wie bisher');
 	isnt($main::modules{MQTT2_DISCOVERY}{Match}, '.*', 'der enge Match bleibt erhalten');
+};
+
+subtest 'der Index schlaegt Topics nach, statt sie zu vergleichen' => sub {
+	my $hash = setup();
+	$main::attr{discovery}{readingsViaParse} = 1;
+	discover($hash);
+	my $index = FHEM::MQTT2_DISCOVERY::parse_index($hash);
+
+	# Die Nutzdatentopics stehen als fester Text im Index; nur Muster mit
+	# Sonderzeichen bleiben in der Restliste.
+	ok(exists($index->{exact}{"$id/status/switch_0"}), 'das Statustopic ist nachschlagbar');
+	ok(exists($index->{exact}{"$id/online"}), 'das Erreichbarkeitstopic ebenso');
+	is(scalar(@{ $index->{other} }), 0, 'kein Muster braucht den Vergleich');
+
+	# Eine fremde Nachricht kostet damit einen Zugriff und schreibt nichts.
+	is([FHEM::MQTT2_DISCOVERY::apply_parsed_readings($hash, 'cmnd/fremd/POWER', 'ON')], [],
+		'ein fremdes Topic aendert nichts');
+
+	# Der Index haengt an der Registry und entsteht nach einer Aenderung neu.
+	FHEM::MQTT2_DISCOVERY::persist_registry($hash);
+	ok(!exists($hash->{helper}{parse_index}), 'eine Registry-Aenderung verwirft den Index');
+	ok(FHEM::MQTT2_DISCOVERY::parse_index($hash)->{exact}{"$id/status/switch_0"},
+		'der naechste Zugriff baut ihn wieder auf');
+};
+
+subtest 'die geschriebenen Geraete kommen aus ParseFn zurueck' => sub {
+	my $hash = setup();
+	$main::attr{discovery}{readingsViaParse} = 1;
+	discover($hash);
+
+	# Waehrend einer ParseFn unterdrueckt fhem.pl den Trigger von
+	# readingsEndUpdate. Erst die zurueckgegebenen Namen loesen die Ereignisse
+	# aus; ohne sie aendert sich das Reading ohne Ereignis, und FHEMWEB zeigt
+	# den neuen Wert erst nach einem Neuladen.
+	my $message = join("\0", 'shelly-client', "$id/status/switch_0",
+		encode_json({ output => JSON::PP::true }));
+	is([FHEM::MQTT2_DISCOVERY::Parse($main::defs{mqtt}, $message)], ['[NEXT]', $target],
+		'die Marke fuehrt das geschriebene Geraet mit');
+
+	# Eine Nachricht, die nichts schreibt, meldet auch kein Geraet.
+	is([FHEM::MQTT2_DISCOVERY::Parse($main::defs{mqtt}, join("\0", 'x', 'cmnd/fremd/POWER', 'ON'))],
+		['[NEXT]'], 'ohne Aenderung bleibt es bei der Marke');
 };
 
 done_testing();
