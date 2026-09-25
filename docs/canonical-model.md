@@ -111,10 +111,13 @@ gesamten Devices vortaeuschen.
 
 Der gemeinsame Mapper leitet daraus keine Namen aus Topicsegmenten ab. Die
 einzelnen Quellzustaende und die Verknuepfungsregeln liegen in verborgenen
-FHEM-Readings; sichtbar ist nur das berechnete Reading `availability`. Ein
-Adapter darf ein Protokollsignal zusaetzlich als normales Reading beschreiben,
-wenn dessen bestehende Oberflaeche erhalten bleiben soll. Tasmota nutzt dies
-beispielsweise fuer das weiterhin sichtbare Reading `LWT`.
+FHEM-Readings. Eine Quelle darf `role => 'lwt'` tragen; das setzt nur ein
+nativer Adapter, denn bei Home-Assistant-Discovery steht die Art nicht im
+Payload. Eine solche Quelle wird als sichtbares Reading `lwt` gefuehrt, weil sie
+die Aussage des Geraets selbst ist. Das berechnete Reading heisst
+`availability` und ist die verdichtete Sicht von FHEM einschliesslich der
+eigenen Brokerverbindung. Welche der beiden sichtbar sind, steuert der
+Schluessel `reachability` mit `full`, `sources` und `none`.
 
 Der Verbindungszustand des am `MQTT2_DISCOVERY` gebundenen IODev bildet eine
 zusaetzliche, protokollunabhaengige Bedingung. Bei getrennter Brokerverbindung

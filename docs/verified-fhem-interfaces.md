@@ -46,5 +46,25 @@ Ergaenzend am 22.09.2026 an einer laufenden FHEM-Installation geprueft:
   `respectRetain` (ab Featurelevel 6.1 nicht mehr Vorgabe) und nur fuer
   Nachrichten mit Retain-Flag.
 
+
+Ergaenzend am 25.09.2026 an einer laufenden FHEM-Installation geprueft:
+
+- FHEMWEB holt die Antwort eines Setters nur dann per XHR und zeigt sie im
+  Fenster `FW_okDialog`, wenn am Geraet ein Reading mit dem Namen des Befehls
+  steht; sonst laedt es die ganze Seite neu (`fhemweb.js`, Zeile 921:
+  `$(".dval[informid="+ifid+"]").length == 0`). Ein Setter mit Dialog braucht
+  deshalb ein gleichnamiges Reading. Die Antwort landet im Fenster, sobald sie
+  auf `^<html>[\s\S]*</html>` passt.
+- Das CSRF-Merkmal heisst `FW_csrfToken` und wird ueber die Funktion `addcsrf`
+  an eine Adresse angehaengt (`fhemweb.js`, Zeilen 14 und 634). Ein `FW_csrf`
+  gibt es nicht. `FW_cmd` haengt es selbst an, ein eigener XHR nicht.
+- `set <MQTT2_SERVER> publish <topic> <payload>` speist die Nachricht **nicht**
+  in `Dispatch()` ein. Sie erreicht nur die angemeldeten MQTT-Clients. Wer
+  pruefen will, ob eine Zeile trifft, muss als eigener MQTT-Client
+  veroeffentlichen.
+- `FW_createNoArg` haengt bei `:noArg` ein verborgenes Feld mit leerem Wert ein.
+  Ein solcher Setter erhaelt deshalb ein leeres Argument, keinen undefinierten
+  Wert.
+
 Quellen: [MQTT2_CLIENT](https://raw.githubusercontent.com/fhem/fhem-mirror/master/fhem/FHEM/00_MQTT2_CLIENT.pm)
 und [MQTT2_SERVER](https://raw.githubusercontent.com/fhem/fhem-mirror/master/fhem/FHEM/00_MQTT2_SERVER.pm).

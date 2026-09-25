@@ -1,6 +1,25 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 53411026aa29d103c4a6dfc0b422cda8b8f6dff47b981539699f92b6aae71734
+# Msg-SHA256: df410a8376aa92b8cc22f872ff8c8e5347260f8eb887d5bea2ad49ebaaa0b3cd
+- change: MQTT2_DISCOVERY: Doku beschreibt den Stand dieser Fassung
+  - Die Einleitung sagt, was mit den Vorgaben am Zielgeraet entsteht: weder
+    readingList noch setList, beides ist ueber den Schluesselraum aber zu
+    bekommen.
+  - Der Abschnitt zu den Nutzdaten sagt, dass Topics und Geraetekennungen
+    bleiben und nur Geheimnisse und Angaben zum Netz ersetzt werden, und was
+    daraus folgt: der eigene Block stellt sein Geraet wieder her, ein fremder
+    bekommt den Ausweichnamen und einen comment.
+  - Die Installationsangaben nennen dieses Repository als Fork. Diese Fassung
+    ist keine Updatequelle; ein Update vom Original ueberschreibt sie.
+  - Das kanonische Modell beschreibt die Rolle lwt und den Schluessel
+    reachability statt eines einzigen berechneten Readings.
+  - Die verifizierten FHEM-Schnittstellen halten vier weitere Beobachtungen
+    fest: die Bedingung, unter der FHEMWEB die Antwort eines Setters im Fenster
+    zeigt, den Namen des CSRF-Merkmals, dass set publish am MQTT2_SERVER nicht
+    in Dispatch einspeist, und das leere Argument bei noArg.
+  - Verweise auf Forumsbeitraege sind aus der Doku entfernt; die
+    Namenskonvention nennt nur noch das Wiki. Die Urheberangabe des Originals
+    bleibt.
 - change: MQTT2_DISCOVERY: Set-Befehle in der Kette von SetExtensions, und der
   Block bleibt der des Geraets
   - Die Set-Befehle haengen sich in @{$modules{MQTT2_DEVICE}{SetExtensionsFn}}

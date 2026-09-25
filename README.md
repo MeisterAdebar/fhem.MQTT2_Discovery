@@ -14,10 +14,13 @@ fallen nicht versuchsweise auf ein anderes Format zurueck.
 
 Jeder Adapter normalisiert sein Protokoll in das versionierte kanonische Modell
 `mqtt2-discovery/1`. Es trennt Device-Identitaet, lesbare `signals`, schreibbare
-`commands` und `availability`. Erst danach erzeugt der allgemeine Mapper
-FHEM-`readingList`, `setList` und konservative
-Semantic-Metadaten. Der Mapper kennt weder Home-Assistant-Kurzformen noch native
-Tasmota- oder Sonos2mqtt-Discovery-Payloads. Das Modell und die Erweiterung um
+`commands` und `availability`. Erst danach entscheidet der allgemeine Mapper,
+was daraus am Zielgeraet entsteht: mit den Vorgaben wertet das Modul die
+Nutzdaten selbst aus und bietet die Schaltbefehle selbst an, sodass am Geraet
+weder `readingList` noch `setList` steht; ueber den Schluesselraum sind
+stattdessen auch die Attributzeilen zu bekommen. Konservative Semantic-Metadaten
+entstehen in beiden Faellen. Der Mapper kennt weder Home-Assistant-Kurzformen
+noch native Tasmota- oder Sonos2mqtt-Discovery-Payloads. Das Modell und die Erweiterung um
 weitere Adapter sind in [docs/canonical-model.md](docs/canonical-model.md) beschrieben.
 
 Normale MQTT-State-Nachrichten werden nicht als Discovery beansprucht. Ein Topic
@@ -27,7 +30,12 @@ Discovery-Modul verarbeitet (und gefiltert).
 
 ## Installation und Updates
 
-Das Modul kann ueber das FHEM-Controlfile installiert werden:
+Dieses Repository ist ein Fork von
+[next81/fhem.MQTT2_Discovery](https://github.com/next81/fhem.MQTT2_Discovery).
+Diese Fassung ist **nicht** als Updatequelle veroeffentlicht. Sie wird
+installiert, indem `FHEM/10_MQTT2_DISCOVERY.pm` und `lib/FHEM/MQTT2_Discovery/`
+in die FHEM-Installation kopiert werden; danach `shutdown restart`. Das Original
+laesst sich ueber sein Controlfile installieren:
 
 ```text
 update all https://raw.githubusercontent.com/next81/fhem.MQTT2_Discovery/main/controls_MQTT2_DISCOVERY.txt
@@ -45,15 +53,16 @@ set mqttDiscovery activate
 (`MQTT2_SERVER` oder `MQTT2_CLIENT`). `activate` ergaenzt
 `MQTT2_DISCOVERY` in `clientOrder`, ohne andere Parser zu entfernen.
 
-Damit regulaere FHEM-Updates dieses Repository automatisch beruecksichtigen,
-wird es einmalig als zusaetzliche Updatequelle registriert:
+Damit regulaere FHEM-Updates das Original automatisch beruecksichtigen, wird es
+einmalig als zusaetzliche Updatequelle registriert:
 
 ```text
 update add https://raw.githubusercontent.com/next81/fhem.MQTT2_Discovery/main/controls_MQTT2_DISCOVERY.txt
 ```
 
-Anschliessend zeigen `update check` bzw. `update` auch neue Versionen dieses
-Moduls an. Nach einem Modulupdate ist `shutdown restart` erforderlich.
+Anschliessend zeigen `update check` bzw. `update` auch neue Versionen an. Nach
+einem Modulupdate ist `shutdown restart` erforderlich. Ein solches Update holt
+die Fassung des Originals und ueberschreibt damit die dieses Zweiges.
 
 ## Konfiguration
 
@@ -256,17 +265,28 @@ ein unbelegter erster Steckplatz bleibt unbelegt.
 
 ## Payloads weitergeben
 
-Fuer Fehlermeldungen im Forum braucht der Gegenueber die Nachrichten, aus denen
-ein Geraet entstanden ist. `get <name> payloads <device>` zeigt genau diese
-Nachrichten in einem Fenster zum Kopieren; eine Datei entsteht dabei nicht.
+Wer bei einem Fehler helfen soll, braucht die Nachrichten, aus denen ein Geraet
+entstanden ist. `get <name> payloads <device>` zeigt genau diese Nachrichten in
+einem Fenster zum Kopieren; eine Datei entsteht dabei nicht.
 
-Der Block ist immer anonymisiert. Geheimnisse (Passwoerter, Tokens, Schluessel)
-werden durch `xxx` ersetzt. Angaben zum Netz des Anwenders werden nicht
-geschwaerzt, sondern durch unverfaengliche ersetzt, damit die Nachricht
-auswertbar bleibt: Hostnamen werden zu `host`, SSIDs zu `WLAN`, Adressen zu
-Beispieladressen aus RFC 5737 und RFC 3849. Kennungen wie MAC-Adressen behalten
-ihre Form, werden aber durch ein gleich langes Ersatzstueck ersetzt, das aus der
-Kennung selbst entsteht und deshalb in Topic und Payload dasselbe bleibt.
+Geheimnisse (Passwoerter, Tokens, Schluessel) stehen als `xxx`. Angaben zum Netz
+des Anwenders werden nicht geschwaerzt, sondern durch unverfaengliche ersetzt,
+damit die Nachricht auswertbar bleibt: Hostnamen werden zu `host`, SSIDs zu
+`WLAN`, Adressen zu Beispieladressen aus RFC 5737 und RFC 3849.
+
+Topics und Geraetekennungen bleiben unveraendert. Ersetzt man sie, beschreibt der
+Block nicht mehr das Geraet, aus dem er stammt: Sein Zwilling sendet dann auf
+einen Zweig, auf dem keine Hardware antwortet, und kann nie schalten. Weil die
+Kennungen stehen bleiben, trifft der eigene Block dieselbe Identitaet wie das
+Geraet selbst -- zweimal einspielen legt nichts Neues an, und ein gerade
+fehlendes Geraet wird daraus wiederhergestellt, mit seiner eigenen Client-ID.
+
+Ein Block aus einer fremden Anlage beschreibt Hardware, die es hier nicht gibt.
+Sein Geraet sendet auf dem richtigen Befehlszweig, es antwortet nur niemand, und
+sein `state` bleibt darum auf `set_<befehl>` stehen; das Geraet traegt einen
+`comment`, der das sagt. Trifft sein Name den eines verwalteten Geraets, bekommt
+der fremde den Ausweichnamen -- ein Name, den ein anderer Datensatz haelt, gilt
+auch ohne sein Geraet als belegt.
 
 `set <name> replayPayloads` spielt einen solchen Block wieder ein. Ohne Angabe
 oeffnet FHEMWEB ein Eingabefeld, in das der Block eingefuegt wird; alternativ
@@ -540,9 +560,8 @@ darauf verweisenden SemanticUI-Metadaten.
 ## Readingnamen nach FHEM-Konvention
 
 Mit `style=fhem` folgen die Readingnamen den Namen, die FHEM fuer bekannte
-Rollen vorsieht. Massgeblich sind das Wiki `DevelopmentGuidelinesReadings` und
-der Forumsthread 117933. Vier Dinge weichen dadurch vom rohen Discovery-Namen
-ab:
+Rollen vorsieht. Massgeblich ist das Wiki `DevelopmentGuidelinesReadings`.
+Vier Dinge weichen dadurch vom rohen Discovery-Namen ab:
 
 - Der Praefix der Komponente faellt weg, wenn die Komponente im Geraet nur
   einmal vorkommt: aus `thermostat_target_temperature` wird `desired-temp`, aus

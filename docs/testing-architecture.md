@@ -37,6 +37,7 @@ eingesetzt werden. Produktion verwendet jeweils die Standardimplementierungen.
   gehoert je ein Test zu einem abgeschlossenen Verhalten, etwa `42` zum
   Schluesselraum, `43` zu den Readingnamen der FHEM-Konvention, `44` zu den
   Geraetenamen, `45` zu `payloads` und `replayPayloads` und `46` zum Kanalsplit.
+  Die Nummer `40` ist doppelt belegt: `40_mapper.t` und `40_sets_via_hook.t`.
 - `50` und `55`: Tests des FHEM-Moduls und seiner Queue gegen das lokale Gateway.
 - `90`: Komponententests der vollstaendigen Verarbeitung mit simulierter FHEM-API.
 - `95` bis `98`: Tests der Ablieferung und des Stils, also `controls`, `CHANGED`,
