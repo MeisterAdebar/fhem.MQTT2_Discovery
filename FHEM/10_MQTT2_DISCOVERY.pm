@@ -24,7 +24,7 @@ use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
 use vars qw(%defs %attr %modules $readingFnAttributes);
 
-our $MQTT2_DISCOVERY_VERSION = '0.9.12';
+our $MQTT2_DISCOVERY_VERSION = '0.9.11';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
 our $MQTT2_DISCOVERY_AVAILABILITY_REFRESH_DELAY = 60;
 our $MQTT2_DISCOVERY_AVAILABILITY_RETRY_DELAY = 10;
@@ -108,10 +108,6 @@ sub MQTT2_DISCOVERY_log_payload($) {
 # --- FHEM-Lebenszyklus und Benutzerbefehle -----------------------------------
 
 # Registriert FHEMs Lebenszyklus-, Parser- und Attributschnittstellen fuer den Modultyp.
-# Vorwaertsdeklaration der Verarbeitung: Ohne sie gilt ihr Prototyp erst ab dem
-# zweiten Laden der Datei, weshalb ein reload bisher mit einem Argumentfehler abbrach.
-sub MQTT2_DISCOVERY_process($$$$;$);
-
 sub MQTT2_DISCOVERY_Initialize($) {
 	my ($hash) = @_;
 	$hash->{DefFn} = 'MQTT2_DISCOVERY_Define';
@@ -1400,10 +1396,7 @@ sub MQTT2_DISCOVERY_process_queue($) {
 		last if $message;
 	}
 
-	# Die Argumente werden einzeln uebergeben: Der Prototyp der Funktion legt jedem
-	# Parameter skalaren Kontext auf, ein aufgeloestes Array zaehlte als ein Argument.
-	MQTT2_DISCOVERY_process($hash, $message->[0], $message->[1], $message->[2], $batch)
-		if $message;
+	MQTT2_DISCOVERY_process($hash, @$message, $batch) if $message;
 
 	my $error;
 
@@ -1711,9 +1704,7 @@ sub MQTT2_DISCOVERY_process_inner($$$$;$) {
 		# neue Attribute erhaelt und Device-Discovery atomar sichtbar wird.
 		for my $identity (sort keys %pending_identities) {
 			my $record = $registry->{devices}{$identity};
-			my $error = MQTT2_DISCOVERY_apply_device_lines(
-				$hash, $record, { registry => $registry, identity => $identity },
-			);
+			my $error = MQTT2_DISCOVERY_apply_device_lines($hash, $record);
 
 			# Scheitert ein Zieldevice, gehoeren alle in dieser Nachricht neu erzeugten
 			# Devices zum fehlgeschlagenen Apply und werden gemeinsam bereinigt.
@@ -2110,11 +2101,8 @@ sub MQTT2_DISCOVERY_apply_batch_identity($$$) {
 	return undef if ref($registry) ne 'HASH';
 	my $record = $registry->{devices}{$identity};
 	return undef if !$record;
-	my $error = MQTT2_DISCOVERY_apply_device_lines(
-		$hash, $record, { registry => $registry, identity => $identity },
-	);
+	my $error = MQTT2_DISCOVERY_apply_device_lines($hash, $record);
 	return $error if $error;
-	return undef if !exists($registry->{devices}{$identity});
 
 	my $hadManual = delete $batch->{delete_had_manual}{$identity};
 	return MQTT2_Discovery_autoDeleteRecord($hash, $registry, $identity, $record, $hadManual);
@@ -2327,32 +2315,7 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	$options = {} if ref($options) ne 'HASH';
 	my $rebuild_lists = $options->{rebuild_lists} ? 1 : 0;
 	my $name = $record->{name};
-
-	# Ein von Hand geloeschtes Zieldevice darf die Erkennung nicht dauerhaft
-	# blockieren. Bei einem Queue-Batch wird dessen Registry-Entwurf bereinigt;
-	# direkte Aufrufe entfernen den Eintrag aus der aktiven Registry sofort.
-	if (!$defs{$name}) {
-		my $provided_registry = ref($options->{registry}) eq 'HASH';
-		my $registry = $provided_registry
-			? $options->{registry} : MQTT2_DISCOVERY_registry($hash);
-		my @identities;
-
-		if (defined($options->{identity})
-				&& ref($registry->{devices}{ $options->{identity} }) eq 'HASH') {
-			@identities = ($options->{identity});
-		} else {
-			@identities = grep {
-				ref($registry->{devices}{$_}) eq 'HASH'
-					&& $registry->{devices}{$_} == $record
-			} keys %{ $registry->{devices} || {} };
-		}
-
-		delete $registry->{devices}{$_} for @identities;
-		MQTT2_DISCOVERY_persist_registry($hash) if !$provided_registry;
-		MQTT2_DISCOVERY_log($hash, 2,
-			"verwaisten Registry-Eintrag fuer $name verworfen");
-		return undef;
-	}
+	return "Verwaltetes Device $name existiert nicht" if !$defs{$name};
 	my %previous_availability_topics = map { ($_ => 1) }
 		grep { defined($_) && !ref($_) && $_ ne '' }
 		@{ $record->{availability_topics} || [] };
@@ -2405,7 +2368,6 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	my $generated_device_topic = MQTT2_Discovery::DevicePlanner::device_topic($record, \@all_entries);
 	my @device_topic_entries = grep {
 		ref($_) eq 'HASH' && ($_->{role} // '') ne 'availability' && defined($_->{topic})
-			&& !MQTT2_Discovery::DevicePlanner::is_internal_topic($_->{topic})
 	} @all_entries;
 	my $old_device_topic_exists = exists($attr{$name}) && exists($attr{$name}{devicetopic});
 	my $old_device_topic = $old_device_topic_exists ? $attr{$name}{devicetopic} : undef;
@@ -2463,12 +2425,6 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 		$matching_device_topic, $record->{cid},
 	);
 	my $initial_reading_names = MQTT2_DISCOVERY_expected_reading_names($prepared_readings);
-	# Das IODev wandelt ':' in empfangenen Topics zu '_'. Die erzeugten
-	# readingList-Zeilen muessen denselben Namen treffen.
-	local $MQTT2_Discovery::Mapper::Renderer::TOPIC_CONVERSION =
-		MQTT2_DISCOVERY_gateway($hash)->attr_value(
-			$hash->{IODevName} // '', 'topicConversion', 1,
-		) ? 1 : 0;
 	@reading_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		$prepared_readings, $render_device_topic, $reserved_readings, \%runtime_references,
 	) };
@@ -2675,11 +2631,8 @@ sub MQTT2_DISCOVERY_delete_entity($$$;$) {
 				if !exists $batch->{delete_had_manual}{$identity};
 			next;
 		}
-		my $error = MQTT2_DISCOVERY_apply_device_lines(
-			$hash, $record, { registry => $registry, identity => $identity },
-		);
+		my $error = MQTT2_DISCOVERY_apply_device_lines($hash, $record);
 		return $error if $error;
-		next if !exists($registry->{devices}{$identity});
 		$error = MQTT2_Discovery_autoDeleteRecord($hash, $registry, $identity, $record, $hadManual);
 		return $error if $error;
 	}

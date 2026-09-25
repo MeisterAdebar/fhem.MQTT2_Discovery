@@ -1,6 +1,20 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 5607499d8df4d3ab2081fcb7b9ed3f6da325bd2c9d5156da5519b1e3d9ba6496
+# Msg-SHA256: 6f05376b387178a8bdf9f888be6a4255a78d6b77aed4cbf8366ad98c3b861323
+- change: MQTT2_DISCOVERY: Fehler der Erkennung behoben
+  - Ein geloeschtes MQTT2_DEVICE hinterlaesst keinen Registry-Eintrag mehr, der
+    die Neuanlage blockiert und bei jedem Lauf "queue apply failed" ins Log
+    schreibt.
+  - Der Doppelpunkt in einem Komponenten-Topic folgt dem Attribut
+    topicConversion des IODev. Ohne das trifft eine Zeile wie status/switch:0
+    nie, weil der Server status/switch_0 zustellt.
+  - Ein reload des Moduls im laufenden FHEM ist wieder moeglich. Initialize
+    schreibt in den uebergebenen Modulhash, nicht in den bereits verworfenen
+    aus %modules.
+  - Das devicetopic entsteht wieder: Die eigenen Antworttopics des Moduls
+    zaehlen nicht mehr zum gemeinsamen Stamm der Geraetetopics.
+  - readingList-Zeilen entstehen nur fuer die am Geraet aktiven Meldewege. Ohne
+    gepushten Status ist die Antwort der eigenen Abfrage die Hauptquelle.
 - change: MQTT2_DISCOVERY: - Reload-Fehler in der Queue-Verarbeitung behoben
   - Verwaiste Registry-Eintraege nach Device-Loeschungen bereinigt
   - Topic-Konvertierung des IODev korrekt beruecksichtigt

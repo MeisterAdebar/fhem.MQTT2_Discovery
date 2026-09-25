@@ -149,7 +149,7 @@ subtest 'CCT ist ueber SERVER und CLIENT vollstaendig steuerbar' => sub {
 			['true', 50, 4600, 4.5, 12], 'Initialwerte und Messwerte werden gelesen');
 		$values = readings("$prefix/events/rpc", { method => 'NotifyStatus', params => { 'cct:0' => { ct => 3000 } } });
 		is($values, { cct_0_ct => 3000 }, 'Teilstatus ueberschreibt keine fehlenden Werte');
-		$values = readings("$prefix/status/cct_0", { output => JSON::PP::false, brightness => 25 });
+		$values = readings("$prefix/status/cct:0", { output => JSON::PP::false, brightness => 25 });
 		is($values, { cct_0 => 'false', cct_0_brightness => 25 }, 'Komponentenstatus verwendet dieselben Namen');
 	}
 
@@ -201,9 +201,7 @@ subtest 'BLU-Seiten, schlafende Sensoren, Initialwerte und Ereignisarrays' => su
 	my ($initial) = map { decode_json($_->{payload}) }
 		grep { decode_json($_->{payload})->{src} =~ m{/bthomesensor:203$} } @published;
 	is($initial->{method}, 'BTHomeSensor.GetStatus', 'passende Initialabfrage fuer den BLU-Sensor');
-	# MQTT2_SERVER und MQTT2_CLIENT ersetzen im empfangenen Topic ":" durch "_".
-	(my $sensor_reply = "$initial->{src}/rpc") =~ s/:/_/g;
-	my $values = readings($sensor_reply, { src => $id, result => { id => 203, value => JSON::PP::false, last_updated_ts => 100 } });
+	my $values = readings("$initial->{src}/rpc", { src => $id, result => { id => 203, value => JSON::PP::false, last_updated_ts => 100 } });
 	is($values, { bthomesensor_203 => 'false', bthomesensor_203_last_update => 100 }, 'Boolean und Zeitstempel aus Einzelabfrage');
 	$values = readings("$prefix/events/rpc", { method => 'NotifyStatus', params => {
 		'bthomesensor:201' => { value => 21.5, last_updated_ts => 200 },

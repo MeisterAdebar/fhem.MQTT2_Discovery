@@ -4,90 +4,129 @@
 use strict;
 use warnings;
 use Test2::V0;
-use JSON::PP ();
-use lib 'lib/FHEM';
-use MQTT2_Discovery::Parser::Shelly ();
+use JSON::PP qw(encode_json decode_json);
+use lib 'lib/FHEM', 'tests/lib';
+use MQTT2_Discovery::FormatRegistry ();
+use MQTT2_Discovery::FHEMGateway ();
+use FHEMTestEnv qw(reset_env add_iodev define_discovery dispatch_message attr_value reading_value);
+
+my $loaded = do './FHEM/10_MQTT2_DISCOVERY.pm';
+die $@ if $@;
+die $! if !defined($loaded);
 
 my $id = 'shelly1g4-aabbccddeeff';
-my $prefix = 'haus/licht';
-my $reply = 'mqtt2_discovery/discovery/shelly/0123456789abcdef/state/rpc';
+my $target = 'Werkstatt';
+my $info = { id => $id, gen => 4, model => 'S4SW-001X16EU', ver => '1.7.1', mac => 'AABBCCDDEEFF' };
+my (@published, @timers);
 
-sub parse_switch {
-	my ($rpc_ntf, $status_ntf) = @_;
-	return MQTT2_Discovery::Parser::Shelly::parse(
-		info => { id => $id, gen => 4, model => 'S4SW-001X16EU', ver => '1.7.1' },
-		config => {
-			sys => { device => { name => 'Werkstatt' } },
-			mqtt => {
-				topic_prefix => $prefix,
-				rpc_ntf => $rpc_ntf ? JSON::PP::true : JSON::PP::false,
-				status_ntf => $status_ntf ? JSON::PP::true : JSON::PP::false,
-			},
-			'switch:0' => { id => 0 },
+# Ein Schalter mit Temperatur, WLAN und Laufzeit; die Meldewege sind je Test variabel.
+sub configuration {
+	my (%ntf) = @_;
+	return {
+		sys => { device => { name => $target } },
+		mqtt => { topic_prefix => $id,
+			rpc_ntf => ($ntf{rpc} ? JSON::PP::true : JSON::PP::false),
+			status_ntf => ($ntf{status} ? JSON::PP::true : JSON::PP::false) },
+		'switch:0' => { id => 0 },
+	};
+}
+
+sub status {
+	return {
+		'switch:0' => { id => 0, output => JSON::PP::true, temperature => { tC => 42.5 } },
+		wifi => { rssi => -57 }, sys => { uptime => 1234 },
+	};
+}
+
+sub response {
+	my ($request, $result) = @_;
+	my $rpc = decode_json($request->{payload});
+	return ("$rpc->{src}/rpc", encode_json({ id => $rpc->{id}, src => $id, result => $result }));
+}
+
+sub setup {
+	reset_env();
+	@published = ();
+	@timers = ();
+	add_iodev('mqtt', 'MQTT2_SERVER');
+	my ($hash, $error) = define_discovery('discovery', 'mqtt');
+	die $error if $error;
+	$hash->{helper}{gateway} = MQTT2_Discovery::FHEMGateway->new(
+		publish_mqtt => sub {
+			my (undef, $topic, $payload) = @_;
+			push @published, { topic => $topic, payload => $payload };
+			return undef;
 		},
-		status => {
-			sys => { uptime => 10 },
-			'switch:0' => { id => 0, output => JSON::PP::true },
-		},
-		mqtt_prefix => $prefix,
-		discovery_topic => "shelly/$id/config",
-		state_topic => $reply,
-		component_reply => 'mqtt2_discovery/discovery/shelly/0123456789abcdef/state',
 	);
+	main::MQTT2_DISCOVERY_activate($hash);
+	@published = ();
+	return $hash;
 }
 
-sub relay {
-	my ($result) = @_;
-	return (grep { ($_->{object_id} || '') eq 'switch_0' } @{ $result->{entities} })[0];
+# Beantwortet die Discovery-Abfragen; liefert die erzeugte readingList zurueck.
+sub discover {
+	my ($hash, %ntf) = @_;
+
+	# Die Statusabfrage nach dem Apply bleibt sonst als Rest in der Warteschlange.
+	@published = ();
+	main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'discoverShelly', $id);
+
+	for my $result ($info, configuration(%ntf), status()) {
+		my $request = shift @published;
+		return if !$request;
+		my ($topic, $payload) = response($request, $result);
+		dispatch_message('mqtt', 'shelly-client', $topic, $payload);
+	}
+
+	return attr_value($target, 'readingList') // '';
 }
 
-sub topics {
-	my ($entity) = @_;
-	return [$entity->{state_topic}, map { $_->{topic} } @{ $entity->{supplemental_signals} || [] }];
+# Wertet alle passenden readingList-Zeilen fuer ein konkretes Topic aus.
+sub readings_for {
+	my ($topic, $data) = @_;
+	my $payload = ref($data) ? encode_json($data) : $data;
+	my %updates;
+
+	for my $line (split /\n/, attr_value($target, 'readingList') // '') {
+		my ($pattern) = split /\s+/, $line, 2;
+		my $prefix = attr_value($target, 'devicetopic');
+		$pattern =~ s/\$DEVICETOPIC/\Q$prefix\E/g if defined $prefix;
+		next if "$topic:$payload" !~ /^$pattern$/s;
+		my ($reference) = $line =~ /'(r_[a-f0-9]+)'/;
+		next if !defined($reference);
+		my $values = main::MQTT2_DISCOVERY_runtimeRef($target, $reference, $payload);
+		%updates = (%updates, %$values) if ref($values) eq 'HASH';
+	}
+
+	return \%updates;
 }
 
-subtest 'Nur aktivierte Shelly-Pushwege werden gebunden' => sub {
-	my $status_only = parse_switch(0, 1);
-	is($status_only->{status}, 'ok', 'Snapshot mit status_ntf ist gueltig');
-	is(topics(relay($status_only)), ["$prefix/status/switch:0", $reply],
-		'status_ntf nutzt Komponentenstatus und behaelt die eigene Antwort als Initialquelle');
+subtest 'Nur die am Geraet aktiven Meldewege erzeugen Zeilen' => sub {
+	my $hash = setup();
+	my $reading_list = discover($hash, status => 1);
+	unlike($reading_list, qr{\Qevents/rpc\E}, 'ohne rpc_ntf entsteht keine Ereigniszeile');
+	like($reading_list, qr{\Qstatus/switch:0\E}, 'mit status_ntf entsteht die Komponentenzeile');
 
-	my $rpc_only = parse_switch(1, 0);
-	is(topics(relay($rpc_only)), [$reply, "$prefix/events/rpc"],
-		'rpc_ntf nutzt Ereignisse und die eigene Antwort als primaere Initialquelle');
+	$hash = setup();
+	$reading_list = discover($hash, rpc => 1);
+	like($reading_list, qr{\Qevents/rpc\E}, 'mit rpc_ntf entsteht die Ereigniszeile');
+	unlike($reading_list, qr{\Qstatus/switch\E}, 'ohne status_ntf entsteht keine Komponentenzeile');
+	is(readings_for("$id/events/rpc",
+		{ src => $id, method => 'NotifyStatus', params => { 'switch:0' => { output => JSON::PP::false } } })->{switch_0},
+		'false', 'der Ereignisweg liefert den Wert');
 
-	my $both = parse_switch(1, 1);
-	is(topics(relay($both)), ["$prefix/status/switch:0", "$prefix/events/rpc", $reply],
-		'beide aktivierten Pushwege werden gemeinsam beruecksichtigt');
+	# Die Antwort der eigenen Abfrage traegt in beiden Faellen die Initialwerte.
+	like($reading_list, qr{\Qmqtt2_discovery/discovery/shelly/\E}, 'die Abfrageantwort bleibt immer gebunden');
 };
 
-subtest 'Abgeschaltete Pushwege erzeugen keine toten readingList-Pfade' => sub {
-	my $none = parse_switch(0, 0);
-	is(topics(relay($none)), [$reply],
-		'ohne Pushmeldungen bleibt nur die von Discovery angeforderte Antwort');
-	like(join("\n", @{ $none->{warnings} }), qr/weder rpc_ntf noch status_ntf aktiv/,
-		'fehlende laufende Aktualisierung wird sichtbar gemeldet');
-
-	my $blu = MQTT2_Discovery::Parser::Shelly::parse(
-		info => { id => $id, gen => 4, model => 'S4SW-001X16EU', ver => '1.7.1' },
-		config => {
-			sys => { device => { name => 'Werkstatt' } },
-			mqtt => { topic_prefix => $prefix,
-				rpc_ntf => JSON::PP::false, status_ntf => JSON::PP::false },
-		},
-		status => {
-			sys => { uptime => 10 },
-			'bthomesensor:203' => { id => 203, value => JSON::PP::true },
-		},
-		mqtt_prefix => $prefix,
-		discovery_topic => "shelly/$id/config",
-		state_topic => $reply,
-		component_reply => 'mqtt2_discovery/discovery/shelly/0123456789abcdef/state',
-	);
-	my @blu_topics = map { @{ topics($_) } }
-		grep { ($_->{object_id} || '') =~ /\Abthomesensor_203/ } @{ $blu->{entities} };
-	ok(!grep({ $_ eq "$prefix/events/rpc" } @blu_topics),
-		'auch BLU-Ereignisfelder binden kein abgeschaltetes RPC-Topic');
+subtest 'Ohne jeden Meldeweg bleibt die Abfrage samt Warnung' => sub {
+	my $hash = setup();
+	my $reading_list = discover($hash);
+	unlike($reading_list, qr{\Qevents/rpc\E}, 'keine Ereigniszeile');
+	unlike($reading_list, qr{\Qstatus/switch\E}, 'keine Komponentenzeile');
+	like($reading_list, qr{\Qmqtt2_discovery/discovery/shelly/\E}, 'die Abfrageantwort bleibt');
+	like(reading_value('discovery', 'lastWarning'), qr/weder rpc_ntf noch status_ntf/,
+		'die Warnung benennt die fehlenden Wege');
 };
 
 done_testing();

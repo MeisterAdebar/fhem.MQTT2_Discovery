@@ -132,23 +132,15 @@ sub _bthome_entities {
 
 	push @entities, $updated;
 
-	my $mqtt = ref($context->{config}) eq 'HASH' && ref($context->{config}{mqtt}) eq 'HASH'
-		? $context->{config}{mqtt} : {};
-
-	# Ereignislisten werden nur bei aktivem rpc_ntf nach Komponentenkennung
-	# gefiltert; ihre Arrayposition ist dabei beliebig.
-	if ($mqtt->{rpc_ntf}) {
-
-		for my $field (qw(event idx channel ts)) {
-			my $name = $component;
-			$name =~ s/:/_/g;
-			push @{ $entities[0]{supplemental_signals} }, {
-				type => 'template', topic => "$context->{mqtt_prefix}/events/rpc",
-				name => "${name}_$field", template => "{{ value_json.$field }}",
-				items => { path => ['params', 'events'], match => { component => $component } },
-			};
-		}
-
+	# Ereignislisten werden nach Komponentenkennung gefiltert, unabhaengig von ihrer Arrayposition.
+	for my $field (qw(event idx channel ts)) {
+		my $name = $component;
+		$name =~ s/:/_/g;
+		push @{ $entities[0]{supplemental_signals} }, {
+			type => 'template', topic => "$context->{mqtt_prefix}/events/rpc",
+			name => "${name}_$field", template => "{{ value_json.$field }}",
+			items => { path => ['params', 'events'], match => { component => $component } },
+		};
 	}
 
 	return @entities;
