@@ -14,7 +14,7 @@ die $@ if $@;
 die $! if !defined($loaded);
 
 my $id = 'shelly1g4-aabbccddeeff';
-my $target = 'Werkstatt';
+my $target = 'Werkstatt_Switch_aabbccddeeff';
 my $info = { id => $id, gen => 4, model => 'S4SW-001X16EU', ver => '1.7.1', mac => 'AABBCCDDEEFF' };
 my @published;
 

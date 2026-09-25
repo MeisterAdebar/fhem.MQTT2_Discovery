@@ -166,7 +166,7 @@ subtest 'Tasmota gewinnt vor dem HA-Fallback und liefert generische Zusatzsignal
 	ok($upsert, 'Tasmota liefert ein kanonisches Upsert');
 	is($upsert->{schema_version}, 1, 'auch Tasmota verwendet dieselbe Modellversion');
 	is([map { $_->{type} } @{ $upsert->{extensions}{supplemental_signals} }],
-		[qw(payload json_flatten json_flatten json_flatten json_sequence json_flatten payload)],
+		[qw(payload json_flatten json_flatten json_flatten json_sequence json_flatten payload payload)],
 		'Tasmota-Profil ist als allgemeine Signaltypen normalisiert');
 	ok(!grep({ exists($_->{codec}) } @{ $upsert->{commands} }),
 		'Tasmota-Commands erhalten keine HA-JSON-Codecs');

@@ -80,7 +80,9 @@ sub _logical_reading_path {
 	# Device-Discovery-Komponentenschluessel sind ueblicherweise mit ihrer
 	# Plattform qualifiziert (z. B. sensor_battery). Der Plattformteil ist ein
 	# Namensraum und wird nur benoetigt, wenn der eigentliche Name kollidiert.
-	if (($entity->{_canonical_layout} || '') eq 'device'
+	# Auch der Shelly-Adapter qualifiziert seine Komponentenschluessel so
+	# (switch_0_temperature); dort gilt dieselbe Aufteilung.
+	if (($entity->{_canonical_layout} || '') =~ /^(?:device|shelly)\z/
 			&& defined($entity->{component_key}) && !ref($entity->{component_key})) {
 		my $key = safe_name($entity->{component_key}, $fallback);
 
@@ -326,9 +328,56 @@ sub _boolean_value_map {
 	return undef if ref($entity) ne 'HASH';
 	return undef if ($component // '') !~ /^(?:switch|binary_sensor|light)$/;
 	my ($on, $off) = ($entity->{state_on}, $entity->{state_off});
+
+	# state_on und state_off geben die gemeldeten Werte nur dann an, wenn sie von
+	# den gesendeten abweichen; fehlen sie, gelten laut Home-Assistant-Vertrag
+	# payload_on und payload_off auch fuer den Zustand. Ein binary_sensor kennt
+	# ohnehin nur diese beiden.
+	($on, $off) = ($entity->{payload_on}, $entity->{payload_off})
+		if !defined($on) || !defined($off);
 	return undef if !defined($on) || ref($on) || !defined($off) || ref($off);
 	return undef if "$on" eq "$off" || "$on" =~ /[\x00-\x1f]/ || "$off" =~ /[\x00-\x1f]/;
 	return { "$on" => 'on', "$off" => 'off' };
+}
+
+# Liefert zwei Namensvorschlaege fuer ein Geraet. Der bevorzugte verwendet den
+# vom Anwender vergebenen Namen, weil der am meisten sagt; der zweite ist der
+# allgemeine aus Name, Art und Kennung. Ist der bevorzugte schon vergeben,
+# nimmt der Aufrufer den zweiten, denn ein zweites Geraet mit demselben
+# Anwendernamen liesse sich sonst nicht unterscheiden.
+sub _device_names {
+	my ($device, $entity, $component) = @_;
+	my $manufacturer = _name_part($device->{manufacturer});
+	my $name = _name_part($device->{name});
+
+	# Wiederholt der Geraetename nur den Hersteller, gilt dessen Schreibweise.
+	undef $name if defined($name) && defined($manufacturer)
+		&& lc($name) eq lc($manufacturer);
+	my $base = $name || $manufacturer
+		|| $entity->{node_id} || $entity->{unique_id} || $entity->{object_id} || $component;
+	my $friendly = _name_part($device->{friendly_name});
+	undef $friendly if defined($friendly) && lc($friendly) eq lc($base);
+	my @general = ($base);
+
+	# Die Art wird gross geschrieben, weil sie ein Wort ist; die Kennung behaelt
+	# ihre Schreibweise, sie ist eine Kennung und kein Wort.
+	my @parts = (
+		_name_part($device->{kind}) ? ucfirst($device->{kind}) : (),
+		_name_part($device->{short_id}) ? $device->{short_id} : (),
+	);
+
+	for my $part (@parts) {
+		push @general, $part if join('_', @general) !~ /(?:\A|_)\Q$part\E(?:_|\z)/i;
+	}
+	my $general = join('_', @general);
+	return (defined($friendly) ? "${base}_$friendly" : $general, $general);
+}
+
+# Nimmt nur brauchbare Namensbestandteile an.
+sub _name_part {
+	my ($value) = @_;
+	return undef if !defined($value) || ref($value) || $value eq '';
+	return $value;
 }
 
 # Erzeugt einen abstrakten Reading-Eintrag aus Topic, Template und Zielnamen.
@@ -612,9 +661,10 @@ sub _map_canonical_entity {
 	my $io_name = $args{io_name} || '';
 	my $identity = _identity($entity, $io_name);
 	my $device = $entity->{device} || {};
-	my $base = $device->{name} || $entity->{node_id} || $entity->{unique_id} || $entity->{object_id} || $component;
 	my $name_prefix = defined($args{name_prefix}) ? $args{name_prefix} : '';
-	my $proposed_name = safe_name($name_prefix . $base, 'device');
+	my ($preferred, $fallback_name) = _device_names($device, $entity, $component);
+	my $proposed_name = safe_name($name_prefix . $preferred, 'device');
+	my $alternate_name = safe_name($name_prefix . $fallback_name, 'device');
 	my $reading_path = _logical_reading_path($entity);
 	my $reading_name = $reading_path->[-1];
 	my $command_set_name = _command_set_name($entity, $reading_name);
@@ -648,6 +698,12 @@ sub _map_canonical_entity {
 			&& $component eq 'device_automation' && defined($entity->{value_template})) {
 		$state_entry->{template_context} = 'trigger';
 	}
+	# Nennt der Adapter weitere Schluessel fuer denselben Wert, tragen sie
+	# denselben Readingnamen; die Sammelzeile benennt sie beim Auswerten um.
+	$state_entry->{json_aliases} = [ @{ $extensions->{json_key_aliases} } ]
+		if ref($state_entry) eq 'HASH' && !$state_entry->{error}
+			&& ref($extensions->{json_key_aliases}) eq 'ARRAY'
+			&& @{ $extensions->{json_key_aliases} };
 	_add_entry(\@readings, \@warnings, $state_entry, 'state');
 
 	_add_supplemental_signals(\@readings, \@warnings, $extensions->{supplemental_signals});
@@ -660,8 +716,13 @@ sub _map_canonical_entity {
 	my $value_map = _boolean_value_map($entity, $component);
 	if (ref($value_map) eq 'HASH') {
 
+		# Denselben Zustand meldet ein Geraet oft auf mehreren Wegen. Tasmota
+		# etwa fuehrt neben dem JSON-Feld ein eigenes Topic, dessen Signal den
+		# Befehlsnamen in Grossschreibung traegt (POWER neben power). Auch dort
+		# gilt dieselbe Abbildung, sonst meldet ein Weg on und der andere ON.
 		for my $reading (@readings) {
-			next if ref($reading) ne 'HASH' || ($reading->{name} // '') ne $state_reading_name;
+			next if ref($reading) ne 'HASH'
+				|| lc($reading->{name} // '') ne lc($state_reading_name);
 			$reading->{boolean_map} = { %$value_map };
 		}
 
@@ -1090,6 +1151,7 @@ sub _map_canonical_entity {
 		strong_identity => (ref($device->{identifiers}) eq 'ARRAY' && @{ $device->{identifiers} })
 			|| (ref($device->{connections}) eq 'ARRAY' && @{ $device->{connections} }) ? 1 : 0,
 		proposed_name   => $proposed_name,
+		alternate_name  => $alternate_name ne $proposed_name ? $alternate_name : undef,
 		reading_name    => $reading_name,
 		reading_path    => $reading_path,
 		reading_lines   => [ stable_unique(@readings) ],

@@ -43,7 +43,7 @@ subtest 'config und sensors werden in beliebiger Reihenfolge zusammengefuehrt' =
 	is($switch->{device}{identifiers}, ['tasmota_AABBCCDDEEFF'], 'MAC liefert stabile Device-Identitaet');
 	my ($signal_owner) = grep { ref($_->{supplemental_signals}) eq 'ARRAY' } @{ $result->{entities} };
 	is([map { $_->{type} } @{ $signal_owner->{supplemental_signals} }],
-		[qw(payload json_flatten json_flatten json_flatten json_sequence json_flatten payload)],
+		[qw(payload json_flatten json_flatten json_flatten json_sequence json_flatten payload payload)],
 		'Tasmota-Parser liefert seine Standardtelemetrie bereits als allgemeine Zusatzsignale');
 
 	my %sensor_by_id = map { $_->{object_id} => $_ }
@@ -95,6 +95,19 @@ subtest 'Power-Kanalnamen folgen der Tasmota-Ausgabe bei stabilen Entity-IDs' =>
 	is($single_switch->{object_id}, 'power', 'SetOption26 aendert die stabile Entity-ID nicht');
 	is($single_switch->{value_template}, '{{ value_json.POWER1 }}',
 		'SetOption26 nummeriert auch den einzigen Power-Ausgang');
+
+	# SetOption26 gehoert nicht zum Discovery-Protokoll: Die Nachricht eines
+	# echten Geraets nennt unter so nur 4, 11, 13, 17, 20, 30, 68, 73, 82, 114
+	# und 117. Ob der einzige Kanal POWER oder POWER1 heisst, steht dort also
+	# nicht, und beide Schluessel meinen denselben Wert.
+	my ($plain_switch) = grep { ($_->{component} || '') eq 'switch' }
+		@{ parse_tasmota({}, $config_topic, $config)->{entities} };
+	is($plain_switch->{json_key_aliases}, ['POWER1'],
+		'ohne Nummerierung gilt POWER1 als zweiter Schluessel desselben Kanals');
+
+	# Mehrkanalige Geraete nummerieren immer; dort gibt es nichts zu raten.
+	is([map { $_->{json_key_aliases} } @multi_switch{qw(power power2)}], [undef, undef],
+		'nummerierte Kanaele brauchen keinen zweiten Schluessel');
 };
 
 subtest 'mehrkanalige Energiemesswerte erben Klasse und Einheit' => sub {

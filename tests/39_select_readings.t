@@ -15,7 +15,7 @@ die $@ if $@;
 die $! if !defined($loaded);
 
 my $id = 'shelly1g4-aabbccddeeff';
-my $target = 'Werkstatt';
+my $target = 'Werkstatt_Switch_aabbccddeeff';
 my $info = { id => $id, gen => 4, model => 'S4SW-001X16EU', ver => '1.7.1', mac => 'AABBCCDDEEFF' };
 my (@published, @timers);
 
@@ -107,7 +107,7 @@ subtest 'selectReadings filtert Entities und ueberlebt den Geraetedatensatz' => 
 	discover($hash, status => 1);
 	like(attr_value($target, 'readingList'), qr{\Qstatus/wifi\E}, 'die WLAN-Zeile entsteht zunaechst');
 	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'selectReadings', $target,
-		'switch_0=1', 'switch_0_temperature=1', 'wifi_rssi=0', 'sys_uptime=0'), undef,
+		'switch_0=1', 'temperature=1', 'rssi=0', 'uptime=0'), undef,
 		'die Auswahl wird uebernommen');
 	my $reading_list = attr_value($target, 'readingList');
 	unlike($reading_list, qr{\Qstatus/wifi\E}, 'die abgewaehlte WLAN-Zeile entfaellt');
@@ -118,12 +118,12 @@ subtest 'selectReadings filtert Entities und ueberlebt den Geraetedatensatz' => 
 	my $values = readings_for('mqtt2_discovery/discovery/shelly/'
 		. substr(Digest::SHA::sha1_hex($id), 0, 16) . '/state/rpc',
 		{ src => $id, result => status() });
-	ok(!exists($values->{wifi_rssi}), 'die Abfrageantwort liefert das abgewaehlte Reading nicht mehr');
+	ok(!exists($values->{rssi}), 'die Abfrageantwort liefert das abgewaehlte Reading nicht mehr');
 	is($values->{switch_0}, 'true', 'die gewaehlten Readings bleiben erhalten');
 
 	# Die Auswahl liegt neben den Geraetedatensaetzen und ueberdauert deren Verlust.
 	my $registry = main::MQTT2_DISCOVERY_registry($hash);
-	is([sort @{ $registry->{selections}{$target} }], ['sys_uptime', 'wifi_rssi'],
+	is([sort @{ $registry->{selections}{$target} }], ['rssi', 'uptime'],
 		'die Auswahl steht ausserhalb des Geraetedatensatzes');
 	delete $registry->{devices}{$_} for keys %{ $registry->{devices} };
 	$_->{started} -= 60 for values %{ $hash->{helper}{formats}{shelly}{devices} || {} };

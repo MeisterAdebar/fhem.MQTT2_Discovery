@@ -103,9 +103,50 @@ sub _device {
 		name         => $name,
 		manufacturer => 'Tasmota',
 	);
+	$device{kind} = _device_kind($config);
+	$device{short_id} = _device_short_id($config, $mac);
+	$device{friendly_name} = _device_friendly_name($config, $name);
 	$device{model} = "$config->{md}" if defined(_scalar_string($config->{md}));
 	$device{sw_version} = "$config->{sw}" if defined(_scalar_string($config->{sw}));
 	return \%device;
+}
+
+# Leitet die Art des Geraets aus seinen Kanaelen ab. Relaytypen: 1 Schalter,
+# 2 Licht, 3 Rollladenhaelfte; dazu der Lichttyp und die iFan-Kennung. Ein
+# Geraet ohne Aktor bleibt ohne Art, es ist dann ein reiner Sensor.
+sub _device_kind {
+	my ($config) = @_;
+	my $relays = ref($config->{rl}) eq 'ARRAY' ? $config->{rl} : [];
+	my %types = map { (($_ // 0) => 1) } @$relays;
+	return 'fan' if $config->{if};
+	return 'cover' if $types{3};
+	return 'light' if $types{2}
+		|| (defined($config->{lt_st}) && !ref($config->{lt_st}) && $config->{lt_st});
+	return 'switch' if $types{1};
+	return undef;
+}
+
+# Die Kennung eines Geraets steckt in seinem eigenen Topic (tasmota_005301).
+# Fehlt sie dort, bleibt das Ende der MAC.
+sub _device_short_id {
+	my ($config, $mac) = @_;
+	my $topic = _scalar_string($config->{t});
+	my ($suffix) = defined($topic) ? $topic =~ /([0-9A-Fa-f]{4,})\z/ : ();
+	return $suffix if defined($suffix);
+	return defined($mac) && length($mac) >= 6 ? substr($mac, -6) : undef;
+}
+
+# Der Anwender vergibt je Kanal einen Namen (fn). Bei genau einem Schaltkanal
+# beschreibt er das ganze Geraet und eignet sich als Geraetename. Bei mehreren
+# Kanaelen gehoert er zum Kanal, nicht zum Geraet.
+sub _device_friendly_name {
+	my ($config, $name) = @_;
+	my $relays = ref($config->{rl}) eq 'ARRAY' ? $config->{rl} : [];
+	my @active = grep { defined($_) && !ref($_) && $_ =~ /^\d+$/ && $_ } @$relays;
+	return undef if @active != 1;
+	my $friendly = ref($config->{fn}) eq 'ARRAY' ? _scalar_string($config->{fn}[0]) : undef;
+	return undef if !defined($friendly) || lc($friendly) eq lc($name // '');
+	return $friendly;
 }
 
 # Erzeugt die von allen Tasmota-Entities gemeinsam benoetigten Quell- und Devicefelder.
@@ -413,6 +454,12 @@ sub _actuator_entities {
 			$entity->{raw_metadata}{state_reading_name} = $command;
 		}
 		$entity->{command_topic} = "$args{command_base}/$command";
+
+		# Ohne Nummerierung heisst der erste Kanal POWER, mit SetOption26 aber
+		# POWER1. Die Option steht nicht in der Discovery, deshalb gelten beide
+		# Schluessel fuer denselben Wert. Mehrkanalige Geraete sind immer
+		# nummeriert und brauchen das nicht.
+		$entity->{json_key_aliases} = ["${command}1"] if !$numbered_power_names && $index == 1;
 		$entity->{payload_off} = defined($states->[0]) && !ref($states->[0]) ? "$states->[0]" : 'OFF';
 		$entity->{payload_on} = defined($states->[1]) && !ref($states->[1]) ? "$states->[1]" : 'ON';
 		_light_details($entity, $config, $offset, $first_light, $args{stat_base}, $args{command_base})
@@ -622,6 +669,15 @@ sub _supplemental_signals {
 		push @signals, {
 			type => 'payload', topic => "$args{stat_base}/$command", name => $command,
 		};
+
+		# SetOption26 gehoert nicht zum Discovery-Protokoll: Die Nachricht nennt
+		# nur die Optionen 4, 11, 13, 17, 20, 30, 68, 73, 82, 114 und 117. Ob
+		# Tasmota den ersten Kanal als POWER oder als POWER1 meldet, steht darin
+		# also nicht. Beide Topics fuehren deshalb auf dasselbe Reading; nur eins
+		# von beiden sendet das Geraet.
+		push @signals, {
+			type => 'payload', topic => "$args{stat_base}/${command}1", name => $command,
+		} if !$numbered && $offset == 0;
 	}
 
 	return \@signals;

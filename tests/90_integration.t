@@ -368,24 +368,29 @@ subtest 'native Tasmota-Discovery fuehrt config und sensors zusammen' => sub {
 		['MQTT2_DISCOVERY'], 'Tasmota config wird konsumiert');
 	is(dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/AABBCCDDEEFF/sensors', $sensors),
 		['MQTT2_DISCOVERY'], 'Tasmota sensors wird konsumiert');
-	ok($main::defs{MQTT2_Workshop_Plug}, 'ein gemeinsames MQTT2_DEVICE wurde angelegt');
-	like(attr_value('MQTT2_Workshop_Plug', 'readingList'), qr{stat/workshop_plug/RESULT},
+	ok($main::defs{MQTT2_Workshop_Plug_Soldering_Iron}, 'ein gemeinsames MQTT2_DEVICE wurde angelegt');
+	like(attr_value('MQTT2_Workshop_Plug_Soldering_Iron', 'readingList'), qr{stat/workshop_plug/RESULT},
 		'Relay-Status ist enthalten');
 	my ($result_line) = grep { /^stat\/workshop_plug\/RESULT:/ }
-		split /\n/, attr_value('MQTT2_Workshop_Plug', 'readingList');
+		split /\n/, attr_value('MQTT2_Workshop_Plug_Soldering_Iron', 'readingList');
+	# Der Alias POWER1 steht in der Umbenennungsliste: Tasmota meldet denselben
+	# Kanal je nach SetOption26 unter dem einen oder dem anderen Schluessel, und
+	# die Option gehoert nicht zur Discovery.
 	is($result_line, q!stat/workshop_plug/RESULT:.* { !
-		. $json_readings{result} . q! }!,
+		. $json_readings{result} =~ s/\)\z/,{"POWER1" => "POWER"})/r . q! }!,
 		'Tasmota-RESULT verwendet ebenfalls die kurze JSON-Auswertung');
-	like(attr_value('MQTT2_Workshop_Plug', 'readingList'), qr{tele/workshop_plug/SENSOR},
+	like(attr_value('MQTT2_Workshop_Plug_Soldering_Iron', 'readingList'), qr{tele/workshop_plug/SENSOR},
 		'Telemetriesensoren sind enthalten');
 	my ($sensor_line) = grep { /^tele\/workshop_plug\/SENSOR:/ }
-		split /\n/, attr_value('MQTT2_Workshop_Plug', 'readingList');
+		split /\n/, attr_value('MQTT2_Workshop_Plug_Soldering_Iron', 'readingList');
+	# Die Zuordnung eines Schluessels gilt im ganzen Geraet und steht deshalb an
+	# jeder Sammelzeile, auch wenn dieses Topic den Schluessel nie liefert.
 	is($sensor_line, q!tele/workshop_plug/SENSOR:.* { !
-		. $json_readings{sensor} . q! }!,
+		. $json_readings{sensor} =~ s/\)\z/,{"POWER1" => "POWER"})/r . q! }!,
 		'Tasmota-SENSOR verwendet dieselbe kurze JSON-Auswertung wie MQTT2-Autocreate');
-	is(scalar(() = attr_value('MQTT2_Workshop_Plug', 'readingList') =~ /tele\/workshop_plug\/SENSOR/g), 1,
+	is(scalar(() = attr_value('MQTT2_Workshop_Plug_Soldering_Iron', 'readingList') =~ /tele\/workshop_plug\/SENSOR/g), 1,
 		'alle Tasmota-Telemetriewerte teilen sich eine JSON-Auswertung');
-	like(attr_value('MQTT2_Workshop_Plug', 'setList'), qr{POWER:ON,OFF\s+cmnd/workshop_plug/POWER},
+	like(attr_value('MQTT2_Workshop_Plug_Soldering_Iron', 'setList'), qr{POWER:ON,OFF\s+cmnd/workshop_plug/POWER},
 		'Relay-Befehl verwendet exakt den Reading-Namen');
 	is(reading_value('discovery', 'discoveredDevices'), 1, 'Tasmota ergibt ein Device');
 	is(reading_value('discovery', 'discoveredEntities'), 3, 'Relay und zwei Sensoren sind registriert');
@@ -398,7 +403,7 @@ subtest 'extraJsonReadings wechselt ohne neue Discovery zwischen offen und angek
 		. '"tp":["cmnd","stat","tele"],"rl":[1],"so":{"4":0},"ver":1}';
 	dispatch_message('mqtt', 'tasmota',
 		'tasmota/discovery/AABBCCDDEE01/config', $config);
-	my $target = 'MQTT2_Strict_Plug';
+	my $target = 'MQTT2_Strict_Plug_Power';
 	my $inclusive = attr_value($target, 'readingList');
 	like($inclusive, qr/MQTT2_DISCOVERY_jsonReadings/,
 		'der Default include erzeugt weiterhin offene Tasmota-JSON-Readings');
@@ -480,9 +485,9 @@ subtest 'native Tasmota-Klassen werden bis readingList und setList abgebildet' =
 	my $config = '{"ip":"192.0.2.12","dn":"All Classes","fn":["Color Light","Shutter",""],"hn":"all-classes","mac":"112233445566","md":"ESP32","ofln":"Offline","onln":"Online","state":["OFF","ON","TOGGLE","HOLD"],"sw":"15.4.0","t":"all_classes","ft":"%prefix%/%topic%/","tp":["cmnd","stat","tele"],"rl":[2,3,3],"swc":[5,13],"swn":["Door","Motion"],"btn":[1,0],"so":{"4":0,"11":0,"13":0,"30":0,"68":0,"73":1,"82":1,"114":1},"if":1,"cam":0,"ty":0,"lk":1,"lt_st":5,"sho":[0],"sht":[[0,90,10]],"ver":1}';
 	is(dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/112233445566/config', $config),
 		['MQTT2_DISCOVERY'], 'erweiterte Tasmota config wird konsumiert');
-	ok($main::defs{MQTT2_All_Classes}, 'alle Klassen werden in einem MQTT2_DEVICE gruppiert');
-	my $reading_list = attr_value('MQTT2_All_Classes', 'readingList');
-	my $set_list = attr_value('MQTT2_All_Classes', 'setList');
+	ok($main::defs{MQTT2_All_Classes_Fan_445566}, 'alle Klassen werden in einem MQTT2_DEVICE gruppiert');
+	my $reading_list = attr_value('MQTT2_All_Classes_Fan_445566', 'readingList');
+	my $set_list = attr_value('MQTT2_All_Classes_Fan_445566', 'setList');
 
 	like($set_list, qr{power_brightness:slider,0,1,100\s+cmnd/all_classes/Dimmer}, 'Dimmer wird schreibbar');
 	like($set_list, qr{power_colorTemp:slider,200,1,380\s+cmnd/all_classes/CT}, 'Farbtemperatur wird schreibbar');
@@ -499,7 +504,7 @@ subtest 'native Tasmota-Klassen werden bis readingList und setList abgebildet' =
 		'alle JSON-Zustaende aus RESULT teilen sich die Autocreate-Auswertung');
 	is(scalar(() = $reading_list =~ m{stat/all_classes/RESULT}g), 1,
 		'RESULT wird trotz vieler Tasmota-Komponenten nur einmal ausgewertet');
-	my %semantic = map { $_->{id} => $_ } @{ $main::defs{MQTT2_All_Classes}{SEMANTIC_METADATA}{entities} };
+	my %semantic = map { $_->{id} => $_ } @{ $main::defs{MQTT2_All_Classes_Fan_445566}{SEMANTIC_METADATA}{entities} };
 	is($semantic{power}{capabilities}{power}{read}, 'POWER1',
 		'Lichtstatus liest bei mehreren Ausgaengen das nummerierte Rohreading');
 	is($semantic{power}{capabilities}{power}{write}, 'POWER1',
@@ -522,7 +527,7 @@ subtest 'SemanticUI filtert mehrkanalige Tasmota-Messwerte konservativ' => sub {
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/A1B2C3D4E5F6/config', $config);
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/A1B2C3D4E5F6/sensors', $sensors);
 
-	my %semantic = map { $_->{id} => $_ } @{ $main::defs{MQTT2_Meter}{SEMANTIC_METADATA}{entities} };
+	my %semantic = map { $_->{id} => $_ } @{ $main::defs{MQTT2_Meter_Switch_D4E5F6}{SEMANTIC_METADATA}{entities} };
 	is($semantic{power}{capabilities}{power}{read}, 'POWER1',
 		'erster Aktorkanal liest das tatsaechlich erzeugte nummerierte Reading');
 	is($semantic{power}{capabilities}{power}{write}, 'POWER1',
@@ -549,7 +554,7 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/AABBCCCF9A44/config', $config);
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/AABBCCCF9A44/sensors', $sensors);
 
-	my $reading_list = attr_value('MQTT2_SchwimmbadEntfeuchter', 'readingList');
+	my $reading_list = attr_value('MQTT2_SchwimmbadEntfeuchter_Switch_CF9A44', 'readingList');
 	my @expected = (
 		q{tele/tasmota_CF9A44/LWT:.* LWT},
 		q!tele/tasmota_CF9A44/STATE:.* { ! . $json_readings{state} . q! }!,
@@ -568,7 +573,7 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 	like($reading_list,
 		qr{^tele/tasmota_CF9A44/LWT:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
 		'Tasmota-LWT speist zusaetzlich die allgemeine Availability-Auswertung');
-	my $set_list = attr_value('MQTT2_SchwimmbadEntfeuchter', 'setList');
+	my $set_list = attr_value('MQTT2_SchwimmbadEntfeuchter_Switch_CF9A44', 'setList');
 	like($set_list, qr{^POWER1:ON,OFF\s+cmnd/tasmota_CF9A44/POWER1$}m,
 		'erster Set-Befehl entspricht exakt POWER1');
 	like($set_list, qr{^POWER2:ON,OFF\s+cmnd/tasmota_CF9A44/POWER2$}m,

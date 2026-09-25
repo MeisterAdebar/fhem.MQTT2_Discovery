@@ -447,14 +447,14 @@ subtest 'Rescan verarbeitet retained Tasmota config und sensors gemeinsam' => su
 		'Server-Rescan verarbeitet beide Tasmota-Topics');
 	my @rescan_commands = @{ command_log() }[$before_rescan .. $#{ command_log() }];
 
-	ok($main::defs{Retained_Plug}, 'retained Tasmota-Discovery verwendet standardmaessig keinen Prefix');
+	ok($main::defs{Retained_Plug_Relay}, 'retained Tasmota-Discovery verwendet standardmaessig keinen Prefix');
 	is(reading_value('tasmotaDiscovery', 'discoveredEntities'), 3,
 		'Relay und beide Telemetriesensoren sind registriert');
 	is(reading_value('tasmotaDiscovery', 'lastRescan'), 'processed=2 failed=0',
 		'beide retained Tasmota-Nachrichten wurden erfolgreich verarbeitet');
-	is(scalar(grep { /^attr Retained_Plug readingList / } @rescan_commands), 1,
+	is(scalar(grep { /^attr Retained_Plug_Relay readingList / } @rescan_commands), 1,
 		'Tasmota-Rescan schreibt die finale readingList nur einmal');
-	is(scalar(grep { /^attr Retained_Plug setList / } @rescan_commands), 1,
+	is(scalar(grep { /^attr Retained_Plug_Relay setList / } @rescan_commands), 1,
 		'Tasmota-Rescan schreibt die finale setList nur einmal');
 };
 
@@ -486,7 +486,7 @@ subtest 'Tasmota-Neuaufbau und echtes Delete verwenden getrennte Logstufen' => s
 	is(main::MQTT2_DISCOVERY_process($hash, 'tasmota', $topic, ''),
 		'consumed', 'leerer Config-Payload wird als echtes Delete verarbeitet');
 	my @delete_logs = grep {
-		$_->[2] =~ /removed .* discovery entity\/entities from Log_Plug/
+		$_->[2] =~ /removed .* discovery entity\/entities from Log_Plug_Relay/
 	} @{ log_entries() };
 	is(scalar(@delete_logs), 1, 'echtes Delete erzeugt genau eine Loeschmeldung');
 	is($delete_logs[0][1], 2, 'echtes Delete bleibt auf Level 2 sichtbar');

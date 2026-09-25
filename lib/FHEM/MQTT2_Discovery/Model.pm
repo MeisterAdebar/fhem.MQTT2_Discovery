@@ -222,6 +222,14 @@ sub from_entity {
 		$model->{extensions}{$key} = $source->{$key} if exists($source->{$key});
 	}
 
+	# Weitere JSON-Schluessel, die denselben Wert transportieren. Tasmota meldet
+	# den ersten Kanal je nach SetOption26 als POWER oder als POWER1, sagt in der
+	# Discovery aber nicht, welches von beiden.
+	$model->{extensions}{json_key_aliases} = [
+		grep { defined($_) && !ref($_) && $_ =~ /^[A-Za-z_][A-Za-z0-9_]*\z/ }
+			@{ $source->{json_key_aliases} }
+	] if ref($source->{json_key_aliases}) eq 'ARRAY';
+
 	$model->{extensions}{supplemental_signals} = [
 		map { ref($_) eq 'HASH' ? { %$_ } : $_ } @{ $source->{supplemental_signals} }
 	] if ref($source->{supplemental_signals}) eq 'ARRAY';

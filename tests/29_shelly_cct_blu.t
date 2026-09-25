@@ -14,7 +14,7 @@ die $@ if $@;
 die $! if !defined($loaded);
 my $id = 'shellyduobulbg3-9070694a9e14';
 my $prefix = 'haus/lampe';
-my $target = 'ShellyTest';
+my $target = 'ShellyTest_Light_9070694a9e14';
 my $info = { id => $id, gen => 3, model => 'S3BL-DUO', ver => '2.0.0' };
 my @published;
 
@@ -130,27 +130,27 @@ subtest 'CCT ist ueber SERVER und CLIENT vollstaendig steuerbar' => sub {
 		discover($hash);
 		ok($main::defs{$target}, 'Duo Bulb wurde angelegt');
 		is(reading_value('discovery', 'warningCount'), 0, 'keine Warnung fuer CCT');
-		like(attr_value($target, 'setList'), qr/^cct_0_brightness:slider,0,1,100 /m, 'Helligkeit verwendet Prozent');
-		like(attr_value($target, 'setList'), qr/^cct_0_ct:slider,2200,1,7000 /m, 'konfigurierter Kelvinbereich wurde uebernommen');
+		like(attr_value($target, 'setList'), qr/^brightness:slider,0,1,100 /m, 'Helligkeit verwendet Prozent');
+		like(attr_value($target, 'setList'), qr/^ct:slider,2200,1,7000 /m, 'konfigurierter Kelvinbereich wurde uebernommen');
 		is(command('cct_0', 'on')->{params}, { id => 0, on => JSON::PP::true }, 'on sendet echtes JSON-Boolean');
 		is(command('cct_0', 'off')->{method}, 'CCT.Set', 'CCT verwendet den eigenen RPC-Namensraum');
-		is(command('cct_0_brightness', 0)->{params}, { id => 0, brightness => 0 }, 'Null ist ein gueltiger Helligkeitswert');
-		is(command('cct_0_ct', 4600)->{params}, { id => 0, ct => 4600 }, 'Kelvin bleiben unveraendert');
+		is(command('brightness', 0)->{params}, { id => 0, brightness => 0 }, 'Null ist ein gueltiger Helligkeitswert');
+		is(command('ct', 4600)->{params}, { id => 0, ct => 4600 }, 'Kelvin bleiben unveraendert');
 
 		# Weder ungueltige Zahlen noch angehaengtes JSON duerfen einen MQTT-Befehl erzeugen.
 		for my $bad (-1, 101, 'kaputt', '50,"on":true', 'NaN', 'Inf') {
-			is(command('cct_0_brightness', $bad), undef, "ungueltige Helligkeit abgefangen: $bad");
+			is(command('brightness', $bad), undef, "ungueltige Helligkeit abgefangen: $bad");
 		}
 
-		is(command('cct_0_ct', 7001), undef, 'Farbtemperatur ausserhalb des Bereichs abgefangen');
+		is(command('ct', 7001), undef, 'Farbtemperatur ausserhalb des Bereichs abgefangen');
 		my $initial = decode_json($published[0]{payload});
 		my $values = readings("$initial->{src}/rpc", { src => $id, result => status() });
-		is([@{$values}{qw(cct_0 cct_0_brightness cct_0_ct cct_0_power cct_0_energy)}],
+		is([@{$values}{qw(cct_0 brightness ct power energy)}],
 			['true', 50, 4600, 4.5, 12], 'Initialwerte und Messwerte werden gelesen');
 		$values = readings("$prefix/events/rpc", { method => 'NotifyStatus', params => { 'cct:0' => { ct => 3000 } } });
-		is($values, { cct_0_ct => 3000 }, 'Teilstatus ueberschreibt keine fehlenden Werte');
+		is($values, { ct => 3000 }, 'Teilstatus ueberschreibt keine fehlenden Werte');
 		$values = readings("$prefix/status/cct_0", { output => JSON::PP::false, brightness => 25 });
-		is($values, { cct_0 => 'false', cct_0_brightness => 25 }, 'Komponentenstatus verwendet dieselben Namen');
+		is($values, { cct_0 => 'false', brightness => 25 }, 'Komponentenstatus verwendet dieselben Namen');
 	}
 
 };
@@ -160,7 +160,7 @@ subtest 'CCT-Standardbereich und unvollstaendige Snapshots' => sub {
 	my $config = config();
 	delete $config->{'cct:0'}{ct_range};
 	discover($hash, $config);
-	like(attr_value($target, 'setList'), qr/^cct_0_ct:slider,2700,1,6500 /m, 'dokumentierter Duo-Bulb-Standard');
+	like(attr_value($target, 'setList'), qr/^ct:slider,2700,1,6500 /m, 'dokumentierter Duo-Bulb-Standard');
 
 	# Fehlerhafte Aktoren duerfen keine unvollstaendige Definition erzeugen.
 	for my $field (qw(output brightness ct)) {

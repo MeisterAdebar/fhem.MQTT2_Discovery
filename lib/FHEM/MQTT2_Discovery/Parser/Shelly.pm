@@ -39,12 +39,41 @@ sub _value {
 	return $data;
 }
 
+# Bei genau einem Aktor beschreibt dessen Name das ganze Geraet. Bei mehreren
+# gehoert er zum Kanal und taugt nicht als Geraetename.
+sub _device_friendly_name {
+	my ($config, $device_name) = @_;
+	return undef if ref($config) ne 'HASH';
+	my @actuators = grep { /\A(?:switch|cover|light|cct|rgb|rgbw):\d+\z/ } keys %$config;
+	return undef if @actuators != 1;
+	my $name = ref($config->{ $actuators[0] }) eq 'HASH' ? $config->{ $actuators[0] }{name} : undef;
+	return undef if !defined($name) || ref($name) || $name eq ''
+		|| lc($name) eq lc($device_name // '');
+	return $name;
+}
+
+# Leitet die Art des Geraets aus den konfigurierten Komponenten ab.
+sub _device_kind {
+	my ($config) = @_;
+	my @components = ref($config) eq 'HASH' ? keys %$config : ();
+	return 'cover' if grep { /\Acover:\d+\z/ } @components;
+	return 'light' if grep { /\A(?:light|cct|rgb|rgbw):\d+\z/ } @components;
+	return 'switch' if grep { /\Aswitch:\d+\z/ } @components;
+	return undef;
+}
+
 # Beschreibt denselben Wert auf Komponenten-, RPC-Ereignis- und Abfragetopics.
 sub _entity {
 	my ($context, $component, $path, $kind, $suffix, %configuration) = @_;
 	my $name = $component;
 	$name =~ s/:/_/g;
+	my $namespace = $name;
 	$name .= "_$suffix" if defined($suffix) && $suffix ne '';
+
+	# Sichtbar ist das Blatt, die Komponente bleibt Namensraum: switch_0 und
+	# temperature statt switch_0_temperature. Kollidieren zwei Komponenten im
+	# selben Geraet, stellt die Namensaufloesung den Namensraum wieder voran.
+	my $leaf = defined($suffix) && $suffix ne '' ? $suffix : $name;
 	my $topic = $context->{discovery_topic};
 	my $prefix = $context->{mqtt_prefix};
 
@@ -55,7 +84,7 @@ sub _entity {
 	my $pushes_status = $mqtt->{status_ntf} ? 1 : 0;
 	my $pushes_events = $mqtt->{rpc_ntf} ? 1 : 0;
 	my $reply_signal = {
-		type => 'template', topic => $context->{state_topic}, name => $name,
+		type => 'template', topic => $context->{state_topic}, name => $leaf,
 		template => "{{ value_json.result['$component'].$path }}",
 	};
 
@@ -66,11 +95,11 @@ sub _entity {
 	return {
 		operation => 'upsert', format => 'shelly', prefix => 'shelly',
 		component => $kind, component_key => $name, object_id => $name,
-		preferred_entity_name => $name, name => $name,
+		preferred_entity_name => $leaf, name => $name,
 		unique_id => "$context->{info}{id}_$name", device => $context->{device},
 		discovery_topic => $topic, entity_key => "$topic|$name", device_topic => $prefix,
 		state_topic => $state_topic,
-		value_template => $value_template, state_reading_name => $name,
+		value_template => $value_template, state_reading_name => $leaf,
 		json_autocreate => 0,
 		availability => [
 			# Das online-Topic ist der letzte Wille des Geraets; die Rolle macht daraus
@@ -81,12 +110,12 @@ sub _entity {
 				payload_available => $context->{info}{id}, payload_not_available => 'offline' },
 		],
 		supplemental_signals => [
-			($pushes_events ? ({ type => 'template', topic => "$prefix/events/rpc", name => $name,
+			($pushes_events ? ({ type => 'template', topic => "$prefix/events/rpc", name => $leaf,
 				template => "{{ value_json.params['$component'].$path }}" }) : ()),
 			($pushes_status ? ($reply_signal) : ()),
 			# Dynamische Komponenten fehlen in GetStatus und erhalten eine eigene Initialantwort.
 			($component =~ /\Abthome(?:device|sensor):\d+\z/ ? ({
-				type => 'template', topic => "$context->{component_reply}/$component/rpc", name => $name,
+				type => 'template', topic => "$context->{component_reply}/$component/rpc", name => $leaf,
 				template => "{{ value_json.result.$path }}",
 			}) : ()),
 		],
@@ -159,9 +188,18 @@ sub parse {
 	my $sys = ref($config->{sys}) eq 'HASH' ? $config->{sys} : {};
 	my $device = ref($sys->{device}) eq 'HASH' ? $sys->{device} : {};
 	my $device_name = $device->{name};
-	$device_name = $info->{id} if !defined($device_name) || ref($device_name) || $device_name eq '';
+	$device_name = undef if defined($device_name) && (ref($device_name) || $device_name eq '');
+
+	# Ohne eigenen Namen setzt der Mapper den Namen aus Hersteller, Art und
+	# Kennung zusammen; die Geraete-ID muss dafuer nicht als Name herhalten.
+	my ($short_id) = $info->{id} =~ /([0-9A-Fa-f]{6,})\z/;
+	# sys.device.name ist der Geraetename, wie dn bei Tasmota. Einen eigenen
+	# Namen je Kanal tragen die Komponenten selbst.
 	$args{device} = {
-		identifiers => [$info->{id}], name => $device_name, manufacturer => 'Shelly',
+		identifiers => [$info->{id}], manufacturer => 'Shelly',
+		(defined($device_name) ? (name => $device_name) : ()),
+		kind => _device_kind($config), short_id => $short_id,
+		friendly_name => _device_friendly_name($config, $device_name),
 		model => $info->{model}, sw_version => $info->{ver},
 	};
 	my $mqtt = ref($config->{mqtt}) eq 'HASH' ? $config->{mqtt} : {};

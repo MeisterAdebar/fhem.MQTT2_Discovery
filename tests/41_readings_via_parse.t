@@ -14,7 +14,7 @@ die $@ if $@;
 die $! if !defined($loaded);
 
 my $id = 'shelly1g4-aabbccddeeff';
-my $target = 'Werkstatt';
+my $target = 'Werkstatt_Switch_aabbccddeeff';
 my $info = { id => $id, gen => 4, model => 'S4SW-001X16EU', ver => '1.7.1', mac => 'AABBCCDDEEFF' };
 my @published;
 
@@ -99,13 +99,13 @@ subtest 'Ohne readingList schreibt das Modul die Readings selbst' => sub {
 	dispatch_message('mqtt', 'shelly-client', "$id/status/switch_0",
 		encode_json({ output => JSON::PP::false, temperature => { tC => 21.5 } }));
 	is($main::defs{$target}{READINGS}{switch_0}{VAL}, 'false', 'der Schaltzustand wird geschrieben');
-	is($main::defs{$target}{READINGS}{switch_0_temperature}{VAL}, '21.5', 'die Temperatur wird geschrieben');
+	is($main::defs{$target}{READINGS}{temperature}{VAL}, '21.5', 'die Temperatur wird geschrieben');
 
 	# Die Nachricht bleibt im Dispatch, damit manuelle Zeilen weiter arbeiten.
 	is(dispatch_message('mqtt', 'shelly-client', "$id/status/sys", encode_json({ uptime => 5 })),
 		['MQTT2_DISCOVERY', 'MQTT2_DEVICE', 'MQTT_GENERIC_BRIDGE'],
 		'die Nachricht wird nicht verschluckt');
-	is($main::defs{$target}{READINGS}{sys_uptime}{VAL}, '5', 'auch danach entstehen Readings');
+	is($main::defs{$target}{READINGS}{uptime}{VAL}, '5', 'auch danach entstehen Readings');
 };
 
 subtest 'Ohne das Attribut bleibt alles beim Alten' => sub {

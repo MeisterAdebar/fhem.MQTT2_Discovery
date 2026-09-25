@@ -1,6 +1,21 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 662dc84df4d225b9a9769cd03afda536a3473164449888bd61dd1647b24ba6b2
+# Msg-SHA256: 226c516f7aceff72feafb09cf65ad380d42a47736c20b4102bbb8411113b7994
+- change: MQTT2_DISCOVERY: Schluesselraum und Readingnamen
+  - Statt je Schalter ein Attribut gibt es einen Schluesselraum mit vier
+    Ebenen: Geraet, Familie, global und die Vorgabe im Code. Gesucht wird von
+    unten nach oben.
+  - Ein Schluessel gilt im ganzen Geraet gleich; was bei der Anlage galt,
+    bleibt am Datensatz vermerkt, damit eine spaetere Umstellung keine
+    Readingwerte kippt.
+  - style=fhem folgt den FHEM-Namensrichtlinien. Die Erreichbarkeit hat
+    unterscheidbare Stufen.
+  - Ein Shelly-Reading tragt das Blatt seines Topics, die Komponente wird zum
+    Namensraum.
+  - Tasmotas POWER und POWER1 fuehren auf dasselbe Reading, und die Sammelzeile
+    benennt Zweitschluessel darauf um.
+  - Ein Geraetename tragt den Kanalnamen, sonst Name, Art und Kennung. Ein
+    Name, der nichts unterscheidet, bleibt nicht allein stehen.
 - change: MQTT2_DISCOVERY: Vier Funktionen im Modul, perlcritic auf Stufe 4
   - Einkanalige Geraete folgen der FHEM-Konvention: Das Zustandsreading heisst
     state, der Setter bietet on und off, und FHEMs SetExtensions greifen.

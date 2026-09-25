@@ -632,11 +632,27 @@ sub _render_availability_groups {
 sub render_entries {
 	my ($entries, $device_topic, $extra_reserved, $runtime_references) = @_;
 	$runtime_references = {} if ref($runtime_references) ne 'HASH';
-	my (@rendered, @availability, %json_groups, %json_autocreate, %runtime_topics);
+	my (@rendered, @availability, %json_groups, %json_autocreate, %runtime_topics, %json_key_names);
 
 	# JSON-Eintraege werden zunaechst pro Topic gesammelt. So kann eine einzige
 	# sichere Runtime-Auswertung mehrere Readings gemeinsam erzeugen.
 	for my $entry (@{ $entries || [] }) {
+
+		# Welcher JSON-Schluessel auf welchen Readingnamen fuehrt, gilt fuer das
+		# ganze Topic. Es muss auch dann bekannt bleiben, wenn der Eintrag selbst
+		# als eigene Laufzeitzeile gerendert wird, denn eine Sammelzeile
+		# desselben Topics wuerde den rohen Schluessel sonst zusaetzlich
+		# schreiben.
+		if (ref($entry) eq 'HASH' && defined($entry->{topic}) && defined($entry->{name})) {
+			my $source = $entry->{json_key} // $entry->{json_source_key};
+			$json_key_names{ $entry->{topic} }{$source} = $entry->{name}
+				if defined($source) && !ref($source) && $source ne $entry->{name};
+
+			for my $alias (@{ $entry->{json_aliases} || [] }) {
+				next if ref($alias) || $alias eq $entry->{name};
+				$json_key_names{ $entry->{topic} }{$alias} = $entry->{name};
+			}
+		}
 
 		# Availability benoetigt alle Quellen und Verknuepfungsregeln des Devices,
 		# bevor pro Topic ein zustandsbehafteter Runtime-Aufruf entstehen kann.
@@ -679,16 +695,17 @@ sub render_entries {
 			line => render_entry($entry, $device_topic, $runtime_references) };
 	}
 
+	my %device_key_names = map { %{ $json_key_names{$_} } } sort keys %json_key_names;
+
 	for my $topic (sort keys %json_autocreate) {
 		my %by_name = map { (($_->{name} // '') => $_) } @{ $json_autocreate{$topic} };
 		my @entries = values %by_name;
-		my %renames;
 
-		for my $entry (@entries) {
-			next if !defined($entry->{json_key}) || !defined($entry->{name})
-				|| $entry->{json_key} eq $entry->{name};
-			$renames{ $entry->{json_key} } = $entry->{name};
-		}
+		# Ein Schluessel bedeutet im ganzen Geraet dasselbe: Tasmota meldet den
+		# Schaltzustand sowohl in RESULT als auch in der STATE-Telemetrie. Die
+		# Zuordnung eines anderen Topics gilt deshalb auch hier, die des eigenen
+		# Topics hat Vorrang.
+		my %renames = (%device_key_names, %{ $json_key_names{$topic} || {} });
 
 		push @rendered, {
 			kind => 'json_autocreate_group', name => '', names => [ sort keys %by_name ],

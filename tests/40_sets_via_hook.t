@@ -26,7 +26,7 @@ my @fallback;
 }
 
 my $id = 'shelly1g4-aabbccddeeff';
-my $target = 'Werkstatt';
+my $target = 'Werkstatt_Switch_aabbccddeeff';
 my $info = { id => $id, gen => 4, model => 'S4SW-001X16EU', ver => '1.7.1', mac => 'AABBCCDDEEFF' };
 my @published;
 
@@ -130,6 +130,20 @@ subtest 'Der Hook bietet die Befehle an und fuehrt sie aus' => sub {
 		'state folgt dem Befehl wie bei MQTT2_DEVICE_Set');
 	is(main::MQTT2_DISCOVERY_SetExtensions($main::defs{$target}, '', $target, 'switch_0', 'blau'),
 		'Unbekannter Wert fuer switch_0', 'ein unbekannter Wert wird abgelehnt');
+};
+
+subtest 'Mit der FHEM-Konvention steht bis zur Rueckmeldung set_' => sub {
+	my $hash = setup();
+	$main::attr{discovery}{keys} = 'style=fhem sets=hook';
+	discover($hash);
+	@published = ();
+
+	# Nach FHEM-Konvention meldet das Reading den Befehl erst als Absicht; die
+	# Rueckmeldung des Geraets ersetzt ihn spaeter durch den echten Zustand.
+	is(main::MQTT2_DISCOVERY_SetExtensions($main::defs{$target}, '', $target, 'on'),
+		undef, 'der Schaltbefehl meldet keinen Fehler');
+	is($main::defs{$target}{READINGS}{state}{VAL}, 'set_on',
+		'state zeigt den Uebergang');
 };
 
 subtest 'Fremde Devices bleiben unveraendert' => sub {

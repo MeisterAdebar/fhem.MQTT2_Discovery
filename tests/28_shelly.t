@@ -225,7 +225,7 @@ subtest 'SERVER und CLIENT funktionieren bis zu den echten Runtime-Bindings' => 
 	for my $type (qw(MQTT2_SERVER MQTT2_CLIENT)) {
 		my ($hash) = setup($type);
 		discover($hash, 'haus/licht');
-		my $target = 'Werkstatt';
+		my $target = 'Werkstatt_Switch_aabbccddeeff';
 		ok($main::defs{$target}, "$type: Zieldevice angelegt");
 		is(reading_value('discovery', 'discoveredDevices'), 1, 'alle Komponenten gehoeren zu einem Device');
 		is(reading_value('discovery', 'lastAdapter'), 'shelly', 'native Herkunft ist sichtbar');
@@ -278,7 +278,8 @@ subtest 'Queue trennt Announcements und wartet mit Initialstatus auf den Apply' 
 	is(scalar(@published), 2, 'beide Geraete werden separat abgefragt');
 	($hash) = setup('MQTT2_SERVER', 1);
 	discover($hash, $id);
-	ok(attr_value('Werkstatt', 'readingList'), 'Reading-Bindings nach Queue-Abschluss vorhanden');
+	ok(attr_value('Werkstatt_Switch_aabbccddeeff', 'readingList'),
+		'Reading-Bindings nach Queue-Abschluss vorhanden');
 	is(scalar(@published), 1, 'Initialstatus erst nach Queue-Abschluss angefordert');
 	dispatch_message('mqtt', 'first', "$id/events/rpc", encode_json({ src => $id, params => { 'switch:0' => { output => JSON::PP::false } } }));
 	is(scalar(@timers), 0, 'laufende Telemetrie belegt keinen weiteren Queue-Timer');
