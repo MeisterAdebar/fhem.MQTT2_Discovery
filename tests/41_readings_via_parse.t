@@ -88,7 +88,7 @@ sub readings_for {
 
 subtest 'Ohne readingList schreibt das Modul die Readings selbst' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{readingsViaParse} = 1;
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=parse reachability=full';
 	discover($hash);
 	is(attr_value($target, 'readingList'), undef, 'am Zielgeraet entsteht kein readingList-Attribut');
 	is($main::modules{MQTT2_DISCOVERY}{Match}, '.*', 'das Modul sieht dafuer alle Nachrichten');
@@ -108,8 +108,9 @@ subtest 'Ohne readingList schreibt das Modul die Readings selbst' => sub {
 	is($main::defs{$target}{READINGS}{uptime}{VAL}, '5', 'auch danach entstehen Readings');
 };
 
-subtest 'Ohne das Attribut bleibt alles beim Alten' => sub {
+subtest 'Mit readings=list bleibt alles beim Alten' => sub {
 	my $hash = setup();
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=list reachability=full';
 	my $reading_list = discover($hash);
 	like($reading_list, qr{\$DEVICETOPIC/status/switch_0:}, 'die readingList entsteht wie bisher');
 	isnt($main::modules{MQTT2_DISCOVERY}{Match}, '.*', 'der enge Match bleibt erhalten');
@@ -117,7 +118,7 @@ subtest 'Ohne das Attribut bleibt alles beim Alten' => sub {
 
 subtest 'der Index schlaegt Topics nach, statt sie zu vergleichen' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{readingsViaParse} = 1;
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=parse reachability=full';
 	discover($hash);
 	my $index = FHEM::MQTT2_DISCOVERY::parse_index($hash);
 
@@ -140,7 +141,7 @@ subtest 'der Index schlaegt Topics nach, statt sie zu vergleichen' => sub {
 
 subtest 'die geschriebenen Geraete kommen aus ParseFn zurueck' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{readingsViaParse} = 1;
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=parse reachability=full';
 	discover($hash);
 
 	# Waehrend einer ParseFn unterdrueckt fhem.pl den Trigger von
@@ -163,7 +164,7 @@ subtest 'auch Sammel- und Sequenzzeilen wandern mit' => sub {
 	my ($hash, $error) = define_discovery('discovery', 'mqtt');
 	die $error if $error;
 	FHEM::MQTT2_DISCOVERY::activate($hash);
-	$main::attr{discovery}{keys} = 'readings=parse';
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=parse reachability=full';
 	dispatch_message('mqtt', 'client1', 'tasmota/discovery/AABBCCDDEEFF/config',
 		'{"dn":"Keller","fn":["Pumpe",null],"hn":"keller","mac":"AABBCCDDEEFF","md":"Generic",'
 			. '"ofln":"Offline","onln":"Online","state":["OFF","ON"],"sw":"15.6.0",'

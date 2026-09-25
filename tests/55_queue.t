@@ -490,7 +490,7 @@ subtest 'retained Delete wird ebenfalls portioniert' => sub {
 	is(reading_value('discovery', 'discoveredEntities'), 0, 'Registry ist nach Delete leer');
 };
 
-subtest 'Lifecycle gleicht den bisherigen Availability-Default aus der Registry ab' => sub {
+subtest 'Lifecycle gleicht einen veralteten Availability-Namen aus der Registry ab' => sub {
 	my ($hash, $io) = setup();
 	my $topic = 'homeassistant/sensor/node/temp/config';
 	my $payload = '{"uniq_id":"node_temp","stat_t":"node/state",'
@@ -498,37 +498,31 @@ subtest 'Lifecycle gleicht den bisherigen Availability-Default aus der Registry 
 		. '"dev":{"ids":["node"],"name":"Node"}}';
 	FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message($topic, $payload));
 	run_next_timer() while @TIMERS;
+
+	# Ein Stand aus einer Fassung, die das Reading anders benannt hat.
 	my ($record) = values %{ $hash->{helper}{registry}{devices} };
 	$record->{availability_reading} = 'deviceAvailability';
 	$record->{owned_availability_reading} = 'deviceAvailability';
 	$main::defs{MQTT2_Node}{READINGS}{deviceAvailability} = { VAL => 'unknown' };
 	delete $main::defs{MQTT2_Node}{READINGS}{availability};
 	ok(FHEM::MQTT2_DISCOVERY::registry_rendering_outdated($hash),
-		'der gespeicherte bisherige Default wird als veraltet erkannt');
-	$main::attr{MQTT2_Node}{readingList} .= "\nmanual/default:.* availability";
+		'der gespeicherte Name wird als veraltet erkannt');
 
-	FHEM::MQTT2_DISCOVERY::Notify($hash, {
-		NAME => 'global', CHANGED => ['INITIALIZED'],
-	});
-	is(scalar(@TIMERS), 0,
-		'eine manuelle Belegung blockiert auch den automatischen Lifecycle-Abgleich');
-	like(reading_value('discovery', 'lastWarning'), qr/MQTT2_Node/,
-		'die Lifecycle-Warnung nennt das blockierende Zieldevice');
-	$main::attr{MQTT2_Node}{readingList} = join("\n", grep {
-		$_ ne 'manual/default:.* availability'
-	} split /\n/, $main::attr{MQTT2_Node}{readingList});
 	FHEM::MQTT2_DISCOVERY::Notify($hash, {
 		NAME => 'global', CHANGED => ['INITIALIZED'],
 	});
 	is(scalar(@TIMERS), 1,
 		'das Lifecycle-Ereignis plant genau eine registry-basierte Neuerzeugung');
 	run_next_timer() while @TIMERS;
+
+	# Die Quelle dieses Geraets ist ein fremdes Availability-Topic, kein
+	# angemeldeter letzter Wille; der Name lautet deshalb availability.
 	is(reading_value('MQTT2_Node', 'availability'), 'unknown',
-		'der aktuelle Zustand steht nach dem Abgleich unter dem neuen Default');
+		'der aktuelle Zustand steht nach dem Abgleich unter dem abgeleiteten Namen');
 	ok(!exists($main::defs{MQTT2_Node}{READINGS}{deviceAvailability}),
-		'das nachweislich modulverwaltete alte Defaultreading wurde entfernt');
+		'das nachweislich modulverwaltete alte Reading wurde entfernt');
 	ok(!FHEM::MQTT2_DISCOVERY::registry_rendering_outdated($hash),
-		'der aktualisierte Registry-Stand entspricht dem neuen Default');
+		'der aktualisierte Registry-Stand passt');
 };
 
 subtest 'Renderattribute werden registryweit und ohne neue Discovery angewendet' => sub {
@@ -548,93 +542,29 @@ subtest 'Renderattribute werden registryweit und ohne neue Discovery angewendet'
 		],
 	);
 
-	# Beide Ziele werden einmalig aus Discovery aufgebaut; alle folgenden
-	# Umbenennungen muessen ausschliesslich aus der Registry erfolgen.
+	# Beide Ziele werden einmalig aus Discovery aufgebaut; die folgende
+	# Attributaenderung muss ausschliesslich aus der Registry rendern.
 	for my $discovery (@discoveries) {
 		FHEM::MQTT2_DISCOVERY::Parse($io, mqtt_message(@$discovery));
 	}
 
 	run_next_timer() while @TIMERS;
 	my @targets = qw(MQTT2_Node MQTT2_Other);
-	is([map { reading_value($_, 'availability') } @targets], ['unknown', 'unknown'],
-		'der Ausgangszustand verwendet auf beiden Zielen das Standardreading');
+	ok(scalar(grep { defined($main::attr{$_}{readingList}) } @targets) == 2,
+		'beide Ziele haben ihre erzeugten Zeilen');
 
-	is(FHEM::MQTT2_DISCOVERY::Attr(
-			'set', 'discovery', 'availabilityReading', 'MQTT2DiscoveryAvailability',
-		), undef, 'ein sicherer globaler Availability-Name wird akzeptiert');
-	$main::attr{discovery}{availabilityReading} = 'MQTT2DiscoveryAvailability';
+	# extraJsonReadings aendert die erzeugten Zeilen aller verwalteten Devices.
+	is(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'extraJsonReadings', 'ignore'),
+		undef, 'das Attribut wird angenommen');
+	$main::attr{discovery}{extraJsonReadings} = 'ignore';
 	is(scalar(@TIMERS), 1, 'die Attributaenderung plant genau einen Queue-Worker');
 	run_next_timer() while @TIMERS;
 
 	for my $target (@targets) {
-		is(reading_value($target, 'MQTT2DiscoveryAvailability'), 'unknown',
-			"$target verwendet den global festgelegten Availability-Namen");
-		ok(!exists($main::defs{$target}{READINGS}{availability}),
-			"$target enthaelt das alte modulverwaltete Reading nicht mehr");
+		ok(defined($main::attr{$target}{readingList}),
+			"$target wurde ohne neue Discovery neu gerendert");
 	}
-
-	my $registry = decode_json(reading_value('discovery', '.registry'));
-
-	for my $record (values %{ $registry->{devices} }) {
-		is($record->{availability_reading}, 'MQTT2DiscoveryAvailability',
-			"Registry-Stand fuer $record->{name} kennt den wirksamen Namen");
-		my @availability_descriptors = grep {
-			($_->{operation} || '') eq 'availability'
-				|| ref($_->{configuration}{availability}) eq 'HASH'
-		} values %{ $record->{runtime_refs} || {} };
-		ok(@availability_descriptors, "$record->{name} besitzt eine Availability-Runtime");
-		is([map {
-			($_->{operation} || '') eq 'availability'
-				? $_->{configuration}{reading}
-				: $_->{configuration}{availability}{reading}
-		} @availability_descriptors],
-			[('MQTT2DiscoveryAvailability') x scalar(@availability_descriptors)],
-			"$record->{name} transportiert den Namen in allen Runtime-Referenzen");
-	}
-
-	# Ein manueller Anspruch auf einem einzigen Ziel verhindert die globale
-	# Umstellung, bevor irgendein Device teilweise geaendert werden kann.
-	$main::attr{MQTT2_Other}{readingList} .= "\nmanual/topic:.* ReservedAvailability";
-	like(FHEM::MQTT2_DISCOVERY::Attr(
-			'set', 'discovery', 'availabilityReading', 'ReservedAvailability',
-		), qr/MQTT2_Other/, 'manueller Konflikt nennt das blockierende Zieldevice');
-	is(scalar(@TIMERS), 0, 'abgelehnte globale Umstellung plant keine Teilaktualisierung');
-
-	is(FHEM::MQTT2_DISCOVERY::Attr(
-			'set', 'discovery', 'availabilityReading', 'RenamedAvailability',
-		), undef, 'der Availability-Name kann spaeter erneut geaendert werden');
-	$main::attr{discovery}{availabilityReading} = 'RenamedAvailability';
-	run_next_timer() while @TIMERS;
-
-	for my $target (@targets) {
-		is(reading_value($target, 'RenamedAvailability'), 'unknown',
-			"$target verwendet den erneut geaenderten Namen");
-		ok(!exists($main::defs{$target}{READINGS}{MQTT2DiscoveryAvailability}),
-			"$target hat auch den ersten benutzerdefinierten Namen entfernt");
-	}
-
-	$main::attr{MQTT2_Other}{readingList} .= "\nmanual/default:.* availability";
-	like(FHEM::MQTT2_DISCOVERY::Attr(
-			'del', 'discovery', 'availabilityReading',
-		), qr/MQTT2_Other/,
-		'auch die Rueckkehr zum Default wird bei manueller Belegung global abgelehnt');
-	is(scalar(@TIMERS), 0, 'abgelehntes Loeschen plant keine Teilaktualisierung');
-	$main::attr{MQTT2_Other}{readingList} = join("\n", grep {
-		$_ ne 'manual/default:.* availability'
-	} split /\n/, $main::attr{MQTT2_Other}{readingList});
-
-	is(FHEM::MQTT2_DISCOVERY::Attr(
-			'del', 'discovery', 'availabilityReading',
-		), undef, 'Loeschen des Attributes wird akzeptiert');
-	delete $main::attr{discovery}{availabilityReading};
-	run_next_timer() while @TIMERS;
-
-	for my $target (@targets) {
-		is(reading_value($target, 'availability'), 'unknown',
-			"$target kehrt zum Standardnamen zurueck");
-		ok(!exists($main::defs{$target}{READINGS}{RenamedAvailability}),
-			"$target entfernt den zuletzt modulverwalteten Namen");
-	}
+	is(scalar(@TIMERS), 0, 'danach steht keine weitere Arbeit an');
 };
 
 subtest 'deactivate verwirft noch nicht verarbeitete Arbeit' => sub {

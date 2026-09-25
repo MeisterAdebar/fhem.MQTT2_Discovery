@@ -101,15 +101,19 @@ sub readings_for {
 	return \%updates;
 }
 
-subtest 'fhemConventions schaltet state, on und off frei' => sub {
+subtest 'style=fhem schaltet state, on und off frei' => sub {
 	my $hash = setup();
+
+	# Ohne die Konvention: der Schluessel wird dafuer ausdruecklich gesetzt, weil
+	# die Vorgabe des Moduls inzwischen fhem ist.
+	$main::attr{discovery}{keys} .= ' style=raw';
 	discover($hash, status => 1);
 	is(readings_for("$id/status/switch_0", { output => JSON::PP::true })->{switch_0}, 'true',
 		'ohne das Attribut bleibt alles unveraendert');
 	like(attr_value($target, 'setList'), qr/^switch_0:on,off /m, 'der Setter behaelt seinen Namen');
 
 	$hash = setup();
-	$main::attr{discovery}{fhemConventions} = 1;
+	$main::attr{discovery}{keys} = 'style=fhem sets=list readings=list reachability=full';
 	discover($hash, status => 1);
 	my $values = readings_for("$id/status/switch_0", { output => JSON::PP::true });
 	is($values->{state}, 'on', 'der Zustand landet als on in state');

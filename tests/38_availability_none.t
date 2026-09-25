@@ -101,20 +101,22 @@ sub readings_for {
 	return \%updates;
 }
 
-subtest 'availabilityReading none unterdrueckt das verdichtete Reading' => sub {
+subtest 'mit source bleibt die Quelle sichtbar' => sub {
 	my $hash = setup();
-	# Mit none bleibt nur die Rohquelle uebrig.
-	$hash = setup();
-	$main::attr{discovery}{availabilityReading} = 'none';
+
+	# Ohne Verdichtung traegt die Quelle selbst den sichtbaren Namen; mit
+	# combined gehoert er der Verdichtung, die zusaetzlich die Brokerverbindung
+	# beruecksichtigt.
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=list reachability=sources';
 	discover($hash, status => 1);
 	my $values = readings_for("$id/online", 'true');
-	is($values->{lwt}, 'online', 'lwt bleibt erhalten');
-	ok(!exists($values->{availability}), 'availabilityReading none unterdrueckt das verdichtete Reading');
+	is($values->{lwt}, 'online', 'die Quelle heisst lwt');
+	ok(!exists($values->{availability}), 'ein verdichtetes Reading entsteht nicht');
 };
 
 subtest 'der Wechsel von source auf none wird bemerkt und raeumt auf' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{keys} = 'availability=source';
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=list reachability=sources';
 	discover($hash, status => 1);
 	my ($record) = grep {
 		ref($_) eq 'HASH' && ($_->{name} // '') eq $target
@@ -132,7 +134,7 @@ subtest 'der Wechsel von source auf none wird bemerkt und raeumt auf' => sub {
 	# Erkannt wird der Wechsel deshalb nur ueber die mitgefuehrte Stufe.
 	ok(!FHEM::MQTT2_DISCOVERY::registry_rendering_outdated($hash),
 		'vor der Aenderung ist der Stand aktuell');
-	$main::attr{discovery}{keys} = 'availability=none';
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=list reachability=none';
 	ok(FHEM::MQTT2_DISCOVERY::registry_rendering_outdated($hash),
 		'der Wechsel auf none faellt auf');
 

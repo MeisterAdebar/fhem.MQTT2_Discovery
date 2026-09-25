@@ -248,7 +248,6 @@ subtest 'Alte Sonos-Discovery funktioniert ueber SERVER und CLIENT bis zur Laufz
 	# Beide Transportarten muessen auch mit einem eigenen HA-Discovery-Prefix funktionieren.
 	for my $io_type (qw(MQTT2_SERVER MQTT2_CLIENT)) {
 		my $hash = setup(type => $io_type, prefixes => 'haus/ha,sonos2mqtt');
-		$main::attr{discovery}{availabilityReading} = 'sonosStatus';
 		my $uuid = 'RINCON_804AF28451D201400';
 		my $legacy_topic = "haus/ha/music_player/$uuid/sonos/config";
 		my $current_topic = "sonos2mqtt/discovery/sonos/$uuid";
@@ -281,8 +280,8 @@ subtest 'Alte Sonos-Discovery funktioniert ueber SERVER und CLIENT bis zur Laufz
 		# Die alte payload_available-Angabe fuehrt zur selben dreistufigen Bridge-Auswertung.
 		for my $case ([0, 'offline'], [1, 'offline'], [2, 'online']) {
 			my $updates = FHEM::MQTT2_DISCOVERY::runtimeRef($target, $availability_ref, "$case->[0]");
-			is($updates->{sonosStatus}, $case->[1],
-				'Availability wird unter dem konfigurierten Readingnamen ausgewertet');
+			is($updates->{lwt}, $case->[1],
+				'sonos2mqtt meldet seinen letzten Willen unter lwt');
 		}
 
 		dispatch_message('mqtt', 'sonosbridge', $legacy_topic, $payload);

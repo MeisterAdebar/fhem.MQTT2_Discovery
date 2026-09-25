@@ -111,7 +111,7 @@ subtest 'Der Geraetestamm entsteht aus den Topics des Geraets' => sub {
 	like($reading_list, qr/^mqtt2_discovery\//m, 'die eigene Abfrageantwort behaelt ihr volles Topic');
 
 	# Die Auswertung muss unveraendert funktionieren, auch ueber den Stamm.
-	is(readings_for("$id/online", 'true')->{availability}, 'online',
+	is(readings_for("$id/online", 'true')->{lwt}, 'online',
 		'die Zeile mit Stamm wertet weiterhin aus');
 };
 

@@ -60,14 +60,14 @@ sub reading_names {
 
 subtest 'Batterie folgt den drei Namen der Richtlinie' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{keys} = 'style=fhem';
+	$main::attr{discovery}{keys} = 'style=fhem sets=list readings=list reachability=full';
 	announce('sensor', 'battery',
 		'{"name":"battery","uniq_id":"n1_bat","stat_t":"n1/bat","dev_cla":"battery","unit_of_meas":"%",'
 			. device() . '}');
 	is(reading_names(), ['batteryPercent'], 'Prozentwert heisst batteryPercent');
 
 	$hash = setup();
-	$main::attr{discovery}{keys} = 'style=fhem';
+	$main::attr{discovery}{keys} = 'style=fhem sets=list readings=list reachability=full';
 	announce('sensor', 'battery_voltage',
 		'{"name":"battery_voltage","uniq_id":"n1_bv","stat_t":"n1/bv","dev_cla":"voltage","unit_of_meas":"V",'
 			. device() . '}');
@@ -83,7 +83,7 @@ subtest 'Batterie folgt den drei Namen der Richtlinie' => sub {
 
 subtest 'binaere Batterie meldet ok und low' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{keys} = 'style=fhem';
+	$main::attr{discovery}{keys} = 'style=fhem sets=list readings=list reachability=full';
 	announce('binary_sensor', 'battery',
 		'{"name":"battery","uniq_id":"n1_bl","stat_t":"n1/bl","dev_cla":"battery",'
 			. '"pl_on":"ON","pl_off":"OFF",' . device() . '}');
@@ -98,7 +98,7 @@ subtest 'binaere Batterie meldet ok und low' => sub {
 
 subtest 'Thermostat und Komponentenpraefix' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{keys} = 'style=fhem';
+	$main::attr{discovery}{keys} = 'style=fhem sets=list readings=list reachability=full';
 	announce('climate', 'thermostat',
 		'{"name":"thermostat","uniq_id":"n1_c","temp_cmd_t":"n1/set","temp_stat_t":"n1/target",'
 			. '"curr_temp_t":"n1/cur",' . device() . '}');
@@ -117,7 +117,7 @@ subtest 'Thermostat und Komponentenpraefix' => sub {
 
 subtest 'Tasmota meldet seinen Schaltzustand nach state' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{keys} = 'style=fhem sets=hook readings=parse';
+	$main::attr{discovery}{keys} = 'style=fhem sets=hook readings=parse reachability=full';
 	dispatch_message('mqtt', 'client1', 'tasmota/discovery/AABBCCDDEEFF/config',
 		'{"ip":"192.0.2.10","dn":"Workshop Plug","fn":["Soldering Iron",null],'
 			. '"hn":"workshop-plug","mac":"AABBCCDDEEFF","md":"Generic","ofln":"Offline",'

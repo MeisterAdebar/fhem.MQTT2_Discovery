@@ -1,6 +1,22 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 8bbcb16c33304304568df9c93af529f58d7169cf43e3d3e17e253d83fbe1fddb
+# Msg-SHA256: 46b67465bc950e1c0387ca8fc2460ad70bc37570492acc053e92baaaf2feae87
+- change: MQTT2_DISCOVERY: Dialoge, ruhiges Log, Vorgaben und der Schluessel
+  reachability
+  - Die Readingauswahl und die Schluessel eines Geraets werden in einem
+    Dialogfenster abgefragt. Uebernommen wird mit dem OK des Fensters, die
+    Auswahlfelder sind gleich breit, und der Wert steht im Feld, die Vorgabe
+    daneben.
+  - Das Attribut mqttDiscoveryKeys laesst sich auch von Hand setzen; die
+    Pruefung ist dieselbe wie beim Setter.
+  - Die Abfragen der Oberflaeche fluten das Log nicht mehr.
+  - Die Vorgaben sind style=fhem, sets=hook, readings=parse und
+    reachability=sources.
+  - Die drei alten Einzelattribute entfallen; was sie schalteten, steht im
+    Schluesselraum.
+  - Der Schluessel heisst reachability mit den Stufen full, sources und none.
+    Das sichtbare Reading heisst lwt, wenn es der letzte Wille ist, und
+    availability nur fuer eine errechnete Erreichbarkeit.
 - change: MQTT2_DISCOVERY: Sammelzeilen in der eigenen Auswertung
   - Die Sammelzeilen eines Geraets werden in der eigenen Auswertung
     verarbeitet. Am Zielgeraet bleibt dafuer keine readingList stehen.

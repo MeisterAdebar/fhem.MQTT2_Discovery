@@ -94,24 +94,26 @@ subtest 'Das Modul traegt sich als Callback ein' => sub {
 		'in %modules wird nichts eingetragen');
 };
 
-subtest 'Mit setsViaHook entsteht kein setList-Attribut' => sub {
+subtest 'Mit sets=hook entsteht kein setList-Attribut' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{setsViaHook} = 1;
+	$main::attr{discovery}{keys} = 'style=raw sets=hook readings=list reachability=full';
 	discover($hash);
 	is(attr_value($target, 'setList'), undef, 'das Zielgeraet hat kein setList-Attribut');
 	my ($record) = values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} };
 	is([map { $_->{name} } @{ $record->{hook_sets} }], ['switch_0'],
 		'die Befehle liegen strukturiert in der Registry');
 
-	# Ohne das Attribut bleibt das Attribut wie bisher erhalten.
+	# Ohne das Attribut bleibt die setList erhalten; der Schluessel wird dafuer
+	# ausdruecklich gesetzt, weil die Vorgabe des Moduls inzwischen hook ist.
 	$hash = setup();
+	$main::attr{discovery}{keys} .= ' sets=list';
 	discover($hash);
 	like(attr_value($target, 'setList'), qr/^switch_0:on,off /m, 'ohne Attribut bleibt die setList');
 };
 
 subtest 'Der Hook bietet die Befehle an und fuehrt sie aus' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{setsViaHook} = 1;
+	$main::attr{discovery}{keys} = 'style=raw sets=hook readings=list reachability=full';
 	discover($hash);
 	@published = ();
 
@@ -148,7 +150,7 @@ subtest 'Mit der FHEM-Konvention steht bis zur Rueckmeldung set_' => sub {
 
 subtest 'Fremde Devices bleiben unveraendert' => sub {
 	my $hash = setup();
-	$main::attr{discovery}{setsViaHook} = 1;
+	$main::attr{discovery}{keys} = 'style=raw sets=hook readings=list reachability=full';
 	discover($hash);
 	@fallback = ();
 	$main::defs{fremd} = { NAME => 'fremd', TYPE => 'MQTT2_DEVICE', READINGS => {} };

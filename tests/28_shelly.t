@@ -245,9 +245,9 @@ subtest 'SERVER und CLIENT funktionieren bis zu den echten Runtime-Bindings' => 
 		my $updates = readings_for($target, "$initial->{src}/rpc", { src => $id, result => status() });
 		is($updates->{switch_0}, 'true', 'Initialstatus des Relais ist lesbar');
 		is($updates->{input_0}, 'false', 'Initialstatus des Eingangs ist lesbar');
-		is($updates->{availability}, 'online', 'erfolgreiche Statusantwort bestaetigt Erreichbarkeit');
+		is($updates->{lwt}, 'online', 'erfolgreiche Statusantwort bestaetigt Erreichbarkeit');
 		my $offline = readings_for($target, 'haus/licht/online', JSON::PP::false);
-		is($offline->{availability}, 'offline', 'LWT setzt trotz frueherer RPC-Antwort verlaesslich offline');
+		is($offline->{lwt}, 'offline', 'LWT setzt trotz frueherer RPC-Antwort verlaesslich offline');
 		my $rpc = readings_for($target, 'haus/licht/events/rpc', { src => $id, method => 'NotifyStatus', params => { 'switch:0' => { output => JSON::PP::false } } });
 		is($rpc->{switch_0}, 'false', 'RPC-Aenderung aktualisiert das Relais');
 		ok(!exists($rpc->{input_0}), 'fehlender Eingang wird bei Teilstatus nicht ueberschrieben');

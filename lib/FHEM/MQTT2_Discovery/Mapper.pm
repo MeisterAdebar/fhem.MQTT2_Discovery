@@ -316,7 +316,7 @@ sub _command_set_name {
 sub render_entries { return MQTT2_Discovery::Mapper::Renderer::render_entries(@_); }
 
 
-# Schaltbar ueber das Attribut fhemConventions am Discovery-Device; ohne das
+# Schaltbar ueber den Schluessel style am Discovery-Device; ohne ihn
 # Attribut bleiben Readingnamen und -werte unveraendert.
 our $FHEM_CONVENTIONS = 0;
 

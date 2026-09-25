@@ -35,8 +35,6 @@ subtest 'Initialize und Define' => sub {
 	like($module->{AttrList}, qr/(?:^| )deviceNamePrefix(?: |$)/, 'optionaler Device-Namensprefix ist registriert');
 	like($module->{AttrList}, qr/(?:^| )extraJsonReadings:include,ignore(?: |$)/,
 		'Modus fuer zusaetzliche JSON-Readings ist registriert');
-	like($module->{AttrList}, qr/(?:^| )availabilityReading(?: |$)/,
-		'globaler Availability-Readingname ist registriert');
 
 	my ($missing, $missing_error) = define_discovery('bad', 'missing');
 	like($missing_error, qr/existiert nicht/, 'fehlendes IODev wird abgelehnt');
@@ -278,7 +276,7 @@ subtest 'Kontextbezogene Commandref-Hilfe' => sub {
 		MQTT2_DISCOVERY-attr-discoveryPrefixes MQTT2_DISCOVERY-attr-deviceNamePrefix
 		MQTT2_DISCOVERY-attr-existingDevice MQTT2_DISCOVERY-attr-autoCreate
 		MQTT2_DISCOVERY-attr-autoDelete MQTT2_DISCOVERY-attr-createReadings
-		MQTT2_DISCOVERY-attr-extraJsonReadings MQTT2_DISCOVERY-attr-availabilityReading
+		MQTT2_DISCOVERY-attr-extraJsonReadings MQTT2_DISCOVERY-attr-keys
 		MQTT2_DISCOVERY-attr-disable
 	)) {
 		like($commandref, qr/id="\Q$anchor\E"/, "$anchor ist dokumentiert");
@@ -298,15 +296,6 @@ subtest 'Attributvalidierung' => sub {
 		'extraJsonReadings=ignore ist gueltig');
 	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'extraJsonReadings', 'strict'), qr/include oder ignore/,
 		'extraJsonReadings akzeptiert nur die beiden dokumentierten Modi');
-	is(FHEM::MQTT2_DISCOVERY::Attr(
-			'set', 'discovery', 'availabilityReading', 'MQTT2DiscoveryAvailability',
-		), undef, 'ein sicherer Availability-Readingname ist gueltig');
-	like(FHEM::MQTT2_DISCOVERY::Attr(
-			'set', 'discovery', 'availabilityReading', 'bad reading',
-		), qr/darf nur/, 'Leerzeichen im Availability-Readingnamen werden abgelehnt');
-	like(FHEM::MQTT2_DISCOVERY::Attr(
-			'set', 'discovery', 'availabilityReading', '2bad',
-		), qr/beginnen/, 'ungueltiger Anfang im Availability-Readingnamen wird abgelehnt');
 	like(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'autoDelete', 'yes'), qr/0 oder 1/, 'Boolean wird validiert');
 	is(FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'createReadings', '1'), undef,
 		'createReadings=1 ist gueltig');
@@ -1249,7 +1238,15 @@ subtest 'Logging folgt verbose 1 bis 5 und schwärzt Payloads' => sub {
 		is(FHEM::MQTT2_DISCOVERY::process($hash, 'client', 'homeassistant/sensor/node/temp/config', $payload),
 			'consumed', "verbose $verbose verarbeitet Discovery");
 		ok(!(grep { $_->[1] > $verbose } @{ log_entries() }), "verbose $verbose unterdrueckt hoehere Stufen");
-		ok((grep { $_->[1] == $verbose } @{ log_entries() }), "verbose $verbose erzeugt Meldungen seiner Stufe");
+
+		# Stufe 3 ist in FHEM den ausgefuehrten Befehlen vorbehalten. Eine
+		# eingehende Discovery-Nachricht ist keiner; sie meldet auf Stufe 2, was
+		# sie angelegt hat, und erklaert sich ab Stufe 4.
+		my $expected = $verbose == 3 ? 2 : $verbose;
+		ok((grep { $_->[1] == $expected } @{ log_entries() }),
+			"verbose $verbose erzeugt Meldungen der erwarteten Stufe");
+		ok(!(grep { $_->[2] =~ /processing topic=/ } @{ log_entries() }),
+			'die Verarbeitung erklaert sich erst ab Stufe 4') if $verbose < 4;
 	}
 	my $log = join("\n", map { $_->[2] } @{ log_entries() });
 	like($log, qr/discovery payload=/, 'verbose 5 protokolliert den bereinigten Payload');

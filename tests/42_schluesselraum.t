@@ -113,17 +113,11 @@ subtest 'AttrFn prueft beide Attribute' => sub {
 	like(FHEM::MQTT2_DISCOVERY::Attr('set', $target, 'mqttDiscoveryKeys', 'shelly:readings=parse'),
 		qr/Familie ist hier nicht erlaubt/, 'am Geraet ohne Familie');
 
-	# Von Hand gesetzt wird das Attribut abgewiesen; der Anwender soll den
-	# Set-Befehl nehmen, der die Schreibweise selbst erzeugt.
-	like(FHEM::MQTT2_DISCOVERY::Attr('set', $target, 'mqttDiscoveryKeys', 'readings=parse'),
-		qr/deviceKey/, 'ohne den Set-Befehl bleibt das Attribut zu');
-	$hash->{helper}{own_device_attribute} = 1;
+	# Von Hand gesetzt wird es angenommen; geprueft wird nur die Schreibweise.
 	is(FHEM::MQTT2_DISCOVERY::Attr('set', $target, 'mqttDiscoveryKeys', 'readings=parse'), undef,
-		'mit dem Vermerk des Moduls geht es durch');
-	delete $hash->{helper}{own_device_attribute};
+		'der Anwender darf das Attribut selbst setzen');
 
-	# Beim Laden der Konfiguration gibt es kein Kommando, das den Vermerk setzen
-	# koennte; gespeicherte Werte muessen trotzdem zurueckkommen.
+	# Auch beim Laden der Konfiguration, wo es kein Kommando gibt.
 	local $main::init_done = 0;
 	is(FHEM::MQTT2_DISCOVERY::Attr('set', $target, 'mqttDiscoveryKeys', 'readings=parse'), undef,
 		'beim Start kommt der gespeicherte Wert zurueck');
@@ -157,45 +151,85 @@ subtest 'set deviceKey fuehrt den Anwender' => sub {
 	is(attr_value($target, 'mqttDiscoveryKeys'), undef, 'das leere Attribut entfaellt');
 };
 
+subtest 'ohne Zuweisung fragt der Dialog die Schluessel ab' => sub {
+	my $hash = setup();
+	discover($hash);
+
+	# Die Set-Syntax von FHEM kennt nur ein Argument mit Widget; das ist das
+	# Geraet. Die Schluessel kommen deshalb aus dem Dialog.
+	$hash->{CL} = { TYPE => 'FHEMWEB' };
+	my $dialog = FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deviceKey', $target);
+	like($dialog, qr/^<html>/, 'FHEMWEB bekommt ein Formular');
+	like($dialog, qr/name='style'/, 'jeder Schluessel hat ein Feld');
+	like($dialog, qr{<option value=''[^>]*>raw \(default\)</option>},
+		'der leere Eintrag nennt den Wert und dass er der default ist');
+	unlike($dialog, qr{<option value='raw'}, 'derselbe Wert steht nicht zweimal in der Liste');
+	like($dialog, qr{<option value='fhem'}, 'der abweichende Wert bleibt waehlbar');
+	unlike($dialog, qr/name='hide'/,
+		'hide fehlt: ein einzelnes Geraet waehlt seine Readings im anderen Dialog ab');
+
+	# Ein Skript bekommt die Schreibweise genannt.
+	delete $hash->{CL};
+	like(FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deviceKey', $target),
+		qr/schluessel.*wert/i, 'ohne FHEMWEB nennt der Befehl die Syntax');
+
+	# Der Dialog schreibt ueber denselben Befehl; sein Reading zeigt den Stand.
+	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'deviceKey', $target, 'style=fhem');
+	is(reading_value('discovery', 'deviceKey'), "$target: style=fhem",
+		'das Reading nennt die gesetzten Schluessel');
+
+	# Von Hand gesetzt wird das Attribut nicht ueber den Set-Befehl geschrieben;
+	# das Reading darf trotzdem keinen ueberholten Stand zeigen.
+	$main::attr{$target}{mqttDiscoveryKeys} = 'readings=list';
+	$main::defs{global} = { NAME => 'global',
+		CHANGED => ["ATTR $target mqttDiscoveryKeys readings=list"] };
+	FHEM::MQTT2_DISCOVERY::Notify($hash, $main::defs{global});
+	is(reading_value('discovery', 'deviceKey'), "$target: readings=list",
+		'auch ein von Hand gesetztes Attribut steht im Reading');
+};
+
 subtest 'Vorgabe, global, Familie und Geraet in dieser Reihenfolge' => sub {
 	my $hash = setup();
 	discover($hash);
 	my $record = record($hash);
 	is($record->{adapter}, 'shelly', 'der Datensatz kennt seine Familie');
-	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'ohne Angabe gilt die Vorgabe');
 
-	$main::attr{discovery}{keys} = 'sets=hook';
-	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'hook', 'global schlaegt die Vorgabe');
+	# Die Vorgaben des Moduls; die uebrigen Tests setzen dafuer die Listenform.
+	delete $main::attr{discovery}{keys};
+	is([map { FHEM::MQTT2_DISCOVERY::key($hash, $record, $_) }
+			qw(style sets readings reachability)],
+		[qw(fhem hook parse sources)], 'ohne Angabe gelten die Vorgaben des Moduls');
 
-	$main::attr{discovery}{keys} = 'sets=hook shelly:sets=list';
-	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'die Familie schlaegt global');
+	$main::attr{discovery}{keys} = 'sets=list';
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'global schlaegt die Vorgabe');
 
-	$main::attr{$target}{mqttDiscoveryKeys} = 'sets=hook';
-	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'hook', 'das Geraet schlaegt die Familie');
+	$main::attr{discovery}{keys} = 'sets=list shelly:sets=hook';
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'hook', 'die Familie schlaegt global');
+
+	$main::attr{$target}{mqttDiscoveryKeys} = 'sets=list';
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'das Geraet schlaegt die Familie');
 
 	# Eine andere Familie darf das Geraet nicht betreffen.
 	delete $main::attr{$target}{mqttDiscoveryKeys};
-	$main::attr{discovery}{keys} = 'tasmota:sets=hook';
-	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'fremde Familie wirkt nicht');
+	$main::attr{discovery}{keys} = 'tasmota:sets=list';
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'hook', 'fremde Familie wirkt nicht');
 };
 
-subtest 'Die alten Einzelattribute bleiben gueltig' => sub {
+subtest 'availabilityReading none entspricht reachability=sources' => sub {
 	my $hash = setup();
 	discover($hash);
 	my $record = record($hash);
 
-	$main::attr{discovery}{setsViaHook} = 1;
-	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'hook', 'das alte Attribut wirkt weiter');
-
-	$main::attr{discovery}{keys} = 'sets=list';
-	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'sets'), 'list', 'der Schluessel hat Vorrang');
-
-	# Das alte Attribut hat immer nur die Verdichtung unterdrueckt und die
-	# Quellen stehen lassen; das heisst jetzt source.
+	# Das Attribut benennt das verdichtete Reading und hat mit none immer nur
+	# dieses unterdrueckt, die Quellen aber stehen lassen.
 	$main::attr{discovery}{availabilityReading} = 'none';
 	delete $main::attr{discovery}{keys};
-	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'availability'), 'source',
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'reachability'), 'sources',
 		'availabilityReading none entspricht source');
+
+	$main::attr{discovery}{keys} = 'reachability=none';
+	is(FHEM::MQTT2_DISCOVERY::key($hash, $record, 'reachability'), 'none',
+		'der Schluessel hat Vorrang');
 };
 
 subtest 'Die Schluessel wirken bis in die erzeugten Zeilen' => sub {
@@ -211,7 +245,7 @@ subtest 'Die Schluessel wirken bis in die erzeugten Zeilen' => sub {
 	is(attr_value($target, 'readingList'), undef, 'mit readings=parse entsteht kein readingList');
 
 	$hash = setup();
-	$main::attr{discovery}{keys} = 'style=fhem';
+	$main::attr{discovery}{keys} = 'style=fhem sets=list';
 	discover($hash);
 	like(attr_value($target, 'setList'), qr/^on:noArg /m, 'style=fhem benennt die Befehle um');
 };
@@ -220,15 +254,16 @@ subtest 'readings=parse stellt den Match weit' => sub {
 	my $hash = setup();
 	discover($hash);
 	my $eng = $main::modules{MQTT2_DISCOVERY}{Match};
-	isnt($eng, '.*', 'ohne den Schluessel bleibt der enge Match');
+	isnt($eng, '.*', 'mit readings=list bleibt der enge Match');
 
 	# Ohne weiten Match sieht ParseFn die Nutzdatentopics des Geraets nie, und
-	# die selbst geschriebenen Readings blieben aus.
+	# die selbst geschriebenen Readings blieben aus. Die Vorgabe des Moduls ist
+	# parse, der enge Match entsteht also nur mit dem Schluessel list.
 	$main::attr{discovery}{keys} = 'readings=parse';
 	FHEM::MQTT2_DISCOVERY::update_match();
 	is($main::modules{MQTT2_DISCOVERY}{Match}, '.*', 'mit dem Schluessel sieht das Modul alles');
 
-	delete $main::attr{discovery}{keys};
+	$main::attr{discovery}{keys} = 'readings=list';
 	FHEM::MQTT2_DISCOVERY::update_match();
 	is($main::modules{MQTT2_DISCOVERY}{Match}, $eng, 'danach wieder eng');
 
@@ -300,7 +335,7 @@ subtest 'hide blendet Readings aus' => sub {
 	# hide nennt dieselben Readingnamen wie der Dialog selectReadings; bleibt von
 	# einem Topic nichts uebrig, entfaellt die ganze Zeile.
 	$hash = setup();
-	$main::attr{discovery}{keys} = 'hide=rssi,uptime';
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=list reachability=full hide=rssi,uptime';
 	discover($hash);
 	my $reading_list = attr_value($target, 'readingList');
 	unlike($reading_list, qr{\Qstatus/wifi\E}, 'die ausgeblendete WLAN-Zeile entfaellt');
@@ -313,15 +348,17 @@ subtest 'availability kennt drei Stufen' => sub {
 	# combined: Quelle und Verdichtung.
 	my $hash = setup();
 	discover($hash);
-	is(record($hash)->{availability_reading}, 'availability', 'combined benennt die Verdichtung');
-	is(reading_value($target, 'availability'), 'unknown', 'und schreibt sie ans Geraet');
+	# Die Quelle ist der angemeldete letzte Wille des Geraets; die Verdichtung
+	# traegt deshalb den Namen lwt, nicht availability.
+	is(record($hash)->{availability_reading}, 'lwt', 'combined benennt die Verdichtung');
+	is(reading_value($target, 'lwt'), 'unknown', 'und schreibt sie ans Geraet');
 	like(attr_value($target, 'readingList'), qr{/online:}, 'die Quelle wird ausgewertet');
 
 	# source: nur die Quelle. Der Schluessel muss nicht nur die gerenderte Zeile
 	# unterdruecken, sondern auch den Namen, sonst schreibt das Anwenden die
 	# Verdichtung trotzdem und sie bleibt mit ihrem letzten Wert stehen.
 	$hash = setup();
-	$main::attr{discovery}{keys} = 'availability=source';
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=list reachability=sources';
 	discover($hash);
 	is(record($hash)->{availability_reading}, '', 'source benennt keine Verdichtung');
 	is(reading_value($target, 'availability'), undef, 'und schreibt sie nicht');
@@ -329,7 +366,7 @@ subtest 'availability kennt drei Stufen' => sub {
 
 	# none: gar nichts davon.
 	$hash = setup();
-	$main::attr{discovery}{keys} = 'availability=none';
+	$main::attr{discovery}{keys} = 'style=raw sets=list readings=list reachability=none';
 	discover($hash);
 	is(reading_value($target, 'availability'), undef, 'none schreibt keine Verdichtung');
 	unlike(attr_value($target, 'readingList'), qr{/online:},
@@ -385,7 +422,8 @@ subtest 'ein Reading, das niemand mehr schreibt, wird entfernt' => sub {
 
 	# Das Geraet hat gemeldet, das Reading steht.
 	$main::defs{$device}{READINGS}{POWER} = { VAL => 'ON', TIME => '2026-09-23 12:00:00' };
-	$main::attr{discovery}{keys} = 'hide=POWER';
+	$main::attr{discovery}{keys} =
+		'style=raw sets=list readings=list reachability=full hide=POWER';
 	FHEM::MQTT2_DISCOVERY::Set($hash, 'discovery', 'rebuildDevice', $device);
 	unlike(attr_value($device, 'readingList') // '', qr{^stat/tasmota_DDEEFF/POWER:}m,
 		'die Zeile ist verschwunden');
@@ -405,17 +443,17 @@ subtest 'Eine Aenderung wirkt auf bestehende Geraete' => sub {
 	# Ohne vorgemerkten Neuaufbau saehe man eine geaenderte Einstellung erst an
 	# Geraeten, die danach erstmals entdeckt werden.
 	ok(!$hash->{helper}{rerender_pending}, 'nach der Erkennung steht nichts an');
-	FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'keys', 'availability=none');
+	FHEM::MQTT2_DISCOVERY::Attr('set', 'discovery', 'keys', 'reachability=none');
 	ok($hash->{helper}{rerender_pending}, 'das Attribut merkt einen Neuaufbau vor');
 
 	# Der Geraeteschluessel baut unmittelbar nur sein eigenes Geraet neu auf.
 	$hash = setup();
 	discover($hash);
 	my $target = record($hash)->{name};
-	is(FHEM::MQTT2_DISCOVERY::key($hash, record($hash), 'availability'), 'combined',
+	is(FHEM::MQTT2_DISCOVERY::key($hash, record($hash), 'reachability'), 'full',
 		'das Geraet folgt zunaechst der Vorgabe');
 	my $error = FHEM::MQTT2_DISCOVERY::Set(
-		$hash, 'discovery', 'deviceKey', $target, 'availability=none',
+		$hash, 'discovery', 'deviceKey', $target, 'reachability=none',
 	);
 	is($error, undef, 'der Geraeteschluessel wird angenommen');
 	is(FHEM::MQTT2_DISCOVERY::availability_reading_names(record($hash)->{runtime_refs}), {},

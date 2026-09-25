@@ -145,7 +145,7 @@ sub Initialize {
 	$hash->{FW_deviceOverview} = 1;
 	# Match bleibt absichtlich prefixunabhaengig, da Prefixe je IODev konfiguriert sind.
 	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors|announce|online|events/rpc)|mqtt2_discovery/[^/\\x00]+/shelly/[a-f0-9]{16}/(?:info|config|status|components)/rpc|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
-	$hash->{AttrList} = 'discoveryPrefixes keys:textField-long shellyDiscovery:0,1 fhemConventions:0,1 setsViaHook:0,1 readingsViaParse:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
+	$hash->{AttrList} = 'discoveryPrefixes keys:textField-long shellyDiscovery:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
 	$modules{MQTT2_DISCOVERY}{defptr} ||= {};
 
 	# Ein reload ruft Initialize erneut auf und setzt den Match damit auf den
@@ -216,6 +216,10 @@ sub Define {
 	update_match();
 	reconcile_registry_rendering($hash) if $main::init_done;
 	reading($hash, 'state', state_value($hash));
+	update_selection_reading($hash, undef)
+		if !defined(ReadingsVal($hash->{NAME}, 'selectReadings', undef));
+	reading($hash, 'deviceKey', '-')
+		if !defined(ReadingsVal($hash->{NAME}, 'deviceKey', undef));
 	update_counts($hash);
 	sync_io_availability($hash) if $main::init_done;
 	log_message($hash, 2, "defined for $iodev->{TYPE} $io_name; version=$VERSION");
@@ -243,19 +247,13 @@ sub Attr {
 
 	# Ueber addToDevAttrList mit Pruefinstanz ruft FHEM diese Funktion auch fuer
 	# Attribute an fremden Devices auf; $name ist dann das Zielgeraet.
+	# Das Attribut laesst sich auch von Hand setzen; geprueft wird dabei
+	# dieselbe Schreibweise wie im Dialog. Eine Familie ist hier nicht erlaubt,
+	# die des Geraets steht ja fest. Den Neuaufbau loest das globale Ereignis
+	# aus, weil fhem.pl beim Loeschen die AttrFn des Zielgeraets ruft.
 	if ($attribute eq 'mqttDiscoveryKeys') {
 		return undef if $operation ne 'set';
-		my $error = check_keys(join(' ', @values), 0);
-		return $error if $error;
-
-		# Beim Laden der Konfiguration gibt es kein Kommando, das den Vermerk
-		# setzen koennte; gespeicherte Werte muessen zurueckkommen duerfen.
-		return undef if !$main::init_done;
-		return undef if grep {
-			ref($_) eq 'HASH' && $_->{helper}{own_device_attribute}
-		} values %{ $modules{MQTT2_DISCOVERY}{defptr} || {} };
-		return "mqttDiscoveryKeys wird ueber 'set <MQTT2_DISCOVERY> deviceKey $name "
-			. join(' ', @values) . "' gesetzt";
+		return check_keys(join(' ', @values), 0);
 	}
 
 	if ($attribute eq 'keys') {
@@ -315,13 +313,6 @@ sub Attr {
 		} elsif ($attribute eq 'extraJsonReadings') {
 			return 'extraJsonReadings muss include oder ignore sein'
 				if $value !~ /^(?:include|ignore)$/;
-		} elsif ($attribute eq 'availabilityReading' && lc($value // '') eq 'none') {
-			# none ist erlaubt und bedeutet kein sichtbares Reading.
-		} elsif ($attribute eq 'readingsViaParse') {
-			return 'readingsViaParse muss 0 oder 1 sein' if $value !~ /^[01]$/;
-		} elsif ($attribute eq 'availabilityReading') {
-			return 'availabilityReading muss mit einem Buchstaben oder Unterstrich beginnen und darf nur Buchstaben, Ziffern, Punkte, Unterstriche und Bindestriche enthalten'
-				if $value !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 		} elsif ($attribute eq 'shellyDiscovery' || $attribute eq 'autoCreate' || $attribute eq 'autoDelete'
 				|| $attribute eq 'createReadings') {
 			return "$attribute muss 0 oder 1 sein" if $value !~ /^(?:0|1)$/;
@@ -331,22 +322,9 @@ sub Attr {
 		}
 	}
 
-	# Auch das Loeschen wechselt verbindlich auf den Defaultnamen zurueck und
-	# muss deshalb denselben globalen Konfliktschutz wie das Setzen durchlaufen.
-	if ($hash && $attribute eq 'availabilityReading'
-			&& $operation =~ /^(?:set|del)$/) {
-		my $target_reading = $operation eq 'set'
-			? $value : $DEFAULT_AVAILABILITY_READING;
-		my @conflicts = availability_reading_conflicts(
-			$hash, $target_reading,
-		);
-		return 'availabilityReading wird bereits von manuellen readingList-Eintraegen verwendet: ' . join(', ', @conflicts)
-			if @conflicts;
-	}
-
 	# Diese Attribute veraendern die erzeugte readingList aller verwalteten Devices.
 	if ($operation =~ /^(?:set|del)$/
-			&& ($attribute eq 'extraJsonReadings' || $attribute eq 'availabilityReading')) {
+			&& $attribute eq 'extraJsonReadings') {
 		enqueue_rerender($hash) if $hash;
 	}
 	return undef;
@@ -357,7 +335,11 @@ sub Get {
 	my ($hash, @arguments) = @_;
 	shift @arguments;
 	my $command = shift @arguments;
-	log_message($hash, 3, 'get ' . (defined($command) ? $command : '<missing>'));
+	# Die Fragezeichenabfrage ist kein Befehl des Anwenders, sondern FHEMWEB, das
+	# die Auswahlliste holt - und zwar bei jedem Seitenaufbau und je Geraet. Sie
+	# gehoert deshalb nicht in das Log der ausgefuehrten Befehle.
+	log_message($hash, defined($command) && $command eq '?' ? 5 : 3,
+		'get ' . (defined($command) ? $command : '<missing>'));
 	log_message($hash, 4, 'get arguments=[' . join(', ', @arguments) . ']') if @arguments;
 
 	# Ohne Kommandonamen liefert FHEM die verfuegbare Get-Auswahl.
@@ -365,6 +347,7 @@ sub Get {
 		if !defined $command;
 	return payloads($hash, $arguments[0])
 		if $command eq 'payloads' && @arguments == 1;
+
 
 	# devices akzeptiert bewusst keine Zusatzargumente und erzeugt keine Seiteneffekte.
 	return devices_html($hash)
@@ -585,9 +568,26 @@ sub selectable_readings {
 	return @sorted;
 }
 
+
 # FHEMWEB-Formular mit eigenem Knopf: Das Muster aus AttrTemplate.pm verlaesst sich
 # auf den Knopf von FW_okDialog; bei einem abgeschickten Set-Formular rendert
 # FHEMWEB die Antwort aber als ganze Seite, in der es diesen Knopf nicht gibt.
+# FHEMWEB holt die Antwort eines Setters nur dann per XHR und zeigt sie im
+# Fenster, wenn am Geraet ein Reading gleichen Namens steht; sonst laedt es die
+# ganze Seite neu (fhemweb.js: $(".dval[informid="+ifid+"]").length == 0). Das
+# Reading zeigt deshalb die zuletzt gesetzte Auswahl und macht zugleich den
+# Dialog moeglich.
+sub update_selection_reading {
+	my ($hash, $target_name) = @_;
+	my $selections = registry($hash)->{selections};
+	my @ignore = ref($selections) eq 'HASH'
+		&& ref($selections->{ $target_name // '' }) eq 'ARRAY'
+			? @{ $selections->{$target_name} } : ();
+	reading($hash, 'selectReadings', !defined($target_name) || $target_name eq ''
+		? '-' : "$target_name: " . (@ignore ? join(',', @ignore) : '-'));
+	return;
+}
+
 sub select_readings_dialog {
 	my ($hash, $target_name, $selectable, $ignored) = @_;
 	my $command = html_escape("set $hash->{NAME} selectReadings $target_name");
@@ -601,7 +601,6 @@ sub select_readings_dialog {
 		. "<input type='hidden' id='m2dSelectCmd' value='$command'>"
 		. "<p>Welche Readings soll $detail behalten?</p>"
 		. "<table class='block wide'>$rows</table>"
-		. "<br><input type='button' id='m2dSelectOk' value='&Uuml;bernehmen'>"
 		. qq{<script>
 			(function(){
 				var apply = function(){
@@ -617,14 +616,34 @@ sub select_readings_dialog {
 						location.href = "?cmd="+encodeURIComponent(cmd)+"&detail=$detail";
 					}
 				};
-				document.getElementById("m2dSelectOk").onclick = apply;
-
-				// Im Popup von FHEMWEB uebernimmt zusaetzlich dessen eigener Knopf.
+				// FW_okDialog fuellt sein div, bevor es im Dokument haengt und
+				// bevor es den Knopf OK gibt (fhemweb.js: \$(div).html(txt) vor
+				// append und dialog). Zu diesem Zeitpunkt findet das Skript
+				// weder seine Felder noch den Knopf; es wartet deshalb.
+				var bind = function(){
 				if(typeof \$ == "function" && \$("#FW_okDialog").length) {
 					\$("#FW_okDialog").parent().find("button").css("display","block");
 					\$("#FW_okDialog").parent().find(".ui-dialog-buttonpane button")
 						.unbind("click").click(function(){ apply(); \$("#FW_okDialog").remove(); });
+				} else {
+					var button = document.createElement("input");
+					button.type = "button";
+					button.value = "OK";
+					button.onclick = apply;
+					document.getElementById("m2dSelectCmd").parentNode.appendChild(button);
 				}
+				};
+
+				// Gewartet wird auf den Knopf, nicht auf die Felder: FW_okDialog
+				// haengt sein div ein und macht erst danach einen Dialog daraus.
+				var wait = function(tries){
+					var ready = typeof \$ == "function"
+						&& \$("#FW_okDialog").parent().find(".ui-dialog-buttonpane button").length;
+					if(!ready && tries > 0)
+						return setTimeout(function(){ wait(tries-1);; }, 50);
+					bind();
+				};
+				wait(40);
 			})();
 		</script>}
 		. '</html>';
@@ -684,6 +703,7 @@ sub select_readings {
 		gateway($hash)->delete_reading($defs{$target_name}, $reading);
 	}
 
+	update_selection_reading($hash, $target_name);
 	log_message($hash, 2,
 		"selectReadings $target_name ignoriert: " . (@ignore ? join(',', @ignore) : '-'));
 	return undef;
@@ -743,7 +763,7 @@ sub SetExtensions {
 	log_message($discovery, 3, "set $name $cmd ueber den Hook ausgefuehrt");
 	return undef;
 }
-# Mit readingsViaParse wertet das Modul die Nutzdaten selbst aus. Dafuer muss es
+# Mit readings=parse wertet das Modul die Nutzdaten selbst aus. Dafuer muss es
 # alle Nachrichten sehen, deshalb wird der Match des Moduls weit gestellt, solange
 # mindestens eine Instanz das Attribut gesetzt hat. Ohne das Attribut bleibt der
 # enge Match erhalten und nichts am bisherigen Ablauf aendert sich.
@@ -1332,10 +1352,10 @@ sub replay_payloads {
 # von unten nach oben. Global und Familie stehen in einem Attribut am
 # Discovery-Device, die Geraeteebene in einem Attribut am Zielgeraet.
 our %KEYS = (
-	style        => { values => [qw(fhem raw)],                default => 'raw'  },
-	sets         => { values => [qw(list hook)],               default => 'list' },
-	readings     => { values => [qw(list parse)],              default => 'list' },
-	availability => { values => [qw(combined source none)],    default => 'combined' },
+	style        => { values => [qw(fhem raw)],                default => 'fhem' },
+	sets         => { values => [qw(list hook)],               default => 'hook' },
+	readings     => { values => [qw(list parse)],              default => 'parse' },
+	reachability => { values => [qw(full sources none)],        default => 'sources' },
 	forceNEXT    => { values => [qw(0 1)],                     default => '0' },
 	hide         => { list => 1,                               default => '' },
 );
@@ -1381,14 +1401,15 @@ sub check_keys {
 
 # Loest einen Schluessel fuer ein Zielgeraet auf.
 sub key {
-	my ($hash, $record, $key) = @_;
+	my ($hash, $record, $key, $skip_device) = @_;
 	my $definition = $KEYS{$key} or return undef;
 	my $gateway = gateway($hash);
 	my $family = ref($record) eq 'HASH' ? ($record->{adapter} // '') : '';
 	my $name = ref($record) eq 'HASH' ? ($record->{name} // '') : '';
 
-	# Geraeteebene
-	if ($name ne '' && $defs{$name}) {
+	# Geraeteebene; der Dialog laesst sie aus, um den Wert ohne eigenen Eintrag
+	# zu bestimmen.
+	if (!$skip_device && $name ne '' && $defs{$name}) {
 		my $device = parse_keys(
 			$gateway->attr_value($name, 'mqttDiscoveryKeys', ''),
 		);
@@ -1403,26 +1424,6 @@ sub key {
 	return $global->{''}{$key}
 		if defined($global->{''}{$key}) && $global->{''}{$key} ne '';
 
-	# Die alten Einzelattribute bleiben als veraltete Schreibweise gueltig.
-	my %legacy = (
-		style => ['fhemConventions', 'fhem', 'raw'],
-		sets => ['setsViaHook', 'hook', 'list'],
-		readings => ['readingsViaParse', 'parse', 'list'],
-	);
-
-	if (my $mapping = $legacy{$key}) {
-		my ($attribute, $on, $off) = @$mapping;
-		my $value = $gateway->attr_value($hash->{NAME}, $attribute, undef);
-		return $value ? $on : $off if defined($value) && $value ne '';
-	}
-
-	# availabilityReading none hat immer nur das verdichtete Reading unterdrueckt
-	# und die Quellen stehen lassen; das heisst jetzt source.
-	if ($key eq 'availability') {
-		my $reading = $gateway->attr_value($hash->{NAME}, 'availabilityReading', '');
-		return 'source' if lc($reading) eq 'none';
-	}
-
 	# Ein Datensatz, der unter der FHEM-Konvention entstanden ist, behaelt sie;
 	# aeltere Datensaetze bleiben unveraendert, damit keine Readingwerte kippen.
 	return 'fhem' if $key eq 'style' && ref($record) eq 'HASH' && ($record->{style} // '') eq 'fhem';
@@ -1433,12 +1434,113 @@ sub key {
 # statt ihn die Schreibweise im Attribut raten zu lassen: Der Befehl prueft,
 # mischt mit den bestehenden Angaben und traegt erst dann ein. Das Attribut
 # selbst nimmt nur an, was aus diesem Befehl kommt.
+# Zeigt die Schluessel eines Geraets als Dialog. Die Set-Syntax von FHEM kennt
+# nur ein Argument mit Widget; das ist hier das Geraet, sodass fuer den
+# Schluessel kein Feld bliebe (fhemweb.js: vArr = argAndPar[1].split(",")).
+sub device_key_dialog {
+	my ($hash, $device) = @_;
+	my ($record) = grep {
+		ref($_) eq 'HASH' && ($_->{name} // '') eq $device
+	} values %{ registry($hash)->{devices} || {} };
+	my $own = parse_keys(gateway($hash)->attr_value($device, 'mqttDiscoveryKeys', ''));
+	my $command = html_escape("set $hash->{NAME} deviceKey $device");
+	my $detail = html_escape($device);
+	my $rows = '';
+
+	# hide bleibt aussen vor: Ein einzelnes Geraet waehlt seine Readings im
+	# Dialog von selectReadings ab; als Schluessel ist hide fuer die oberen
+	# Ebenen gedacht, wo er alle Geraete einer Familie trifft.
+	for my $key (grep { !$KEYS{$_}{list} } sort keys %KEYS) {
+		my $definition = $KEYS{$key};
+		my $set = $own->{''}{$key};
+		my $name = html_escape($key);
+
+		# Was ohne eigenen Wert gilt, steht als eigene Spalte daneben; die
+		# Auswahl selbst nennt nur, was waehlbar ist.
+		my $fallback = ref($record) eq 'HASH'
+			? (key($hash, $record, $key, 1) // '') : ($definition->{default} // '');
+		my $inherited = html_escape($fallback);
+		# Der leere Eintrag traegt den Wert, der ohne eigenen Eintrag gilt; die
+		# uebrigen Eintraege sind nur die davon abweichenden, sonst stuende
+		# derselbe Wert zweimal in der Liste.
+		my $field = "<select class='m2dKey' name='$name'>" . join('', map {
+			my $option = html_escape($_);
+			my $label = $_ eq ''
+				? ($inherited ne '' ? "$inherited (default)" : '(keiner)') : $option;
+			my $selected = defined($set) && $set eq $_ ? " selected='selected'" : '';
+			$selected = " selected='selected'" if !defined($set) && $_ eq '';
+			"<option value='$option'$selected>$label</option>";
+		} ('', grep { $_ ne $fallback } @{ $definition->{values} || [] })) . '</select>';
+		$rows .= "<tr><td>$name</td><td>$field</td></tr>";
+	}
+	return '<html>'
+		. "<input type='hidden' id='m2dKeyCmd' value='$command'>"
+		. "<p>Welche Schluessel gelten fuer $detail?</p>"
+
+		# Die Auswahlfelder sind unterschiedlich lang, weil ihre Werte es sind;
+		# eine feste Breite stellt sie untereinander auf dieselbe Kante.
+		. "<style>select.m2dKey { width: 9em }</style>"
+		. "<table class='block wide'>$rows</table>"
+		. qq{<script>
+			(function(){
+				var apply = function(){
+					var cmd = document.getElementById("m2dKeyCmd").value;
+					var fields = document.getElementsByClassName("m2dKey");
+					for(var i=0; i<fields.length; i++)
+						cmd += " "+fields[i].getAttribute("name")+"="+fields[i].value;
+					if(typeof FW_cmd == "function") {
+						FW_cmd(FW_root+"?cmd="+encodeURIComponent(cmd)+"&XHR=1", function(){
+							location.href = FW_root+"?detail=$detail";
+						});
+					} else {
+						location.href = "?cmd="+encodeURIComponent(cmd)+"&detail=$detail";
+					}
+				};
+				// Wie beim Readingdialog: Das OK des Fensters uebernimmt, und
+				// das Binden wartet, bis das Fenster im Dokument steht.
+				var bind = function(){
+				if(typeof \$ == "function" && \$("#FW_okDialog").length) {
+					\$("#FW_okDialog").parent().find("button").css("display","block");
+					\$("#FW_okDialog").parent().find(".ui-dialog-buttonpane button")
+						.unbind("click").click(function(){ apply();; \$("#FW_okDialog").remove(); });
+				} else {
+					var button = document.createElement("input");;
+					button.type = "button";;
+					button.value = "OK";;
+					button.onclick = apply;;
+					document.getElementById("m2dKeyCmd").parentNode.appendChild(button);;
+				}
+				};
+
+				// Gewartet wird auf den Knopf, nicht auf die Felder: FW_okDialog
+				// haengt sein div ein und macht erst danach einen Dialog daraus.
+				var wait = function(tries){
+					var ready = typeof \$ == "function"
+						&& \$("#FW_okDialog").parent().find(".ui-dialog-buttonpane button").length;;
+					if(!ready && tries > 0)
+						return setTimeout(function(){ wait(tries-1);; }, 50);;
+					bind();;
+				};;
+				wait(40);;
+			})();
+		</script>}
+		. '</html>';
+}
+
 sub device_key {
 	my ($hash, $device, @assignments) = @_;
 	return 'Aufruf: set <name> deviceKey <device> <schluessel>=<wert> ...'
-		if !defined($device) || !@assignments;
+		if !defined($device);
 	return "$device ist kein MQTT2_DEVICE"
 		if !$defs{$device} || ($defs{$device}{TYPE} // '') ne 'MQTT2_DEVICE';
+
+	# Ohne Zuweisung fragt der Dialog die Schluessel ab; ein Skript bekommt die
+	# Schreibweise genannt.
+	if (!@assignments) {
+		return device_key_dialog($hash, $device)
+			if $hash->{CL} && ($hash->{CL}{TYPE} // '') eq 'FHEMWEB';
+		return 'Aufruf: set <name> deviceKey <device> <schluessel>=<wert> ...';
+	}
 	my $assignment = join(' ', @assignments);
 	my $error = check_keys($assignment, 0);
 	return $error if $error;
@@ -1452,10 +1554,9 @@ sub device_key {
 	delete $merged{$_} for grep { $merged{$_} eq '' } keys %merged;
 	my $line = join(' ', map { "$_=$merged{$_}" } sort keys %merged);
 
-	# Die AttrFn laesst die Aenderung nur durch, solange dieser Vermerk steht.
-	local $hash->{helper}{own_device_attribute} = 1;
 	my $command_error = $gateway->set_attribute($device, 'mqttDiscoveryKeys', $line);
 	return $command_error if defined($command_error) && $command_error ne '';
+	reading($hash, 'deviceKey', "$device: " . ($line ne '' ? $line : '-'));
 	log_message($hash, 3, "deviceKey $device: " . ($line ne '' ? $line : '<leer>'));
 
 	# Der Schluessel wirkt auf das erzeugte Ergebnis; ohne Neuaufbau bliebe das
@@ -1482,7 +1583,8 @@ sub Set {
 	my ($hash, @arguments) = @_;
 	shift @arguments;
 	my $command = shift @arguments;
-	log_message($hash, 3, 'set ' . (defined($command) ? $command : '<missing>'));
+	log_message($hash, defined($command) && $command eq '?' ? 5 : 3,
+		'set ' . (defined($command) ? $command : '<missing>'));
 	log_message($hash, 4, 'set arguments=[' . join(', ', @arguments) . ']') if @arguments;
 	return 'Unknown argument ?, choose one of ' . set_list($hash)
 		if !defined $command;
@@ -1959,20 +2061,31 @@ sub iodev_available {
 
 # Liefert den global reservierten sichtbaren Availability-Readingnamen.
 sub availability_reading {
-	my ($hash, $record) = @_;
+	my ($hash, $record, $entries) = @_;
 
 	# source und none unterdruecken beide das verdichtete Reading; sie
 	# entscheiden vor dem Namen, sonst entstuende er trotzdem und das Reading
 	# bliebe mit seinem letzten Wert stehen.
-	return '' if key($hash, $record, 'availability') ne 'combined';
-	my $name = gateway($hash)->attr_value(
-		$hash->{NAME}, 'availabilityReading',
-		$DEFAULT_AVAILABILITY_READING,
-	);
-	# none unterdrueckt das verdichtete sichtbare Reading vollstaendig.
-	return '' if lc($name) eq 'none';
-	return $name =~ /^[A-Za-z_][A-Za-z0-9_.-]*$/
-		? $name : $DEFAULT_AVAILABILITY_READING;
+	return '' if key($hash, $record, 'reachability') ne 'full';
+
+	# Der Name folgt der Art der Quellen: Ein beim Broker angemeldeter letzter
+	# Wille heisst lwt, eine von einer Bruecke errechnete Erreichbarkeit
+	# availability. Ausserhalb des Renderns steht die Entscheidung im Datensatz.
+	return defined($entries)
+		? (availability_from_last_will($entries) ? 'lwt' : $DEFAULT_AVAILABILITY_READING)
+		: (($record->{availability_reading} // '') eq 'lwt'
+			? 'lwt' : $DEFAULT_AVAILABILITY_READING);
+}
+
+# Beantwortet, ob die Erreichbarkeit eines Geraets auf seinem eigenen letzten
+# Willen beruht. Nur der Adapter kennt die Art seiner Quellen und kennzeichnet
+# sie; alles andere ist die Aussage eines Dritten ueber das Geraet.
+sub availability_from_last_will {
+	my ($entries) = @_;
+	return scalar(grep {
+		ref($_) eq 'HASH' && ($_->{kind} // '') eq 'availability'
+			&& ($_->{source_reading} // '') eq 'lwt'
+	} @{ ref($entries) eq 'ARRAY' ? $entries : [] });
 }
 
 # Sammelt die Readingnamen, die eine Referenztabelle fuer Availability fuehrt:
@@ -2064,8 +2177,8 @@ sub registry_rendering_outdated {
 		# Stufe bliebe der Wechsel zwischen ihnen unbemerkt, und der Datensatz
 		# wertete weiter nach der alten Regel aus. Aeltere Staende fuehren sie
 		# nicht und werden erst beim naechsten Rendern nachgezogen.
-		next if !defined($record->{availability});
-		return 1 if $record->{availability} ne key($hash, $record, 'availability');
+		next if !defined($record->{reachability});
+		return 1 if $record->{reachability} ne key($hash, $record, 'reachability');
 	}
 
 	return 0;
@@ -2091,47 +2204,11 @@ sub record_has_manual_reading {
 	return 0;
 }
 
-# Prueft die globale Availability-Reservierung vor der Attributuebernahme fuer
-# alle von dieser Discovery-Instanz verwalteten Zieldevices.
-sub availability_reading_conflicts {
-	my ($hash, $reading) = @_;
-	return () if ref($hash) ne 'HASH';
-	my $mode = gateway($hash)->attr_value(
-		$hash->{NAME}, 'existingDevice', 'conservative',
-	);
-	return () if $mode ne 'conservative';
-	my $registry = registry($hash);
-	my @conflicts;
 
-	# Ein einziger manueller Anspruch verhindert die globale Umstellung, damit
-	# nicht nur ein Teil der verwalteten Devices den neuen Namen verwendet.
-	for my $record (values %{ $registry->{devices} || {} }) {
-		push @conflicts, $record->{name}
-			if record_has_manual_reading($hash, $record, $reading);
-	}
-
-	my @sorted = sort(stable_unique(@conflicts));
-	return @sorted;
-}
-
-# Gleicht einen veralteten Registry-Renderstand nur dann global ab, wenn kein
-# manuelles Reading den aktuellen Default beziehungsweise Attributnamen belegt.
+# Gleicht einen veralteten Registry-Renderstand ab.
 sub reconcile_registry_rendering {
 	my ($hash) = @_;
 	return if !registry_rendering_outdated($hash);
-	my $reading = availability_reading($hash);
-	my @conflicts = availability_reading_conflicts($hash, $reading);
-
-	# Ein Lifecycle-Abgleich darf denselben konservativen Schutz wie eine direkte
-	# Attributaenderung nicht umgehen und meldet deshalb den blockierenden Bestand.
-	if (@conflicts) {
-		my $message = 'Availability-Defaultabgleich durch manuelle readingList-Eintraege blockiert: '
-			. join(', ', @conflicts);
-		reading($hash, 'lastWarning', $message);
-		log_message($hash, 2, $message);
-		return;
-	}
-
 	enqueue_rerender($hash);
 	return;
 }
@@ -2334,7 +2411,7 @@ sub sync_target_availability {
 	my $name = $record->{name};
 	my $target = $defs{$name};
 	return if !$target || ($target->{TYPE} || '') ne 'MQTT2_DEVICE';
-	return if key($hash, $record, 'availability') eq 'none';
+	return if key($hash, $record, 'reachability') eq 'none';
 	my $gateway = gateway($hash);
 	my $io_status = $io_available ? 'online' : 'offline';
 	my $availability_reading = $record->{availability_reading}
@@ -2420,6 +2497,25 @@ sub Notify {
 		sync_json_map($hash, $1);
 	}
 
+	# Ein von Hand gesetzter Geraeteschluessel wirkt auf das erzeugte Ergebnis.
+	# Ueber das Ereignis statt ueber die AttrFn, weil fhem.pl beim Loeschen die
+	# AttrFn des Zielgeraets ruft und nicht die angemeldete Pruefinstanz
+	# (CommandDeleteAttr: CallFn($sdev, "AttrFn", "del", ...)).
+	for my $event (@$events) {
+		next if $event !~ /^(?:ATTR|DELETEATTR)\s+(\S+)\s+mqttDiscoveryKeys(?:\s|$)/;
+		my $target = $1;
+		next if !$defs{$target};
+		forget_parse_index($hash);
+		my $error = rebuild_device($hash, $target);
+		log_message($hash, 2, "mqttDiscoveryKeys an $target: $error")
+			if defined($error) && $error ne '';
+
+		# Das Reading gehoert zum Set-Befehl, muss aber auch ein von Hand
+		# gesetztes Attribut zeigen; sonst nennt es einen ueberholten Stand.
+		my $line = gateway($hash)->attr_value($target, 'mqttDiscoveryKeys', '');
+		reading($hash, 'deviceKey', "$target: " . ($line ne '' ? $line : '-'));
+	}
+
 	# Beim Loeschen des IODev darf weder eine vorgemerkte Config noch dessen
 	# letzte Perl-Referenz einen scheinbar verfuegbaren Zustand erhalten.
 	if ($io_deleted) {
@@ -2441,6 +2537,14 @@ sub Notify {
 		if !$io_deleted && ($lifecycle || $io_availability_changed);
 	reconcile_registry_rendering($hash)
 		if !$io_deleted && $lifecycle;
+
+	# Das Reading gehoert zum Set-Befehl und muss auch an einer Instanz stehen,
+	# die vor dieser Fassung definiert wurde; sonst laedt FHEMWEB beim Aufruf
+	# des Dialogs die ganze Seite neu.
+	update_selection_reading($hash, undef)
+		if $lifecycle && !defined(ReadingsVal($hash->{NAME}, 'selectReadings', undef));
+	reading($hash, 'deviceKey', '-')
+		if $lifecycle && !defined(ReadingsVal($hash->{NAME}, 'deviceKey', undef));
 
 	# INITIALIZED folgt beim Start auf das statefile; REREADCFG wird unmittelbar
 	# vor der Rueckkehr in den Eventloop ausgeloest und darf denselben Start planen.
@@ -2715,7 +2819,7 @@ sub process {
 # Fuehrt Formatwahl, Modellierung, Mapping und transaktionales Device-Apply fuer ein Topic aus.
 sub process_inner {
 	my ($hash, $cid, $topic, $payload, $batch) = @_;
-	log_message($hash, 3, "processing topic=$topic");
+	log_message($hash, 4, "processing topic=$topic");
 	log_message($hash, 4, 'message cid=' . (defined($cid) ? $cid : '') . '; payloadLength=' . length(defined($payload) ? $payload : ''));
 	log_message($hash, 5, 'discovery payload=' . log_payload($payload))
 		if log_enabled($hash, 5);
@@ -2944,7 +3048,7 @@ sub process_inner {
 		log_message($hash, 2, "warning: $warning");
 	}
 	reading($hash, 'lastAdapter', $parsed->{adapter} || 'unknown');
-	log_message($hash, 3, 'processing finished; topic=' . $topic
+	log_message($hash, 4, 'processing finished; topic=' . $topic
 		. '; entities=' . scalar(@{ $parsed->{events} || [] }));
 	return 'consumed';
 }
@@ -3473,6 +3577,19 @@ sub prepare_device_mappings {
 		for my $entry (@{ $mapping->{reading_lines} || [] }) {
 			if (($entry->{role} || '') eq 'availability') {
 				$entry->{name} = $availability_reading;
+
+				# Traegt die Verdichtung den Namen lwt, gehoert er ihr: Sie sagt
+				# dasselbe wie die Quelle und dazu, ob FHEM den Broker hat. Die
+				# Quelle bleibt dann versteckt, sonst stuende der Name zweimal.
+				# Die Regel nennt ihre Quellen beim Namen; sie liegt nach dem
+				# Kopieren je Eintrag vor und wird deshalb in jedem umgestellt.
+				if ($availability_reading eq 'lwt') {
+					$entry->{source_reading} = '.availability_lwt'
+						if ($entry->{source_reading} // '') eq 'lwt';
+					$_ = '.availability_lwt' for grep { $_ eq 'lwt' }
+						@{ ref($entry->{policy}) eq 'HASH'
+							? $entry->{policy}{sources} || [] : [] };
+				}
 				push @reading_lines, $entry;
 				next;
 			}
@@ -3781,7 +3898,12 @@ sub apply_device_lines {
 	my %previous_availability_topics = map { ($_ => 1) }
 		grep { defined($_) && !ref($_) && $_ ne '' }
 		@{ $record->{availability_topics} || [] };
-	my $availability_reading = availability_reading($hash, $record);
+	# Der Name der Verdichtung haengt von der Art der Quellen ab und steht
+	# deshalb erst fest, wenn die Mappings des Geraets vorliegen.
+	my @availability_entries = grep {
+		ref($_) eq 'HASH' && ($_->{role} // '') eq 'availability'
+	} map { @{ $_->{reading_lines} || [] } } values %{ $record->{entities} || {} };
+	my $availability_reading = availability_reading($hash, $record, \@availability_entries);
 	my $previous_availability_reading = $record->{availability_reading} // 'availability';
 
 	# Die Quellreadings der bisherigen Kette werden vor dem Rendern festgehalten.
@@ -3844,7 +3966,7 @@ sub apply_device_lines {
 	# none laesst die Availability-Kette ganz weg: kein Quellreading, keine
 	# Regel, keine Verdichtung. source behaelt die Quellen und laesst nur die
 	# Verdichtung aus, das entscheidet der Readingname weiter unten.
-	if (key($hash, $record, 'availability') eq 'none') {
+	if (key($hash, $record, 'reachability') eq 'none') {
 		@reading_entries = grep {
 			ref($_) ne 'HASH' || ($_->{kind} // '') ne 'availability'
 		} @reading_entries;
@@ -3987,7 +4109,7 @@ sub apply_device_lines {
 		$prepared_readings, $render_device_topic, $reserved_readings, \%runtime_references,
 	) };
 
-	# Mit setsViaHook entsteht kein setList-Attribut mehr: Die Befehle liegen
+	# Mit sets=hook entsteht kein setList-Attribut mehr: Die Befehle liegen
 	# strukturiert in der Registry und werden ueber den Hook angeboten und
 	# ausgefuehrt. Nicht unterstuetzte Befehlsarten bleiben im Attribut.
 	my $via_hook = key($hash, $record, 'sets') eq 'hook'
@@ -4008,7 +4130,7 @@ sub apply_device_lines {
 		\@set_entries, $render_device_topic, undef, \%runtime_references,
 	) };
 
-	# Mit readingsViaParse entsteht kein readingList-Attribut mehr: Die erzeugten
+	# Mit readings=parse entsteht kein readingList-Attribut mehr: Die erzeugten
 	# Zeilen werden in Regexp und Runtime-Referenz zerlegt und in der Registry
 	# abgelegt; ausgewertet wird spaeter in ParseFn. Manuelle Zeilen des Anwenders
 	# bleiben im Attribut und arbeiten unveraendert weiter.
@@ -4121,7 +4243,7 @@ sub apply_device_lines {
 	$record->{availability_topics} = \@availability_topics;
 	$record->{availability_reading} = $availability_reading;
 	$record->{owned_availability_reading} = $availability_reading;
-	$record->{availability} = key($hash, $record, 'availability');
+	$record->{reachability} = key($hash, $record, 'reachability');
 	apply_device_semantics($hash, $record, \%resolved_by_key);
 	my @conflicts = (@json_conflicts, @{ $reading->{conflicts} }, @{ $set->{conflicts} });
 
@@ -4165,7 +4287,7 @@ sub apply_device_lines {
 	# Abgleich geschrieben. Mit none schreibt ihn niemand mehr fort, also gehoert
 	# er zu den aufzuraeumenden Readings.
 	$previous_availability_names->{'.availability_io'} = 1
-		if key($hash, $record, 'availability') eq 'none';
+		if key($hash, $record, 'reachability') eq 'none';
 
 	# Ein Name, den vorher eine einfache Zeile trug und den jetzt nichts mehr
 	# erzeugt, gehoert ebenfalls aufgeraeumt.
@@ -4985,8 +5107,9 @@ single channel stays a single device.</p>
 <a id="MQTT2_DISCOVERY-define"></a>
 <h4>Define</h4>
 <p><code>define &lt;name&gt; MQTT2_DISCOVERY &lt;MQTT2_SERVER|MQTT2_CLIENT&gt;</code></p>
-<p>The bound IO device gates the public <code>availability</code> reading (or the
-name selected with <code>availabilityReading</code>) of every managed target. A
+<p>The bound IO device gates the public reachability reading of every managed
+target: <code>lwt</code> for a registered last will, <code>availability</code>
+for a reachability computed by a bridge. A
 disconnected client marks all targets offline. After reconnect,
 the most recently known discovery availability sources are evaluated again;
 targets without such sources follow the IO device directly. Each entity retains
@@ -5058,7 +5181,7 @@ Syntax: <code>set &lt;name&gt; rebuildDevice &lt;MQTT2_DEVICE&gt; [clearReadings
 <li><a id="MQTT2_DISCOVERY-set-deviceKey"></a><b>deviceKey &lt;device&gt; &lt;key&gt;=&lt;value&gt; [...]</b><br>
 Sets a key at a managed device. The command checks the spelling, merges it with
 the keys already set there and only then writes the device attribute
-<code>mqttDiscoveryKeys</code>; a manual change of that attribute is rejected.
+<code>mqttDiscoveryKeys</code>, which can also be set by hand.
 An empty value takes a single key back, it then falls through to family and
 global level (see <a href="#MQTT2_DISCOVERY-attr-keys">keys</a>).<br>
 Example: <code>set &lt;name&gt; deviceKey Werkstatt sets=hook</code>
@@ -5111,17 +5234,18 @@ with a family, which is the adapter that discovered the device
 <code>sonos2mqtt</code>). A key is looked up at the device
 (<a href="#MQTT2_DEVICE-attr-mqttDiscoveryKeys">mqttDiscoveryKeys</a>), then for
 its family, then globally, and falls back to the built-in default.<br>
-Known keys: <code>style</code> (<code>raw</code>|<code>fhem</code>),
-<code>sets</code> (<code>list</code>|<code>hook</code>),
-<code>readings</code> (<code>list</code>|<code>parse</code>),
-<code>availability</code> (<code>combined</code>|<code>source</code>|<code>none</code>),
+Known keys with their defaults: <code>style</code>
+(<code>fhem</code>|<code>raw</code>),
+<code>sets</code> (<code>hook</code>|<code>list</code>),
+<code>readings</code> (<code>parse</code>|<code>list</code>),
+<code>reachability</code> (<code>sources</code>|<code>full</code>|<code>none</code>),
 <code>forceNEXT</code> (<code>0</code>|<code>1</code>) and <code>hide</code>
 (comma-separated reading names).<br>
-<code>availability</code> has three levels: <code>combined</code> writes the
-source readings and the condensed reading, <code>source</code> only the sources,
-<code>none</code> nothing at all. The deprecated
-<a href="#MQTT2_DISCOVERY-attr-availabilityReading">availabilityReading none</a>
-corresponds to <code>source</code>.<br>
+<code>reachability</code> has three levels: <code>full</code> writes the
+source readings and the condensed reading, <code>sources</code> only the sources,
+<code>none</code> nothing at all. The visible reading is named
+<code>lwt</code> when at least one source is the device's own last will, and
+<code>availability</code> when a bridge states the reachability.<br>
 Example: <code>attr &lt;name&gt; keys style=fhem shelly:sets=hook</code>
 </li><br>
 <li><a id="MQTT2_DISCOVERY-attr-shellyDiscovery"></a><b>shellyDiscovery</b><br>
@@ -5160,21 +5284,7 @@ re-renders every device managed by this discovery instance from its persisted
 registry; discovery messages do not need to be received again.<br>
 Syntax: <code>attr &lt;name&gt; extraJsonReadings &lt;include|ignore&gt;</code>
 </li><br>
-<li><a id="MQTT2_DISCOVERY-attr-availabilityReading"></a><b>availabilityReading</b><br>
-Reserves one exact public Availability reading name for all devices managed by
-this discovery instance. Without the attribute the name is
-<code>availability</code>. Generated readings that would collide are renamed. Freely
-expanded JSON fields use a compact runtime wrapper and qualify a collision with
-their topic path, for example <code>state_availability</code>. In
-<code>existingDevice conservative</code> mode, an
-explicit manual <code>readingList</code> use rejects the global change before any
-device is modified. Changing or deleting the attribute re-renders all managed
-devices from the registry, recalculates the current status under the new name and
-removes the previous reading only when it was owned by this module. Persisted
-targets using an earlier module default are reconciled during the next FHEM
-lifecycle event without requiring another discovery message.<br>
-Syntax: <code>attr &lt;name&gt; availabilityReading &lt;reading-name&gt;</code>
-</li><br>
+br>
 <li><a id="MQTT2_DISCOVERY-attr-autoCreate"></a><b>autoCreate</b><br>
 Allows (<code>1</code>, default) or prevents (<code>0</code>) creation of new
 <code>MQTT2_DEVICE</code> devices.<br>
@@ -5220,9 +5330,10 @@ einzigen Kanal bleibt ein einziges Geraet.</p>
 <a id="MQTT2_DISCOVERY-define"></a>
 <h4>Define</h4>
 <p><code>define &lt;name&gt; MQTT2_DISCOVERY &lt;MQTT2_SERVER|MQTT2_CLIENT&gt;</code></p>
-<p>Das gebundene IODev bestimmt zusaetzlich das sichtbare Reading
-<code>availability</code> beziehungsweise den mit <code>availabilityReading</code>
-festgelegten Namen aller verwalteten Ziele. Eine getrennte Client-Verbindung
+<p>Das gebundene IODev bestimmt zusaetzlich das sichtbare Reading fuer die
+Erreichbarkeit aller verwalteten Ziele: <code>lwt</code> bei einem angemeldeten
+letzten Willen, <code>availability</code> bei einer von einer Bruecke
+errechneten Erreichbarkeit. Eine getrennte Client-Verbindung
 setzt alle Ziele offline. Nach dem Reconnect werden die zuletzt bekannten
 Discovery-Availability-Quellen erneut ausgewertet; Ziele ohne solche Quellen
 folgen direkt dem IODev. Jede Entity behaelt dabei ihre angekuendigte
@@ -5298,8 +5409,8 @@ Syntax: <code>set &lt;name&gt; rebuildDevice &lt;MQTT2_DEVICE&gt; [clearReadings
 <li><a id="MQTT2_DISCOVERY-set-deviceKey"></a><b>deviceKey &lt;device&gt; &lt;schluessel&gt;=&lt;wert&gt; [...]</b><br>
 Setzt einen Schluessel an einem verwalteten Geraet. Der Befehl prueft die
 Schreibweise, mischt sie mit den dort bereits gesetzten Schluesseln und schreibt
-erst dann das Geraeteattribut <code>mqttDiscoveryKeys</code>; eine Aenderung von
-Hand wird abgewiesen. Ein leerer Wert nimmt einen einzelnen Schluessel zurueck,
+erst dann das Geraeteattribut <code>mqttDiscoveryKeys</code>, das sich auch von
+Hand setzen laesst. Ein leerer Wert nimmt einen einzelnen Schluessel zurueck,
 er faellt dann auf Familien- und globale Ebene
 (siehe <a href="#MQTT2_DISCOVERY-attr-keys">keys</a>).<br>
 Beispiel: <code>set &lt;name&gt; deviceKey Werkstatt sets=hook</code>
@@ -5354,17 +5465,18 @@ Geraet erkannt hat (<code>shelly</code>, <code>tasmota</code>,
 <code>homeassistant</code>, <code>sonos2mqtt</code>). Gesucht wird am Geraet
 (<a href="#MQTT2_DEVICE-attr-mqttDiscoveryKeys">mqttDiscoveryKeys</a>), dann fuer
 seine Familie, dann global; zuletzt gilt die Vorgabe im Modul.<br>
-Bekannte Schluessel: <code>style</code> (<code>raw</code>|<code>fhem</code>),
-<code>sets</code> (<code>list</code>|<code>hook</code>),
-<code>readings</code> (<code>list</code>|<code>parse</code>),
-<code>availability</code> (<code>combined</code>|<code>source</code>|<code>none</code>),
+Bekannte Schluessel, der erste Wert ist jeweils die Vorgabe:
+<code>style</code> (<code>fhem</code>|<code>raw</code>),
+<code>sets</code> (<code>hook</code>|<code>list</code>),
+<code>readings</code> (<code>parse</code>|<code>list</code>),
+<code>availability</code> (<code>source</code>|<code>combined</code>|<code>none</code>),
 <code>forceNEXT</code> (<code>0</code>|<code>1</code>) und <code>hide</code>
 (kommaseparierte Readingnamen).<br>
-<code>availability</code> kennt drei Stufen: <code>combined</code> schreibt die
-Quellreadings und das verdichtete Reading, <code>source</code> nur die Quellen,
-<code>none</code> gar nichts davon. Das veraltete
-<a href="#MQTT2_DISCOVERY-attr-availabilityReading">availabilityReading none</a>
-entspricht <code>source</code>.<br>
+<code>reachability</code> kennt drei Stufen: <code>full</code> schreibt die
+Quellreadings und das verdichtete Reading, <code>sources</code> nur die Quellen,
+<code>none</code> gar nichts davon. Das sichtbare Reading heisst
+<code>lwt</code>, wenn mindestens eine Quelle der letzte Wille des Geraets ist,
+und <code>availability</code>, wenn eine Bruecke die Erreichbarkeit aussagt.<br>
 Beispiel: <code>attr &lt;name&gt; keys style=fhem shelly:sets=hook</code>
 </li><br>
 <li><a id="MQTT2_DISCOVERY-attr-shellyDiscovery"></a><b>shellyDiscovery</b><br>
@@ -5405,21 +5517,7 @@ Discovery-Instanz verwalteten Devices aus der gespeicherten Registry neu; die
 Discovery-Nachrichten muessen nicht erneut empfangen werden.<br>
 Syntax: <code>attr &lt;name&gt; extraJsonReadings &lt;include|ignore&gt;</code>
 </li><br>
-<li><a id="MQTT2_DISCOVERY-attr-availabilityReading"></a><b>availabilityReading</b><br>
-Reserviert einen verbindlichen sichtbaren Availability-Readingnamen fuer alle
-von dieser Discovery-Instanz verwalteten Devices. Ohne Attribut lautet er
-<code>availability</code>. Kollidierende erzeugte Readings werden umbenannt. Frei
-entpackte JSON-Felder verwenden einen kompakten Runtime-Wrapper und qualifizieren
-eine Kollision anhand des Topic-Pfads, beispielsweise als
-<code>state_availability</code>. Im Modus <code>existingDevice conservative</code>
-verhindert eine explizite manuelle <code>readingList</code>-Belegung die globale
-Umstellung, bevor irgendein Device geaendert wird. Aendern oder Loeschen rendert
-alle verwalteten Devices aus der Registry neu, berechnet den aktuellen Zustand
-unter dem neuen Namen und entfernt den vorherigen Namen nur bei nachgewiesenem
-Modulbesitz. Gespeicherte Ziele mit einem frueheren Moduldefault werden beim
-naechsten FHEM-Lifecycle-Ereignis ohne erneute Discovery-Nachricht abgeglichen.<br>
-Syntax: <code>attr &lt;name&gt; availabilityReading &lt;Reading-Name&gt;</code>
-</li><br>
+br>
 <li><a id="MQTT2_DISCOVERY-attr-autoCreate"></a><b>autoCreate</b><br>
 Erlaubt (<code>1</code>, Default) oder verhindert (<code>0</code>) das Anlegen neuer
 <code>MQTT2_DEVICE</code>-Devices.<br>

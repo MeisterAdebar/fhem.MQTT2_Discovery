@@ -49,9 +49,15 @@ sub add_iodev {
 
 # Definiert eine Discovery-Instanz in der simulierten FHEM-Laufzeit.
 sub define_discovery {
-	my ($name, $io_name) = @_;
+	my ($name, $io_name, %options) = @_;
 	my $hash = { NAME => $name, TYPE => 'MQTT2_DISCOVERY', READINGS => {} };
 	$main::defs{$name} = $hash;
+
+	# Die meisten Tests pruefen die erzeugten readingList- und setList-Zeilen und
+	# brauchen dafuer die Listenform. Die Vorgaben des Moduls sind andere; welche
+	# das sind, prueft 42_schluesselraum.t ausdruecklich am Modul selbst.
+	$main::attr{$name}{keys} = 'style=raw sets=list readings=list reachability=full'
+		if !$options{module_defaults} && !defined($main::attr{$name}{keys});
 	my $error = FHEM::MQTT2_DISCOVERY::Define($hash, "$name MQTT2_DISCOVERY $io_name");
 	return ($hash, $error);
 }

@@ -71,9 +71,6 @@ Moduls an. Nach einem Modulupdate ist `shutdown restart` erforderlich.
 - `extraJsonReadings`: `include` oder `ignore`, Default `include`; `include`
   entpackt auch nicht konkret angekuendigte JSON-Felder, `ignore` rendert nur
   die durch Discovery bekannten Felder
-- `availabilityReading`: optionaler, fuer alle von dieser Discovery-Instanz
-  verwalteten Devices verbindlicher Name des sichtbaren Availability-Readings;
-  ohne Attribut lautet er `deviceAvailability`
 - `autoCreate`: `0` oder `1`, Default `1`
 - `autoDelete`: `0` oder `1`, Default `0`
 - `createReadings`: `0` oder `1`, Default `0`; bei `1` werden sicher aus
@@ -148,8 +145,7 @@ gesucht:
 1. am Zielgeraet im Attribut `mqttDiscoveryKeys`,
 2. am Discovery-Device im Attribut `keys` fuer die Familie des Geraets,
 3. am Discovery-Device im Attribut `keys` ohne Familie,
-4. in den veralteten Einzelattributen,
-5. in der Vorgabe des Moduls.
+4. in der Vorgabe des Moduls.
 
 Die Familie ist der Adapter, der das Geraet erkannt hat: `shelly`, `tasmota`,
 `homeassistant` oder `sonos2mqtt`. Sie steht dem Schluessel mit Doppelpunkt
@@ -164,10 +160,10 @@ Bekannte Schluessel:
 
 | Schluessel | Werte | Vorgabe | Bedeutung |
 | --- | --- | --- | --- |
-| `style` | `raw`, `fhem` | `raw` | Readingnamen roh aus der Discovery oder nach FHEM-Konvention |
-| `sets` | `list`, `hook` | `list` | Schaltbefehle als `setList`-Zeilen oder ueber die `SetExtensionsFn` |
-| `readings` | `list`, `parse` | `list` | Readings ueber `readingList`-Zeilen oder ueber die eigene Auswertung |
-| `availability` | `combined`, `source`, `none` | `combined` | verdichtetes Reading und Quellen, nur Quellen oder nichts davon |
+| `style` | `raw`, `fhem` | `fhem` | Readingnamen roh aus der Discovery oder nach FHEM-Konvention |
+| `sets` | `list`, `hook` | `hook` | Schaltbefehle als `setList`-Zeilen oder ueber die `SetExtensionsFn` |
+| `readings` | `list`, `parse` | `parse` | Readings ueber `readingList`-Zeilen oder ueber die eigene Auswertung |
+| `reachability` | `full`, `sources`, `none` | `sources` | verdichtetes Reading und Quellen, nur Quellen oder nichts davon |
 | `forceNEXT` | `0`, `1` | `0` | Discovery-Nachricht zusaetzlich an weitere Module durchreichen |
 | `hide` | Readingnamen, kommasepariert | leer | einzelne Readings nicht anlegen |
 
@@ -194,11 +190,7 @@ die naechsthoehere gilt. `set <name> deviceKey <device> <schluessel>=<wert>`
 schreibt die Geraeteebene und prueft dabei Schluessel und Wert; eine Familie ist
 dort nicht erlaubt, weil die Familie des Geraets bereits feststeht.
 
-Die frueheren Attribute `fhemConventions`, `setsViaHook` und `readingsViaParse`
-bleiben als veraltete Schreibweise gueltig und wirken wie `style=fhem`,
-`sets=hook` und `readings=parse`. `availabilityReading none` entspricht
-`availability=source`: Das verdichtete Reading entfaellt, die Quellreadings
-bleiben. Ein Geraet, das unter `style=fhem` entstanden ist, behaelt die
+Ein Geraet, das unter `style=fhem` entstanden ist, behaelt die
 Konvention auch dann, wenn der Schluessel spaeter wieder entfaellt; sonst
 kippten bestehende Readingwerte auf neue Namen.
 
@@ -212,7 +204,7 @@ Zwei verschiedene Aussagen, deshalb zwei Readings:
 - `availability` verdichtet alle Quellen eines Geraets und beruecksichtigt
   zusaetzlich, ob FHEM gerade eine Brokerverbindung hat. Bei Brokerverlust steht
   dort `offline`, waehrend der retained `lwt` weiter die letzte Aussage des
-  Geraets zeigt. Es entsteht nur mit `availability=combined`.
+  Geraets zeigt. Es entsteht nur mit `reachability=full`.
 
 Der einheitliche Name ist eine bewusste Entscheidung. Die Geraete selbst
 benennen dasselbe voellig verschieden; an einem Broker mit sechzehn Clients
@@ -422,9 +414,8 @@ zugeordnet. Ein leerer retained Config-Payload entfernt die zuvor ueber dieses
 Topic angekuendigte Entity beziehungsweise das gesamte Device aus der
 Discovery-Verwaltung.
 
-Das sichtbare Reading `deviceAvailability` beziehungsweise der mit
-`availabilityReading` festgelegte Name verknuepft die angekuendigten
-Availability-Quellen mit dem Zustand des am `MQTT2_DISCOVERY` gebundenen IODev.
+Das sichtbare Reading fuer die Erreichbarkeit (`lwt` oder `availability`, siehe
+oben) verknuepft die angekuendigten Availability-Quellen mit dem Zustand des am `MQTT2_DISCOVERY` gebundenen IODev.
 Verliert beispielsweise ein `MQTT2_CLIENT` seine Brokerverbindung, gehen alle
 von dieser Discovery-Instanz verwalteten Devices offline. Nach dem Reconnect
 werden die zuletzt bekannten Quellen erneut ausgewertet. Devices ohne eigene
@@ -433,8 +424,8 @@ Quelle noch nie eingetroffen, bleibt das sichtbare Reading auf `unknown`. Fuer
 jedes neu angewendete Availability-Topic an einem `MQTT2_CLIENT` wird genau ein
 Timer angelegt, der nach 60 Sekunden nur dieses Retained-Topic abonniert. Der
 normale MQTT-Datenstrom wird dabei weder gecacht noch von Discovery ausgewertet.
-Ein gleichnamiges Nutzdatenfeld wird kollisionsfrei als `state_deviceAvailability`
-beziehungsweise mit seinem qualifizierten Entity-Namen angelegt. Wird das gebundene
+Ein gleichnamiges Nutzdatenfeld wird kollisionsfrei mit seinem qualifizierten
+Entity-Namen angelegt. Wird das gebundene
 `MQTT2_SERVER`- oder `MQTT2_CLIENT`-Device geloescht, verwirft Discovery zudem
 seine ausstehende Queue, setzt alle verwalteten Ziele offline und wechselt selbst
 auf `inactive`.
