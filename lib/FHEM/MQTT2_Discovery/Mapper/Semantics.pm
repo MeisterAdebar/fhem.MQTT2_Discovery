@@ -109,6 +109,11 @@ sub _semantic_display_name {
 # on und off abgebildet, waere eine zweite Abbildung auf die Rohwerte irrefuehrend.
 sub _read_is_mapped {
 	my ($entity, $component) = @_;
+
+	# Der Schalter gehoert dem Mapper und wird hier nur gelesen. Perl haelt einen
+	# einmal genannten qualifizierten Namen fuer einen Tippfehler; ab Perl 5.42
+	# ist diese Warnung im Lauf mit warnings=FATAL toedlich.
+	no warnings 'once';  ## no critic (TestingAndDebugging::ProhibitNoWarnings)
 	return 0 if !$MQTT2_Discovery::Mapper::FHEM_CONVENTIONS;
 	return 0 if ref($entity) ne 'HASH';
 	return 0 if ($component // '') !~ /^(?:switch|binary_sensor|light)$/;

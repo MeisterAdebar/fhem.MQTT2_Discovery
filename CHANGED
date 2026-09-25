@@ -1,6 +1,17 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: aa4455e99148f1c34e52ad0d8959b948041b2702fd66f8182a8ec1458e5d59ed
+# Msg-SHA256: e1ae8cd5078e7943c996f51388cbed269201d4c971d6b09a772c7cfc045ee1cf
+- change: MQTT2_DISCOVERY: Zwei einmal genannte Namen brechen den Lauf auf Perl
+  5.42 nicht mehr
+  - Perl haelt einen qualifizierten Namen, der nur einmal vorkommt, fuer einen
+    moeglichen Tippfehler. Ab 5.42 ist diese Warnung im Testlauf mit
+    warnings=FATAL toedlich: tests/55_queue.t starb vor seinem Plan, der Job
+    brach ab. Auf 5.16, 5.32 und 5.38 blieb es eine Anmerkung.
+  - Betroffen waren der Schalter FHEM_CONVENTIONS des Mappers, den Semantics
+    nur liest, und QUEUE_DELAY im Queue-Test. Beide Stellen schalten die
+    Warnung jetzt ausdruecklich ab, mit Begruendung daneben.
+  - Die Stellen sind aelter als diese Fassung; erst der Lauf auf 5.42 macht sie
+    toedlich.
 - change: MQTT2_DISCOVERY: Ein Kanal ein Geraet, zwei Kanaele zwei Geraete
   - Ein mehrkanaliges Geraet wird in ein Geraet je Kanal aufgeteilt, nicht in
     ein technisches Hauptgeraet und dazu die Kanaele. Der erste belegte Kanal

@@ -370,6 +370,9 @@ subtest 'MQTT2_CLIENT verarbeitet Retained erst nach dem Neustart' => sub {
 	# fuehrt alle Entities einmal zusammen und ersetzt den alten Besitzstand. Die
 	# testweise Wartezeit von fuenf Sekunden veraendert nur den Timertermin.
 	delete $main::attr{mqtt}{ignoreRegexp};
+	# Wie in Semantics.pm: ein einmal genannter qualifizierter Name gilt Perl als
+	# moeglicher Tippfehler, ab 5.42 toedlich im Lauf mit warnings=FATAL.
+	no warnings 'once';
 	local $FHEM::MQTT2_DISCOVERY::QUEUE_DELAY = 5;
 	my $commands_before_replay = scalar @{ command_log() };
 	for my $discovery (@discoveries) {
