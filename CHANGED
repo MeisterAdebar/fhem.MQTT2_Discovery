@@ -1,6 +1,28 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 46b67465bc950e1c0387ca8fc2460ad70bc37570492acc053e92baaaf2feae87
+# Msg-SHA256: 53411026aa29d103c4a6dfc0b422cda8b8f6dff47b981539699f92b6aae71734
+- change: MQTT2_DISCOVERY: Set-Befehle in der Kette von SetExtensions, und der
+  Block bleibt der des Geraets
+  - Die Set-Befehle haengen sich in @{$modules{MQTT2_DEVICE}{SetExtensionsFn}}
+    ein. Zwei Fallen gehoeren dazu: SE_Next setzt die Kette nur fort, wenn die
+    Rueckgabe auf "Unknown argument <cmd>, choose one of" passt und $cmd dort
+    unescaped interpoliert wird, und SetExtensions haengt AttrTemplate_Set
+    selbst an.
+  - get payloads ersetzt Topics und Geraetekennungen nicht. Ein Block mit
+    ersetzten Kennungen beschreibt nicht mehr das Geraet, aus dem er stammt,
+    und sein Zwilling sendet auf einen Zweig, auf dem keine Hardware antwortet.
+    Geschwaerzt wird, was das Netz des Anwenders verraet.
+  - Der eigene Block trifft damit dieselbe Identitaet wie das Geraet: Zweimal
+    einspielen legt nichts Neues an, und ein fehlendes Geraet wird
+    wiederhergestellt, mit seiner eigenen Client-ID statt mit der Ersatz-ID.
+  - Ein Name, den ein anderer Datensatz haelt, gilt als belegt, auch ohne sein
+    Geraet. Ein fremder Block bekommt den Ausweichnamen und traegt einen
+    comment, weil ihm die Hardware fehlt.
+  - Der Dialog von replayPayloads ist wie der der Schluessel aufgebaut und
+    schickt den Block im Koerper der Anfrage. Das CSRF-Merkmal heisst
+    FW_csrfToken und wird ueber addcsrf angehaengt.
+  - Die Commandref liegt in beiden Sprachen vor, gegeneinander geprueft; die
+    englische ist die verbindliche.
 - change: MQTT2_DISCOVERY: Dialoge, ruhiges Log, Vorgaben und der Schluessel
   reachability
   - Die Readingauswahl und die Schluessel eines Geraets werden in einem

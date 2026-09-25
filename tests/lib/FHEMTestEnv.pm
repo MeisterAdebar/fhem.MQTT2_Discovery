@@ -22,7 +22,10 @@ sub reset_env {
 	%main::attr = (global => { modpath => '.' });
 	%main::modules = (
 		MQTT2_DISCOVERY => {},
-		MQTT2_DEVICE => { Match => '.*', defptr => { re => {}, cid => {}, bridge => {} } },
+		# LOADED kennzeichnet in FHEM ein geladenes Modul; das Discovery-Modul
+		# reiht sich nur dann in dessen SetExtensions-Kette ein.
+		MQTT2_DEVICE => { Match => '.*', LOADED => 1,
+			defptr => { re => {}, cid => {}, bridge => {} } },
 		MQTT_GENERIC_BRIDGE => { Match => '.*' },
 	);
 	@COMMAND_LOG = ();

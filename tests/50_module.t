@@ -23,8 +23,8 @@ subtest 'Initialize und Define' => sub {
 	is($module->{GetFn}, \&FHEM::MQTT2_DISCOVERY::Get, 'GetFn registriert');
 	is($module->{ParseFn}, \&FHEM::MQTT2_DISCOVERY::Parse, 'ParseFn registriert');
 	is($module->{NotifyFn}, \&FHEM::MQTT2_DISCOVERY::Notify, 'NotifyFn registriert');
-	is($main::data{MQTT2_DEVICE}{SetExtensionsFn}, 'MQTT2_DISCOVERY_SetExtensions',
-		'der Hook traegt den in main sichtbaren Namen ein');
+	is($main::modules{MQTT2_DEVICE}{SetExtensionsFn}, ['MQTT2_DISCOVERY_SetExtensions'],
+		'der Hook reiht den in main sichtbaren Namen in die Kette ein');
 	is($module->{FW_deviceOverview}, 1, 'kontextbezogene FHEMWEB-Hilfe ist aktiviert');
 	like($module->{Match}, qr/config/, 'globales Match erfasst Config-Topics');
 	like($module->{Match}, qr/sensors/, 'globales Match erfasst native Tasmota-Sensor-Topics');

@@ -1,70 +1,46 @@
-# Set-Kommandos ohne setList: der Hook in 10_MQTT2_DEVICE.pm
+# Set-Kommandos ohne setList: die Kette von SetExtensions
 
-Damit ein von MQTT2_DISCOVERY verwaltetes Geraet ohne `setList`-Attribut auskommt, muss
-`MQTT2_DEVICE` beim Setzen eines unbekannten Befehls nachfragen. Die Idee stammt aus dem
-FHEM-Forum, Thread 145198 "MQTT best current practice".
+Seit `SetExtensions.pm` r31666 braucht es dafuer **keine Aenderung an
+10_MQTT2_DEVICE.pm**. `SE_Next` ruft alle Funktionen auf, die als Liste unter
+`$modules{<Zieltyp>}{SetExtensionsFn}` stehen; dieselbe Liste benutzt FHEM fuer
+`AttrTemplate_Set`.
 
-## Vorgeschlagene Fassung aus dem Forum
-
-`10_MQTT2_DEVICE.pm`, in `MQTT2_DEVICE_Set`:
-
-```perl
-my $cmd = $sets->{$cmdName};
-if(!$cmd) {
-  return MQTT2_DISCOVERY_SetExtensions($hash, $cmdList, @a) if defined &MQTT2_DISCOVERY_SetExtensions;
-  return SetExtensions($hash, $cmdList, @a);
-}
-```
-
-Sie funktioniert, nennt aber ein Fremdmodul beim Namen.
-
-## In FHEM uebliche Fassung
-
-In FHEM traegt sich das Fremdmodul ein, der Kern kennt es nicht. Beispiele dafuer sind
-`$data{FWEXT}{...}{FUNC}` bei FHEMWEB sowie `$modules{<Typ>}{FingerprintFn}`,
-`{NotifyOrderPrefix}` und `{AttrFn}` in `fhem.pl`. Eine Pruefung der Art
-`defined &main::Fremdfunktion` kommt in `fhem.pl` an keiner Stelle vor.
-
-`10_MQTT2_DEVICE.pm`:
+## Vertrag
 
 ```perl
-my $cmd = $sets->{$cmdName};
-if(!$cmd) {
-  my $fn = $modules{MQTT2_DEVICE}{SetExtensionsFn};
-  return &{$fn}($hash, $cmdList, @a) if($fn);
-  return SetExtensions($hash, $cmdList, @a);
-}
+my $ret = &{$fn}($hash, $list, $name, $cmd, @a);
+return $ret if(!$ret || $ret !~ m/^Unknown argument $cmd, choose one of (.*)/);
+$list = $1;
 ```
 
-Das Fremdmodul registriert sich einmal in seinem `Initialize`:
+Ein Glied der Kette fuehrt aus, was ihm gehoert, und gibt sonst die um seine
+eigenen Befehle ergaenzte Auswahl zurueck. Wer `SetExtensions` selbst aufruft,
+baut eine Schleife.
+
+## Zwei Fallen
+
+**Der Befehl steht ungeschuetzt im Muster.** Bei der Abfrage `?` — genau der,
+mit der FHEMWEB seine Auswahl aufbaut — trifft `m/^Unknown argument ?, choose
+one of /` den eigenen Text nicht, weil `?` das vorangehende Zeichen optional
+macht. Die Kette endet damit nach dem ersten Glied. Das Modul laesst den Befehl
+in diesem Fall aus seiner Antwort weg, dann passt das Muster wieder.
+
+**Wer hinten steht, kommt bei `?` nie zum Zug.** `SetExtensions` haengt
+`AttrTemplate_Set` selbst an die Liste an. Zusammen mit der ersten Falle heisst
+das: Ein spaeter eingereihtes Glied wird bei der Auswahlabfrage nie gefragt.
+Das Modul reiht sich deshalb vorn ein und stellt die Reihenfolge bei jedem
+Rendern wieder her.
+
+## Registrierung
 
 ```perl
-$data{MQTT2_DEVICE}{SetExtensionsFn} = 'MQTT2_DISCOVERY_SetExtensions';
+$module->{SetExtensionsFn} = [] if ref($module->{SetExtensionsFn}) ne 'ARRAY';
+@{ $module->{SetExtensionsFn} } = grep { $_ ne $name } @{ $module->{SetExtensionsFn} };
+unshift @{ $module->{SetExtensionsFn} }, $name;
 ```
 
-Die Ablage erfolgt bewusst in `%data` und nicht in `%modules`. Ein Schreibzugriff auf
-`$modules{<noch nicht geladenes Modul>}{...}` legt dort durch Autovivification einen Eintrag
-**ohne** `Match` und `ParseFn` an. Steht dieser Modulname in `clientOrder` und ist er bereits
-im zwischengespeicherten `.clientArray`, stirbt FHEM beim naechsten Dispatch:
-
-```
-PERL WARNING: Use of uninitialized value in regexp compilation at fhem.pl line 4195.
-Can't use an undefined value as a subroutine reference at fhem.pl line 4203.
-```
-
-Genau diese beiden Zeilen liessen sich auf einem Testsystem gezielt erzeugen, indem ein leerer
-Eintrag in `%modules` angelegt und der Modulname in `.clientArray` aufgenommen wurde; FHEM
-beendete sich dabei. `computeClientArray` filtert solche Eintraege zwar heraus, der
-zwischengespeicherte Array wird beim Setzen von `clientOrder` aber nicht neu berechnet.
-
-Genau das macht dieser Zweig. Ohne die Ergaenzung in `10_MQTT2_DEVICE.pm` bleibt der Eintrag
-wirkungslos, das Modul verhaelt sich dann unveraendert.
-
-## Offene Punkte
-
-- Ein einzelner Eintrag laesst nur einen Registranten zu. Bei mehreren braeuchte es eine Liste
-  samt Reihenfolge, sonst gewinnt stillschweigend das zuletzt geladene Modul.
-- Fuer `getList` gibt es kein Gegenstueck; Abfragen bleiben also weiterhin ein Attribut.
-- Ohne den Hook hat ein Geraet mit `setsViaHook 1` gar keine Befehle mehr, denn in der
-  `fhem.cfg` steht nichts. Ein FHEM-Update ueberschreibt `10_MQTT2_DEVICE.pm` und damit den
-  Hook. Deshalb ist die Vorgabe des Attributs 0.
+Eingetragen wird nur in ein geladenes `MQTT2_DEVICE`: Ein Schreibzugriff auf
+`$modules{<nicht geladenes Modul>}` erzeugt dort einen Eintrag ohne `Match` und
+`ParseFn`, an dem FHEMs Dispatch stirbt. Ein `reload` des Zielmoduls setzt die
+Liste zurueck, deshalb wird beim Start, beim Define und bei jedem Rendern
+erneut eingereiht.

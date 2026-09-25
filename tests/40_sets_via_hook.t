@@ -79,19 +79,26 @@ sub discover {
 	return;
 }
 
-subtest 'Das Modul traegt sich als Callback ein' => sub {
-
-	# Die Registrierung geschieht im Initialize, das die Testumgebung ausfuehrt.
+subtest 'Das Modul reiht sich in die Kette von SetExtensions ein' => sub {
 	setup();
-	no warnings 'once';
-	is($main::data{MQTT2_DEVICE}{SetExtensionsFn}, 'MQTT2_DISCOVERY_SetExtensions',
-		'MQTT2_DEVICE findet den Namen in %data');
 
-	# Ein Schreibzugriff auf %modules wuerde dort einen Eintrag ohne Match und
-	# ParseFn erzeugen, an dem FHEMs Dispatch stirbt.
-	ok(!(exists($main::modules{MQTT2_DEVICE})
-			&& exists($main::modules{MQTT2_DEVICE}{SetExtensionsFn})),
-		'in %modules wird nichts eingetragen');
+	# SE_Next ruft alle Namen auf, die als Liste unter dem Zieltyp stehen;
+	# dieselbe Liste benutzt FHEM fuer AttrTemplate_Set (SetExtensions.pm).
+	is($main::modules{MQTT2_DEVICE}{SetExtensionsFn}, ['MQTT2_DISCOVERY_SetExtensions'],
+		'der eigene Name steht in der Kette');
+
+	# Ein zweiter Lauf darf ihn nicht erneut anhaengen.
+	FHEM::MQTT2_DISCOVERY::register_set_extensions();
+	is($main::modules{MQTT2_DEVICE}{SetExtensionsFn}, ['MQTT2_DISCOVERY_SetExtensions'],
+		'und steht nur einmal darin');
+
+	# Ohne geladenes Zielmodul entstuende ein Modulhash ohne Match und ParseFn,
+	# an dem FHEMs Dispatch stirbt.
+	delete $main::modules{MQTT2_DEVICE}{LOADED};
+	delete $main::modules{MQTT2_DEVICE}{SetExtensionsFn};
+	FHEM::MQTT2_DISCOVERY::register_set_extensions();
+	ok(!exists($main::modules{MQTT2_DEVICE}{SetExtensionsFn}),
+		'ohne geladenes MQTT2_DEVICE wird nichts eingetragen');
 };
 
 subtest 'Mit sets=hook entsteht kein setList-Attribut' => sub {
@@ -117,10 +124,14 @@ subtest 'Der Hook bietet die Befehle an und fuehrt sie aus' => sub {
 	discover($hash);
 	@published = ();
 
-	# Bei "?" ergaenzt der Hook die Auswahl und ueberlaesst die Antwort SetExtensions.
-	FHEM::MQTT2_DISCOVERY::SetExtensions($main::defs{$target}, '', $target, '?');
-	is(scalar(@fallback), 1, 'unbekannter Befehl geht an SetExtensions');
-	like($fallback[0]{list}, qr/\bswitch_0:on,off\b/, 'die Befehle stehen in der Auswahl');
+	# Bei "?" ergaenzt der Hook die Auswahl und gibt sie an die Kette zurueck;
+	# ein Aufruf von SetExtensions waere hier eine Schleife.
+	my $antwort = FHEM::MQTT2_DISCOVERY::SetExtensions($main::defs{$target}, '', $target, '?');
+	is(scalar(@fallback), 0, 'die Kette wird nicht erneut betreten');
+	# Bei "?" laesst SE_Next den Befehl ungeschuetzt in sein Muster; die Antwort
+	# nennt ihn deshalb nicht, sonst endete die Kette hier.
+	like($antwort, qr/^Unknown argument, choose one of /, 'die Antwort folgt dem Vertrag');
+	like($antwort, qr/\bswitch_0:on,off\b/, 'die Befehle stehen in der Auswahl');
 
 	# Ein bekannter Befehl wird selbst ausgefuehrt.
 	is(FHEM::MQTT2_DISCOVERY::SetExtensions($main::defs{$target}, '', $target, 'switch_0', 'on'),
@@ -154,9 +165,12 @@ subtest 'Fremde Devices bleiben unveraendert' => sub {
 	discover($hash);
 	@fallback = ();
 	$main::defs{fremd} = { NAME => 'fremd', TYPE => 'MQTT2_DEVICE', READINGS => {} };
-	FHEM::MQTT2_DISCOVERY::SetExtensions($main::defs{fremd}, 'on:noArg', 'fremd', '?');
-	is(scalar(@fallback), 1, 'der Aufruf landet bei SetExtensions');
-	is($fallback[0]{list}, 'on:noArg', 'die Kommandoliste bleibt unveraendert');
+	my $antwort = FHEM::MQTT2_DISCOVERY::SetExtensions(
+		$main::defs{fremd}, 'on:noArg', 'fremd', '?',
+	);
+	is(scalar(@fallback), 0, 'die Kette wird nicht erneut betreten');
+	is($antwort, 'Unknown argument, choose one of on:noArg',
+		'die Kommandoliste wird unveraendert weitergereicht');
 };
 
 done_testing();
