@@ -12,6 +12,15 @@ use MQTT2_Discovery::Template ();
 
 # Alle Renderer behandeln Discovery-Daten als untrusted Input. Escaping und
 # Validierung passieren deshalb hier zentral, bevor FHEM-Attributtext entsteht.
+# MQTT2_SERVER und MQTT2_CLIENT ersetzen im empfangenen Topic ':' durch '_'
+# (Attribut topicConversion, Default 1). Die erzeugten readingList-Zeilen muessen
+# deshalb den umgewandelten Namen treffen; das Modul setzt den Schalter je IODev.
+our $TOPIC_CONVERSION = 0;
+# Mit availabilityReading none entfaellt das verdichtete sichtbare Reading;
+# Quellen und Regeln bleiben als interne Readings erhalten.
+our $AVAILABILITY_VISIBLE = 1;
+
+
 sub _regex_literal {
 	my ($value) = @_;
 	$value =~ s{([\\.^$|()\[\]{}*+?])}{\\$1}g;
@@ -47,6 +56,13 @@ sub _mqtt_filter_regex {
 sub _regex {
 	my ($topic, $device_topic, $payload) = @_;
 	my $regex;
+
+	# Empfangene Topics erreichen FHEM nur in umgewandelter Form; Publish-Topics
+	# der setList bleiben davon unberuehrt, sie laufen nicht ueber diesen Weg.
+	if ($TOPIC_CONVERSION && defined($topic)) {
+		$topic =~ s/:/_/g;
+		$device_topic =~ s/:/_/g if defined($device_topic);
+	}
 
 	# Nur echte Topic-Prefixe werden durch $DEVICETOPIC ersetzt; aehnlich
 	# beginnende Segmente duerfen nicht versehentlich zusammenfallen.
@@ -298,6 +314,7 @@ sub _render_runtime_reading {
 		runtime => ($entry->{template_context} || '') eq 'trigger'
 			? 'triggerReading' : 'reading',
 		template => $entry->{template}, name => $entry->{name},
+		(ref($entry->{value_map}) eq 'HASH' ? (map => $entry->{value_map}) : ()),
 	}, $references);
 	return defined($expression) ? "$regex $expression" : undef;
 }
@@ -403,6 +420,7 @@ sub _render_topic_runtime {
 		push @readings, {
 			name => $entry->{name}, template => $entry->{template},
 			(exists($entry->{items}) ? (items => $entry->{items}) : ()),
+			(ref($entry->{value_map}) eq 'HASH' ? (map => $entry->{value_map}) : ()),
 			(($entry->{template_context} || '') eq 'trigger' ? (context => 'trigger') : ()),
 		};
 	}
@@ -430,7 +448,13 @@ sub render_entry {
 		return _render_topic_runtime($entry->{topic}, [$entry], undef, $device_topic, $references)
 			if exists($entry->{items});
 		my $regex = _regex($entry->{topic}, $device_topic, $entry->{payload});
-		return "$regex $entry->{name}" if !defined($entry->{template}) || $entry->{template} eq '';
+
+		# Ohne Template liefert erst die Runtime die abgebildeten Werte.
+		if (!defined($entry->{template}) || $entry->{template} eq '') {
+			return "$regex $entry->{name}" if ref($entry->{value_map}) ne 'HASH';
+			return _render_runtime_reading({ %$entry, template => '{{ value }}' },
+				$device_topic, $references);
+		}
 		return _render_runtime_reading($entry, $device_topic, $references);
 	}
 
@@ -581,7 +605,7 @@ sub _render_availability_groups {
 
 	for my $topic (sort keys %topics) {
 		my $configuration = {
-			reading => $availability_reading,
+			reading => ($AVAILABILITY_VISIBLE ? $availability_reading : ''),
 			sources => [ map { $sources{$_} } sort keys %{ $topics{$topic} } ],
 			policies => \@policies,
 		};
@@ -593,7 +617,8 @@ sub _render_availability_groups {
 			kind => 'availability_group', role => 'availability',
 			name => $availability_reading, reserved_reading => 1, topic => $topic,
 			names => [
-				$availability_reading, sort(keys %{ $topics{$topic} }), sort(keys %policies),
+				($AVAILABILITY_VISIBLE ? $availability_reading : ()),
+				sort(keys %{ $topics{$topic} }), sort(keys %policies),
 			],
 			configuration => $configuration,
 			line => _regex($topic, $device_topic, undef) . " $expression",

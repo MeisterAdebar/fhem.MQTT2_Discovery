@@ -244,6 +244,7 @@ sub _light_details {
 		$entity->{white_state_topic} = $white_topic;
 		$entity->{white_value_template} = $white_template if defined $white_template;
 	}
+	return;
 }
 
 # Erzeugt zusaetzliche Trigger-, Button- und Hilfs-Entities aus Options- und GPIO-Daten.
@@ -546,6 +547,7 @@ sub _walk_sensor_leaves {
 		return;
 	}
 	push @$leaves, [$path, $template];
+	return;
 }
 
 # Wandelt alle sicheren Sensorblaetter in lesbare Tasmota-Sensor-Entities um.

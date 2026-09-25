@@ -256,6 +256,7 @@ sub _expand_topics {
 		}
 
 	}
+	return;
 }
 
 # Erkennt den fachlichen JSON-Hauptpfad auch hinter sicheren Wertfiltern.
@@ -351,6 +352,7 @@ sub _normalise_bindings {
 	$config->{brightness_command_codec} = {
 		format => 'json', key => 'brightness', value_type => 'number',
 	};
+	return;
 }
 
 # Baut aus einer validierten HA-Komponente die gemeinsame Parser-Entity auf.

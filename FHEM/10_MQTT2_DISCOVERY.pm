@@ -22,7 +22,7 @@ use MQTT2_Discovery::Mapper::Semantics ();
 use MQTT2_Discovery::Template ();
 use MQTT2_Discovery::FHEMGateway ();
 use MQTT2_Discovery::DevicePlanner ();
-use vars qw(%defs %attr %modules $readingFnAttributes);
+use vars qw(%defs %attr %modules %data $readingFnAttributes);
 
 our $MQTT2_DISCOVERY_VERSION = '0.9.11';
 our $MQTT2_DISCOVERY_QUEUE_DELAY = 0.01;
@@ -34,13 +34,13 @@ our $MQTT2_DISCOVERY_DEFAULT_AVAILABILITY_READING = 'availability';
 
 # Pro Modulinstanz wird genau ein Gateway erzeugt und fuer alle FHEM-Zugriffe
 # wiederverwendet. Tests koennen vorab ein eigenes Gateway einsetzen.
-sub MQTT2_DISCOVERY_gateway($) {
+sub MQTT2_DISCOVERY_gateway {
 	my ($hash) = @_;
 	return $hash->{helper}{gateway} ||= MQTT2_Discovery::FHEMGateway->new();
 }
 
 # Das normale FHEM-Attribut verbose steuert alle Meldungen dieses Devices.
-sub MQTT2_DISCOVERY_log_enabled($$) {
+sub MQTT2_DISCOVERY_log_enabled {
 	my ($hash, $level) = @_;
 	return 0 if ref($hash) ne 'HASH' || !defined($hash->{NAME});
 	my $gateway = MQTT2_DISCOVERY_gateway($hash);
@@ -52,23 +52,22 @@ sub MQTT2_DISCOVERY_log_enabled($$) {
 }
 
 # Schreibt begrenzte einzeilige Diagnosemeldungen nur ab der aktiven Verbose-Stufe.
-sub MQTT2_DISCOVERY_log($$$) {
+sub MQTT2_DISCOVERY_log {
 	my ($hash, $level, $message) = @_;
 	return if !MQTT2_DISCOVERY_log_enabled($hash, $level);
 	$message = '' if !defined $message;
 	$message =~ s/[\r\n]+/ /g;
 	$message = substr($message, 0, 4096) . '... <truncated>' if length($message) > 4096;
-	MQTT2_DISCOVERY_gateway($hash)->log(
+	MQTT2_DISCOVERY_gateway($hash)->log_message(
 		$hash->{NAME}, $level, "MQTT2_DISCOVERY $hash->{NAME}: $message",
 	);
 	return;
 }
 
 # Vorwaertsdeklaration fuer die rekursive Schwaerzung verschachtelter Logdaten.
-sub MQTT2_DISCOVERY_log_redacted($);
 
 # Schwaerzt Geheimnisse rekursiv, bevor strukturierte Payloaddaten protokolliert werden.
-sub MQTT2_DISCOVERY_log_redacted($) {
+sub MQTT2_DISCOVERY_log_redacted {
 	my ($value) = @_;
 
 	# Hashes werden schluesselweise kopiert, damit vertrauliche Felder maskiert
@@ -91,7 +90,7 @@ sub MQTT2_DISCOVERY_log_redacted($) {
 }
 
 # Payloads erscheinen nur auf Stufe 5, kanonisch, begrenzt und mit geschwaerzten Geheimnissen.
-sub MQTT2_DISCOVERY_log_payload($) {
+sub MQTT2_DISCOVERY_log_payload {
 	my ($payload) = @_;
 	$payload = '' if !defined $payload;
 	return '<empty payload>' if $payload eq '';
@@ -108,8 +107,15 @@ sub MQTT2_DISCOVERY_log_payload($) {
 # --- FHEM-Lebenszyklus und Benutzerbefehle -----------------------------------
 
 # Registriert FHEMs Lebenszyklus-, Parser- und Attributschnittstellen fuer den Modultyp.
-sub MQTT2_DISCOVERY_Initialize($) {
+
+sub MQTT2_DISCOVERY_Initialize {
 	my ($hash) = @_;
+	# Ein Fremdmodul traegt sich ein, statt in 10_MQTT2_DEVICE.pm namentlich zu
+	# stehen; dort genuegt dann der Aufruf des hinterlegten Namens. Die Ablage
+	# erfolgt in %data wie bei FHEMWEB und ausdruecklich nicht in %modules: Ein
+	# Schreibzugriff auf $modules{<noch nicht geladenes Modul>} erzeugt dort einen
+	# Eintrag ohne Match und ParseFn, an dem Dispatch spaeter stirbt.
+	$data{MQTT2_DEVICE}{SetExtensionsFn} = 'MQTT2_DISCOVERY_SetExtensions';
 	$hash->{DefFn} = 'MQTT2_DISCOVERY_Define';
 	$hash->{UndefFn} = 'MQTT2_DISCOVERY_Undef';
 	$hash->{GetFn} = 'MQTT2_DISCOVERY_Get';
@@ -122,12 +128,13 @@ sub MQTT2_DISCOVERY_Initialize($) {
 	$hash->{FW_deviceOverview} = 1;
 	# Match bleibt absichtlich prefixunabhaengig, da Prefixe je IODev konfiguriert sind.
 	$hash->{Match} = '\\x00(?:[^\\x00]+/(?:config|sensors|announce|online|events/rpc)|mqtt2_discovery/[^/\\x00]+/shelly/[a-f0-9]{16}/(?:info|config|status|components)/rpc|[^\\x00]+/discovery/[^/\\x00]+/[^/\\x00]+)\\x00';
-	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
+	$hash->{AttrList} = 'discoveryPrefixes shellyDiscovery:0,1 fhemConventions:0,1 setsViaHook:0,1 readingsViaParse:0,1 deviceNamePrefix existingDevice:conservative,ignore,replace extraJsonReadings:include,ignore availabilityReading autoCreate:0,1 autoDelete:0,1 createReadings:0,1 disable:0,1 ' . $readingFnAttributes;
 	$modules{MQTT2_DISCOVERY}{defptr} ||= {};
+	return;
 }
 
 # Validiert die Definition und bindet genau eine Discovery-Instanz an ein MQTT2-IODev.
-sub MQTT2_DISCOVERY_Define($$) {
+sub MQTT2_DISCOVERY_Define {
 	my ($hash, $definition) = @_;
 	my @parts = split /[ \t]+/, $definition;
 
@@ -189,7 +196,7 @@ sub MQTT2_DISCOVERY_Define($$) {
 }
 
 # Loest Timer und IODev-Registrierung einer entfernten oder geaenderten Instanz.
-sub MQTT2_DISCOVERY_Undef($$) {
+sub MQTT2_DISCOVERY_Undef {
 	my ($hash, undef) = @_;
 	my $io_name = $hash->{IODevName};
 	MQTT2_DISCOVERY_clear_queue($hash);
@@ -201,7 +208,7 @@ sub MQTT2_DISCOVERY_Undef($$) {
 }
 
 # Validiert Modulattribute und setzt disable-Aenderungen unmittelbar im Laufzeitstatus um.
-sub MQTT2_DISCOVERY_Attr(@) {
+sub MQTT2_DISCOVERY_Attr {
 	my ($operation, $name, $attribute, @values) = @_;
 	my $hash = $defs{$name};
 
@@ -242,6 +249,10 @@ sub MQTT2_DISCOVERY_Attr(@) {
 		} elsif ($attribute eq 'extraJsonReadings') {
 			return 'extraJsonReadings muss include oder ignore sein'
 				if $value !~ /^(?:include|ignore)$/;
+		} elsif ($attribute eq 'availabilityReading' && lc($value // '') eq 'none') {
+			# none ist erlaubt und bedeutet kein sichtbares Reading.
+		} elsif ($attribute eq 'readingsViaParse') {
+			return 'readingsViaParse muss 0 oder 1 sein' if $value !~ /^[01]$/;
 		} elsif ($attribute eq 'availabilityReading') {
 			return 'availabilityReading muss mit einem Buchstaben oder Unterstrich beginnen und darf nur Buchstaben, Ziffern, Punkte, Unterstriche und Bindestriche enthalten'
 				if $value !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/;
@@ -276,7 +287,7 @@ sub MQTT2_DISCOVERY_Attr(@) {
 }
 
 # Liefert den einzigen lesenden Benutzerbefehl als FHEMWEB-faehige Device-Uebersicht.
-sub MQTT2_DISCOVERY_Get($@) {
+sub MQTT2_DISCOVERY_Get {
 	my ($hash, @arguments) = @_;
 	shift @arguments;
 	my $command = shift @arguments;
@@ -296,7 +307,7 @@ sub MQTT2_DISCOVERY_Get($@) {
 }
 
 # Escaped dynamische Texte, bevor sie in die bewusst rohe FHEMWEB-HTML-Antwort gelangen.
-sub MQTT2_DISCOVERY_html_escape($) {
+sub MQTT2_DISCOVERY_html_escape {
 	my ($value) = @_;
 	$value = '' if !defined($value) || ref($value);
 	$value =~ s/&/&amp;/g;
@@ -308,7 +319,7 @@ sub MQTT2_DISCOVERY_html_escape($) {
 }
 
 # Codiert Zeichenketten als UTF-8-Querywert und erhaelt bereits codierte Bytestreams.
-sub MQTT2_DISCOVERY_url_encode($) {
+sub MQTT2_DISCOVERY_url_encode {
 	my ($value) = @_;
 	$value = '' if !defined($value) || ref($value);
 	my $encoded = utf8::is_utf8($value)
@@ -318,7 +329,7 @@ sub MQTT2_DISCOVERY_url_encode($) {
 }
 
 # Erzeugt einen themen- und Unterpfad-kompatiblen Link zur FHEMWEB-Detailansicht.
-sub MQTT2_DISCOVERY_device_link($) {
+sub MQTT2_DISCOVERY_device_link {
 	my ($name) = @_;
 	my $label = MQTT2_DISCOVERY_html_escape($name);
 	my $target = 'detail=' . MQTT2_DISCOVERY_url_encode($name);
@@ -333,7 +344,7 @@ sub MQTT2_DISCOVERY_device_link($) {
 }
 
 # Ordnet alle lebenden MQTT2_DEVICEs am gebundenen IODev der Registry oder dem Rest zu.
-sub MQTT2_DISCOVERY_device_groups($) {
+sub MQTT2_DISCOVERY_device_groups {
 	my ($hash) = @_;
 	my $devices = MQTT2_DISCOVERY_gateway($hash)->mqtt2_devices_for_iodev(
 		$hash->{IODev},
@@ -395,7 +406,7 @@ sub MQTT2_DISCOVERY_device_groups($) {
 }
 
 # Rendert eine der beiden Device-Gruppen als FHEMWEB-Tabelle mit stabiler Sortierung.
-sub MQTT2_DISCOVERY_devices_table($$$) {
+sub MQTT2_DISCOVERY_devices_table {
 	my ($heading, $devices, $empty_text) = @_;
 	my $html = '<table class="block wide"><tr class="odd"><td><b>'
 		. MQTT2_DISCOVERY_html_escape($heading) . ' (' . scalar(@$devices)
@@ -421,7 +432,7 @@ sub MQTT2_DISCOVERY_devices_table($$$) {
 }
 
 # Baut die rohe HTML-Antwort, die FHEMWEB bei Get-Aufrufen automatisch im Popup zeigt.
-sub MQTT2_DISCOVERY_devices_html($) {
+sub MQTT2_DISCOVERY_devices_html {
 	my ($hash) = @_;
 	my ($managed, $unmanaged) = MQTT2_DISCOVERY_device_groups($hash);
 	my $language = uc(MQTT2_DISCOVERY_gateway($hash)->attr_value(
@@ -442,14 +453,273 @@ sub MQTT2_DISCOVERY_devices_html($) {
 		. '</div></html>';
 }
 
+# Die abgewaehlten Readings liegen bewusst neben den Geraetedatensaetzen: Wird ein
+# MQTT2_DEVICE geloescht, verwirft die Registry seinen Datensatz und legt ihn bei
+# der naechsten Erkennung neu an; die Auswahl soll das ueberleben.
+sub MQTT2_DISCOVERY_ignored_entities {
+	my ($hash, $record) = @_;
+	return () if ref($record) ne 'HASH' || !defined($record->{name});
+	my $selections = MQTT2_DISCOVERY_registry($hash)->{selections};
+	return () if ref($selections) ne 'HASH'
+		|| ref($selections->{ $record->{name} }) ne 'ARRAY';
+	return grep { defined($_) && !ref($_) && $_ ne '' } @{ $selections->{ $record->{name} } };
+}
+
+# Alle Readingnamen, die der Dialog zur Auswahl stellt.
+sub MQTT2_DISCOVERY_selectable_readings {
+	my ($hash, $record) = @_;
+	my %names;
+	my $references = ref($record->{runtime_refs}) eq 'HASH' ? $record->{runtime_refs} : {};
+
+	for my $descriptor (values %$references) {
+		next if ref($descriptor) ne 'HASH';
+		my $operation = $descriptor->{operation} // '';
+		if ($operation eq 'reading' && defined($descriptor->{name})) {
+			$names{ $descriptor->{name} } = 1;
+		} elsif ($operation eq 'topic' && ref($descriptor->{configuration}) eq 'HASH') {
+
+			for my $reading (@{ $descriptor->{configuration}{readings} || [] }) {
+				$names{ $reading->{name} } = 1
+					if ref($reading) eq 'HASH' && defined($reading->{name});
+			}
+
+		}
+	}
+
+	my @sorted = sort keys %names;
+	return @sorted;
+}
+
+# FHEMWEB-Formular mit eigenem Knopf: Das Muster aus AttrTemplate.pm verlaesst sich
+# auf den Knopf von FW_okDialog; bei einem abgeschickten Set-Formular rendert
+# FHEMWEB die Antwort aber als ganze Seite, in der es diesen Knopf nicht gibt.
+sub MQTT2_DISCOVERY_select_readings_dialog {
+	my ($hash, $target_name, $selectable, $ignored) = @_;
+	my $command = MQTT2_DISCOVERY_html_escape("set $hash->{NAME} selectReadings $target_name");
+	my $detail = MQTT2_DISCOVERY_html_escape($target_name);
+	my $rows = join('', map {
+		my $name = MQTT2_DISCOVERY_html_escape($_);
+		my $checked = $ignored->{$_} ? '' : " checked='checked'";
+		"<tr><td><input type='checkbox' class='m2dSelect' name='$name'$checked></td><td>$name</td></tr>";
+	} @$selectable);
+	return '<html>'
+		. "<input type='hidden' id='m2dSelectCmd' value='$command'>"
+		. "<p>Welche Readings soll $detail behalten?</p>"
+		. "<table class='block wide'>$rows</table>"
+		. "<br><input type='button' id='m2dSelectOk' value='&Uuml;bernehmen'>"
+		. qq{<script>
+			(function(){
+				var apply = function(){
+					var cmd = document.getElementById("m2dSelectCmd").value;
+					var boxes = document.getElementsByClassName("m2dSelect");
+					for(var i=0; i<boxes.length; i++)
+						cmd += " "+boxes[i].getAttribute("name")+"="+(boxes[i].checked ? 1 : 0);
+					if(typeof FW_cmd == "function") {
+						FW_cmd(FW_root+"?cmd="+encodeURIComponent(cmd)+"&XHR=1", function(){
+							location.href = FW_root+"?detail=$detail";
+						});
+					} else {
+						location.href = "?cmd="+encodeURIComponent(cmd)+"&detail=$detail";
+					}
+				};
+				document.getElementById("m2dSelectOk").onclick = apply;
+
+				// Im Popup von FHEMWEB uebernimmt zusaetzlich dessen eigener Knopf.
+				if(typeof \$ == "function" && \$("#FW_okDialog").length) {
+					\$("#FW_okDialog").parent().find("button").css("display","block");
+					\$("#FW_okDialog").parent().find(".ui-dialog-buttonpane button")
+						.unbind("click").click(function(){ apply(); \$("#FW_okDialog").remove(); });
+				}
+			})();
+		</script>}
+		. '</html>';
+}
+
+# Zeigt die Auswahl an oder uebernimmt sie und baut die Listen neu auf.
+sub MQTT2_DISCOVERY_select_readings {
+	my ($hash, $target_name, @pairs) = @_;
+	return 'Usage: set <name> selectReadings <MQTT2_DEVICE> [<reading>=0|1 ...]'
+		if !defined($target_name) || $target_name eq '';
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+	my @records = grep {
+		ref($_) eq 'HASH' && defined($_->{name}) && $_->{name} eq $target_name
+	} values %{ $registry->{devices} || {} };
+	return "$target_name wird von $hash->{NAME} nicht verwaltet" if @records != 1;
+	my $record = $records[0];
+	my @selectable = MQTT2_DISCOVERY_selectable_readings($hash, $record);
+	my %ignored = map { ($_ => 1) } MQTT2_DISCOVERY_ignored_entities($hash, $record);
+
+	# Bereits abgewaehlte Namen entstehen nicht mehr und fehlen deshalb in den
+	# Runtime-Referenzen; fuer den Dialog gehoeren sie wieder in die Liste.
+	my %offered = map { ($_ => 1) } (@selectable, keys %ignored);
+	@selectable = sort keys %offered;
+	return "$target_name hat noch keine erkannten Readings" if !@selectable;
+
+	if (!@pairs) {
+		return MQTT2_DISCOVERY_select_readings_dialog($hash, $target_name, \@selectable, \%ignored)
+			if $hash->{CL} && ($hash->{CL}{TYPE} // '') eq 'FHEMWEB';
+		return "Usage: set $hash->{NAME} selectReadings $target_name "
+			. join(' ', map { "$_=" . ($ignored{$_} ? 0 : 1) } @selectable);
+	}
+	my %selection = map { ($_ => $ignored{$_} ? 0 : 1) } @selectable;
+
+	for my $pair (@pairs) {
+		my ($name, $value) = $pair =~ /^([A-Za-z0-9_.-]+)=([01])$/;
+		return "Ungueltige Angabe: $pair" if !defined($name);
+		return "Unbekanntes Reading: $name" if !exists($selection{$name});
+		$selection{$name} = $value;
+	}
+	my @ignore = sort grep { !$selection{$_} } keys %selection;
+
+	if (@ignore) {
+		$registry->{selections}{$target_name} = \@ignore;
+	} else {
+		delete $registry->{selections}{$target_name};
+	}
+	my $error = MQTT2_DISCOVERY_apply_device_lines($hash, $record, { rebuild_lists => 1 });
+	return $error if $error;
+	MQTT2_DISCOVERY_persist_registry($hash);
+
+	# Ein abgewaehltes Reading wird nicht mehr beschrieben; es stehen zu lassen
+	# wuerde einen veralteten Wert dauerhaft sichtbar machen.
+	for my $reading (@ignore) {
+		next if $reading =~ /^\./;
+		next if ref($defs{$target_name}{READINGS}) ne 'HASH'
+			|| !exists($defs{$target_name}{READINGS}{$reading});
+		MQTT2_DISCOVERY_gateway($hash)->delete_reading($defs{$target_name}, $reading);
+	}
+
+	MQTT2_DISCOVERY_log($hash, 2,
+		"selectReadings $target_name ignoriert: " . (@ignore ? join(',', @ignore) : '-'));
+	return undef;
+}
+
+# Die verwalteten Zieldevices erscheinen als Auswahlliste hinter selectReadings,
+# damit FHEMWEB ein Klappmenue statt eines Textfelds anbietet.
+sub MQTT2_DISCOVERY_set_list {
+	my ($hash) = @_;
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+	my @targets = sort grep { defined($_) && !ref($_) && $defs{$_} } map {
+		ref($_) eq 'HASH' ? $_->{name} : undef
+	} values %{ $registry->{devices} || {} };
+	my $select = @targets ? 'selectReadings:' . join(',', @targets) : 'selectReadings';
+	return "activate:noArg deactivate:noArg rebuildDevice $select rescan:noArg discoverShelly";
+}
+# Bedient die Set-Kommandos eines verwalteten MQTT2_DEVICE, ohne dass dort ein
+# setList-Attribut noetig ist: bei "?" ergaenzt die Funktion die Befehle in der
+# Auswahl, sonst fuehrt sie den gewaehlten Befehl aus. Fremde Devices reicht sie
+# unveraendert an SetExtensions weiter.
+sub MQTT2_DISCOVERY_SetExtensions {
+	my ($hash, $list, $name, $cmd, @a) = @_;
+	my ($discovery, $record) = MQTT2_DISCOVERY_runtimeRegistryRecord($name);
+	return SetExtensions($hash, $list, $name, $cmd, @a)
+		if ref($record) ne 'HASH' || ref($record->{hook_sets}) ne 'ARRAY';
+	my %sets = map { (($_->{name} // '') => $_) } @{ $record->{hook_sets} };
+	my $entry = defined($cmd) ? $sets{$cmd} : undef;
+
+	# Ohne passenden Befehl entscheidet SetExtensions, also auch bei "?".
+	if (!$entry) {
+		my $offered = join(' ', map {
+			$_->{name} . (defined($_->{spec}) && $_->{spec} ne '' ? ":$_->{spec}" : '')
+		} sort { ($a->{name} // '') cmp ($b->{name} // '') } @{ $record->{hook_sets} });
+		$list .= ($list eq '' ? '' : ' ') . $offered if $offered ne '';
+		return SetExtensions($hash, $list, $name, $cmd, @a);
+	}
+	my $payload = $entry->{kind} eq 'button' ? $entry->{payload}
+		: ref($entry->{mapping}) eq 'HASH' && defined($a[0]) ? $entry->{mapping}{ $a[0] } : undef;
+	return "Unbekannter Wert fuer $cmd" if !defined($payload);
+	my $error = MQTT2_DISCOVERY_gateway($discovery)->publish_mqtt(
+		$discovery->{IODev}, $entry->{topic}, $payload,
+	);
+	return $error if defined($error) && $error ne '';
+
+	# MQTT2_DEVICE setzt state nur fuer Befehle aus seiner eigenen setList; auf
+	# diesem Weg uebernimmt das Modul denselben Schritt.
+	MQTT2_DISCOVERY_gateway($discovery)->update_reading($defs{$name}, 'state',
+		$cmd . (@a ? ' ' . join(' ', @a) : ''), 1) if $defs{$name};
+	MQTT2_DISCOVERY_log($discovery, 3, "set $name $cmd ueber den Hook ausgefuehrt");
+	return undef;
+}
+# Mit readingsViaParse wertet das Modul die Nutzdaten selbst aus. Dafuer muss es
+# alle Nachrichten sehen, deshalb wird der Match des Moduls weit gestellt, solange
+# mindestens eine Instanz das Attribut gesetzt hat. Ohne das Attribut bleibt der
+# enge Match erhalten und nichts am bisherigen Ablauf aendert sich.
+our $MQTT2_DISCOVERY_NARROW_MATCH;
+sub MQTT2_DISCOVERY_update_match {
+	$MQTT2_DISCOVERY_NARROW_MATCH = $modules{MQTT2_DISCOVERY}{Match}
+		if !defined($MQTT2_DISCOVERY_NARROW_MATCH);
+	my $wide = 0;
+
+	for my $instance (values %{ $modules{MQTT2_DISCOVERY}{defptr} || {} }) {
+		next if ref($instance) ne 'HASH' || !defined($instance->{NAME});
+		$wide = 1 if MQTT2_DISCOVERY_gateway($instance)->attr_value(
+			$instance->{NAME}, 'readingsViaParse', 0,
+		);
+	}
+
+	$modules{MQTT2_DISCOVERY}{Match} = $wide ? '.*' : $MQTT2_DISCOVERY_NARROW_MATCH;
+	return $wide;
+}
+
+# Liefert die vom Modul selbst auszuwertenden Zeilen eines Zielgeraets.
+sub MQTT2_DISCOVERY_parse_readings {
+	my ($hash, $record) = @_;
+	return () if ref($record) ne 'HASH' || ref($record->{parse_readings}) ne 'ARRAY';
+	return @{ $record->{parse_readings} };
+}
+
+# Wertet eine Nutzdatennachricht fuer alle verwalteten Zieldevices aus und schreibt
+# deren Readings direkt, ohne den Umweg ueber ein readingList-Attribut.
+sub MQTT2_DISCOVERY_apply_parsed_readings {
+	my ($hash, $topic, $payload) = @_;
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+	my $written = 0;
+
+	for my $record (values %{ $registry->{devices} || {} }) {
+		next if ref($record) ne 'HASH' || !defined($record->{name});
+		my $target = $defs{ $record->{name} };
+		next if !$target;
+		my $device_topic = AttrVal($record->{name}, 'devicetopic', '');
+		my %updates;
+
+		# Die Antwort auf die eigene Statusabfrage; ihr Topic ergibt sich aus dem
+		# aktuellen Namen dieser Instanz, nicht aus einem gespeicherten Text.
+		if (defined($record->{reply_key}) && defined($record->{reply_reference})
+				&& $topic eq "mqtt2_discovery/$hash->{NAME}/shelly/$record->{reply_key}/state/rpc") {
+			my $values = MQTT2_DISCOVERY_runtimeRef(
+				$record->{name}, $record->{reply_reference}, $payload,
+			);
+			@updates{ keys %$values } = values %$values if ref($values) eq 'HASH';
+		}
+
+
+		for my $entry (MQTT2_DISCOVERY_parse_readings($hash, $record)) {
+			next if ref($entry) ne 'HASH' || !defined($entry->{regexp}) || !defined($entry->{reference});
+			my $pattern = $entry->{regexp};
+			$pattern =~ s/\$DEVICETOPIC/\Q$device_topic\E/g if $device_topic ne '';
+			next if "$topic:$payload" !~ /^$pattern$/s;
+			my $values = MQTT2_DISCOVERY_runtimeRef($record->{name}, $entry->{reference}, $payload);
+			next if ref($values) ne 'HASH';
+			@updates{ keys %$values } = values %$values;
+		}
+
+		next if !%updates;
+		MQTT2_DISCOVERY_gateway($hash)->update_readings($target, \%updates);
+		MQTT2_DISCOVERY_log($hash, 4,
+			"readings aus $topic fuer $record->{name}: " . join(',', sort keys %updates));
+		$written++;
+	}
+
+	return $written;
+}
 # Verteilt die erlaubten Set-Kommandos auf Aktivierung, Deaktivierung oder Neuaufbau.
-sub MQTT2_DISCOVERY_Set($@) {
+sub MQTT2_DISCOVERY_Set {
 	my ($hash, @arguments) = @_;
 	shift @arguments;
 	my $command = shift @arguments;
 	MQTT2_DISCOVERY_log($hash, 3, 'set ' . (defined($command) ? $command : '<missing>'));
 	MQTT2_DISCOVERY_log($hash, 4, 'set arguments=[' . join(', ', @arguments) . ']') if @arguments;
-	return 'Unknown argument ?, choose one of activate:noArg deactivate:noArg rebuildDevice rescan:noArg discoverShelly'
+	return 'Unknown argument ?, choose one of ' . MQTT2_DISCOVERY_set_list($hash)
 		if !defined $command;
 	return MQTT2_DISCOVERY_activate($hash) if $command eq 'activate' && !@arguments;
 	return MQTT2_DISCOVERY_deactivate($hash) if $command eq 'deactivate' && !@arguments;
@@ -461,11 +731,12 @@ sub MQTT2_DISCOVERY_Set($@) {
 	return MQTT2_DISCOVERY_rescan($hash) if $command eq 'rescan' && !@arguments;
 	return MQTT2_DISCOVERY_discover_shelly($hash, $arguments[0])
 		if $command eq 'discoverShelly' && @arguments <= 1;
-	return "Unknown argument $command, choose one of activate:noArg deactivate:noArg rebuildDevice rescan:noArg discoverShelly";
+	return MQTT2_DISCOVERY_select_readings($hash, @arguments) if $command eq 'selectReadings';
+	return "Unknown argument $command, choose one of " . MQTT2_DISCOVERY_set_list($hash);
 }
 
 # Liefert den instanzlokalen Antwortpfad und die getrennt schaltbare native Erkennung.
-sub MQTT2_DISCOVERY_shelly_args($) {
+sub MQTT2_DISCOVERY_shelly_args {
 	my ($hash) = @_;
 	return (
 		shelly_enabled => MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'shellyDiscovery', 1),
@@ -474,7 +745,7 @@ sub MQTT2_DISCOVERY_shelly_args($) {
 }
 
 # Fuehrt deklarierte MQTT-Abfragen aus; Konfigurations- und Geraetebefehle entstehen hier nicht.
-sub MQTT2_DISCOVERY_send_requests($$) {
+sub MQTT2_DISCOVERY_send_requests {
 	my ($hash, $requests) = @_;
 	return undef if ref($requests) ne 'ARRAY' || !@$requests;
 	return 'MQTT2_DISCOVERY ist deaktiviert' if MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'disable', 0);
@@ -492,7 +763,7 @@ sub MQTT2_DISCOVERY_send_requests($$) {
 }
 
 # Fordert native Announcements oder einen gezielten Snapshot fuer einen individuellen Prefix an.
-sub MQTT2_DISCOVERY_discover_shelly($;$) {
+sub MQTT2_DISCOVERY_discover_shelly {
 	my ($hash, $prefix) = @_;
 	return 'MQTT2_DISCOVERY muss aktiv sein' if MQTT2_DISCOVERY_state($hash) ne 'active';
 	return 'Shelly-Discovery ist deaktiviert' if !MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'shellyDiscovery', 1);
@@ -513,7 +784,7 @@ sub MQTT2_DISCOVERY_discover_shelly($;$) {
 }
 
 # Startet native Erkennung einmal pro aktiver Brokerverbindung, auch nach einem FHEM-Neustart.
-sub MQTT2_DISCOVERY_start_shelly($) {
+sub MQTT2_DISCOVERY_start_shelly {
 	my ($hash) = @_;
 	return if !$main::init_done;
 	# Ein Verbindungsabbruch gibt den naechsten Start wieder frei.
@@ -531,7 +802,7 @@ sub MQTT2_DISCOVERY_start_shelly($) {
 }
 
 # Ersetzt devicetopic, readingList und setList eines verwalteten Zieldevices vollstaendig.
-sub MQTT2_DISCOVERY_rebuild_device($$;$) {
+sub MQTT2_DISCOVERY_rebuild_device {
 	my ($hash, $target_name, $clear_readings) = @_;
 
 	# Ein expliziter Neuaufbau darf die kontrollierte Moduldeaktivierung nicht umgehen.
@@ -567,7 +838,7 @@ sub MQTT2_DISCOVERY_rebuild_device($$;$) {
 }
 
 # Parst und validiert die kommagetrennte Liste erlaubter Discovery-Topic-Prefixe.
-sub MQTT2_DISCOVERY_prefixes_from_value($) {
+sub MQTT2_DISCOVERY_prefixes_from_value {
 	my ($value) = @_;
 	my @prefixes = map {
 		my $prefix = $_;
@@ -585,7 +856,7 @@ sub MQTT2_DISCOVERY_prefixes_from_value($) {
 }
 
 # Liest die wirksamen Discovery-Prefixe und liefert bei Altstaenden sichere Standards.
-sub MQTT2_DISCOVERY_prefixes($) {
+sub MQTT2_DISCOVERY_prefixes {
 	my ($hash) = @_;
 	my $value = MQTT2_DISCOVERY_gateway($hash)->attr_value(
 		$hash->{NAME}, 'discoveryPrefixes', 'homeassistant,tasmota/discovery,sonos2mqtt',
@@ -595,7 +866,7 @@ sub MQTT2_DISCOVERY_prefixes($) {
 }
 
 # Ermittelt die aktuelle MQTT-Parserreihenfolge aus Attribut oder IODev-Standard.
-sub MQTT2_DISCOVERY_client_order($) {
+sub MQTT2_DISCOVERY_client_order {
 	my ($hash) = @_;
 	my $iodev = $hash->{IODev};
 	my $configured = MQTT2_DISCOVERY_gateway($hash)->attr_value(
@@ -608,7 +879,7 @@ sub MQTT2_DISCOVERY_client_order($) {
 
 # Discovery muss vor MQTT2_DEVICE laufen, damit Discovery-Nachrichten nicht als
 # normale Geraetetelemetrie autocreated werden.
-sub MQTT2_DISCOVERY_is_active($) {
+sub MQTT2_DISCOVERY_is_active {
 	my ($hash) = @_;
 	my @order = MQTT2_DISCOVERY_client_order($hash);
 	my %position;
@@ -619,7 +890,7 @@ sub MQTT2_DISCOVERY_is_active($) {
 }
 
 # Leitet den sichtbaren Modulstatus aus disable und der tatsaechlichen Parserposition ab.
-sub MQTT2_DISCOVERY_state($;$) {
+sub MQTT2_DISCOVERY_state {
 	my ($hash, $ignore_disable) = @_;
 	return 'disabled' if !$ignore_disable
 		&& MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'disable', 0);
@@ -630,7 +901,7 @@ sub MQTT2_DISCOVERY_state($;$) {
 }
 
 # Ordnet Discovery vor den Device-Parsern ein und aktualisiert den Laufzeitstatus.
-sub MQTT2_DISCOVERY_activate($) {
+sub MQTT2_DISCOVERY_activate {
 	my ($hash) = @_;
 	my @order = grep { $_ ne 'MQTT2_DISCOVERY' } MQTT2_DISCOVERY_client_order($hash);
 	my $index = 0;
@@ -657,7 +928,7 @@ sub MQTT2_DISCOVERY_activate($) {
 }
 
 # Entfernt Discovery aus clientOrder und verwirft danach noch geplante Verarbeitung.
-sub MQTT2_DISCOVERY_deactivate($) {
+sub MQTT2_DISCOVERY_deactivate {
 	my ($hash) = @_;
 	my @order = grep { $_ ne 'MQTT2_DISCOVERY' } MQTT2_DISCOVERY_client_order($hash);
 	my $error = MQTT2_DISCOVERY_gateway($hash)->set_attribute(
@@ -678,7 +949,7 @@ sub MQTT2_DISCOVERY_deactivate($) {
 
 # Warnt einmalig, wenn das IODev-ignoreRegexp ein typisches Discovery-Topic
 # bereits vor dem Parser-Dispatch ausfiltern wuerde.
-sub MQTT2_DISCOVERY_check_ignore_regexp($) {
+sub MQTT2_DISCOVERY_check_ignore_regexp {
 	my ($hash) = @_;
 	my $io_name = $hash->{IODevName};
 	my $regexp = MQTT2_DISCOVERY_gateway($hash)->attr_value(
@@ -719,10 +990,11 @@ sub MQTT2_DISCOVERY_check_ignore_regexp($) {
 	}
 
 	delete $hash->{helper}{ignore_regexp_warning};
+	return;
 }
 
 # Spielt den lokalen MQTT2_SERVER-Retain-Cache als gemeinsamen Discovery-Batch erneut ein.
-sub MQTT2_DISCOVERY_rescan($) {
+sub MQTT2_DISCOVERY_rescan {
 	my ($hash) = @_;
 
 	# Ein manueller Rescan darf die ausdrueckliche Deaktivierung nicht umgehen
@@ -787,13 +1059,18 @@ sub MQTT2_DISCOVERY_rescan($) {
 }
 
 # Konsumiert passende MQTT-Dispatchnachrichten und plant oder startet deren Verarbeitung.
-sub MQTT2_DISCOVERY_Parse($$) {
+sub MQTT2_DISCOVERY_Parse {
 	my ($iodev, $message) = @_;
 	my $config = $modules{MQTT2_DISCOVERY}{defptr}{ $iodev->{NAME} };
 	return '[NEXT]' if !$config;
 	$message =~ s/^autocreate=[^\0]+\0//s;
 	my ($cid, $topic, $payload) = split /\0/, $message, 3;
 	return '[NEXT]' if !defined($topic) || !defined($payload);
+
+	# Mit readingsViaParse schreibt das Modul die Readings selbst und gibt die
+	# Nachricht danach weiter, damit manuelle Zeilen am Geraet erhalten bleiben.
+	MQTT2_DISCOVERY_apply_parsed_readings($config, $topic, $payload)
+		if MQTT2_DISCOVERY_gateway($config)->attr_value($config->{NAME}, 'readingsViaParse', 0);
 	my @shelly = MQTT2_Discovery::Format::Shelly::route(
 		MQTT2_DISCOVERY_shelly_args($config), topic => $topic, payload => $payload,
 		state => $config->{helper}{formats}{shelly} || {},
@@ -830,7 +1107,7 @@ sub MQTT2_DISCOVERY_Parse($$) {
 
 # Plant genau einen Queue-Worker; weitere Nachrichten werden bis zu dessen Lauf
 # nur im bereits vorhandenen Queue-Zustand zusammengefuehrt.
-sub MQTT2_DISCOVERY_schedule_queue($) {
+sub MQTT2_DISCOVERY_schedule_queue {
 	my ($hash) = @_;
 	my $queue = $hash->{helper}{queue};
 	return if ref($queue) ne 'HASH' || $queue->{scheduled};
@@ -844,7 +1121,7 @@ sub MQTT2_DISCOVERY_schedule_queue($) {
 }
 
 # Begrenzt FHEMs Notify-Auswertung auf Lebenszyklus und gebundenes MQTT-IODev.
-sub MQTT2_DISCOVERY_set_notify_devices($) {
+sub MQTT2_DISCOVERY_set_notify_devices {
 	my ($hash) = @_;
 	my $notify_devices = 'global,' . ($hash->{IODevName} || '');
 	$notify_devices =~ s/,$//;
@@ -860,7 +1137,7 @@ sub MQTT2_DISCOVERY_set_notify_devices($) {
 }
 
 # Liefert den Brokerzugang des gebundenen MQTT2-IODev als normierten Zustand.
-sub MQTT2_DISCOVERY_iodev_available($) {
+sub MQTT2_DISCOVERY_iodev_available {
 	my ($hash) = @_;
 	return 0 if ref($hash) ne 'HASH';
 	my $iodev = $hash->{IODev};
@@ -897,19 +1174,21 @@ sub MQTT2_DISCOVERY_iodev_available($) {
 }
 
 # Liefert den global reservierten sichtbaren Availability-Readingnamen.
-sub MQTT2_DISCOVERY_availability_reading($) {
+sub MQTT2_DISCOVERY_availability_reading {
 	my ($hash) = @_;
 	my $name = MQTT2_DISCOVERY_gateway($hash)->attr_value(
 		$hash->{NAME}, 'availabilityReading',
 		$MQTT2_DISCOVERY_DEFAULT_AVAILABILITY_READING,
 	);
+	# none unterdrueckt das verdichtete sichtbare Reading vollstaendig.
+	return '' if lc($name) eq 'none';
 	return $name =~ /^[A-Za-z_][A-Za-z0-9_.-]*$/
 		? $name : $MQTT2_DISCOVERY_DEFAULT_AVAILABILITY_READING;
 }
 
 # Erkennt Registry-Staende, deren zuletzt gerenderter Availability-Name nicht
 # mehr dem aktuellen Attribut beziehungsweise Moduldefault entspricht.
-sub MQTT2_DISCOVERY_registry_rendering_outdated($) {
+sub MQTT2_DISCOVERY_registry_rendering_outdated {
 	my ($hash) = @_;
 	return 0 if ref($hash) ne 'HASH';
 	my $expected = MQTT2_DISCOVERY_availability_reading($hash);
@@ -927,7 +1206,7 @@ sub MQTT2_DISCOVERY_registry_rendering_outdated($) {
 
 # Erkennt eine explizite manuelle readingList-Belegung ausserhalb der zuletzt
 # von dieser Discovery-Instanz erzeugten Zeilen.
-sub MQTT2_DISCOVERY_record_has_manual_reading($$$) {
+sub MQTT2_DISCOVERY_record_has_manual_reading {
 	my ($hash, $record, $reading) = @_;
 	return 0 if ref($record) ne 'HASH' || !defined($record->{name});
 	my %owned = map { ($_ => 1) } @{ $record->{owned_reading} || [] };
@@ -947,7 +1226,7 @@ sub MQTT2_DISCOVERY_record_has_manual_reading($$$) {
 
 # Prueft die globale Availability-Reservierung vor der Attributuebernahme fuer
 # alle von dieser Discovery-Instanz verwalteten Zieldevices.
-sub MQTT2_DISCOVERY_availability_reading_conflicts($$) {
+sub MQTT2_DISCOVERY_availability_reading_conflicts {
 	my ($hash, $reading) = @_;
 	return () if ref($hash) ne 'HASH';
 	my $mode = MQTT2_DISCOVERY_gateway($hash)->attr_value(
@@ -964,12 +1243,13 @@ sub MQTT2_DISCOVERY_availability_reading_conflicts($$) {
 			if MQTT2_DISCOVERY_record_has_manual_reading($hash, $record, $reading);
 	}
 
-	return sort(stable_unique(@conflicts));
+	my @sorted = sort(stable_unique(@conflicts));
+	return @sorted;
 }
 
 # Gleicht einen veralteten Registry-Renderstand nur dann global ab, wenn kein
 # manuelles Reading den aktuellen Default beziehungsweise Attributnamen belegt.
-sub MQTT2_DISCOVERY_reconcile_registry_rendering($) {
+sub MQTT2_DISCOVERY_reconcile_registry_rendering {
 	my ($hash) = @_;
 	return if !MQTT2_DISCOVERY_registry_rendering_outdated($hash);
 	my $reading = MQTT2_DISCOVERY_availability_reading($hash);
@@ -990,7 +1270,7 @@ sub MQTT2_DISCOVERY_reconcile_registry_rendering($) {
 }
 
 # Sammelt die verborgenen Entity-Regeln, die den sichtbaren Zustand bestimmen.
-sub MQTT2_DISCOVERY_availability_policies($) {
+sub MQTT2_DISCOVERY_availability_policies {
 	my ($record) = @_;
 	my %policies;
 
@@ -1011,7 +1291,7 @@ sub MQTT2_DISCOVERY_availability_policies($) {
 
 # Verdichtet die bereits nach HA-Semantik ausgewerteten Entity-Regeln zu einem
 # Devicezustand, ohne eine einzelne optionale Funktion zum Deviceausfall zu machen.
-sub MQTT2_DISCOVERY_device_availability_status($) {
+sub MQTT2_DISCOVERY_device_availability_status {
 	my ($states) = @_;
 	$states = [] if ref($states) ne 'ARRAY';
 
@@ -1026,7 +1306,7 @@ sub MQTT2_DISCOVERY_device_availability_status($) {
 }
 
 # Sammelt alle exakten Availability-Topics eines fertig aufgeloesten Registry-Ziels.
-sub MQTT2_DISCOVERY_availability_topics($) {
+sub MQTT2_DISCOVERY_availability_topics {
 	my ($record) = @_;
 	my %topics;
 
@@ -1045,7 +1325,7 @@ sub MQTT2_DISCOVERY_availability_topics($) {
 }
 
 # Prueft gegen die aktive Registry, ob mindestens ein Ziel das Topic noch verwendet.
-sub MQTT2_DISCOVERY_availability_topic_used($$) {
+sub MQTT2_DISCOVERY_availability_topic_used {
 	my ($hash, $topic) = @_;
 	my $registry = MQTT2_DISCOVERY_registry($hash);
 
@@ -1057,7 +1337,7 @@ sub MQTT2_DISCOVERY_availability_topic_used($$) {
 }
 
 # Erkennt, ob ein Discovery-Batch noch Nachrichten vorbereitet oder Devices anwendet.
-sub MQTT2_DISCOVERY_queue_busy($) {
+sub MQTT2_DISCOVERY_queue_busy {
 	my ($hash) = @_;
 	my $queue = $hash->{helper}{queue};
 	return 0 if ref($queue) ne 'HASH';
@@ -1069,7 +1349,7 @@ sub MQTT2_DISCOVERY_queue_busy($) {
 }
 
 # Plant pro Topic hoechstens einen Retained-Abruf; bestehende Topic-Timer werden wiederverwendet.
-sub MQTT2_DISCOVERY_schedule_availability_refresh($$;$) {
+sub MQTT2_DISCOVERY_schedule_availability_refresh {
 	my ($hash, $topic, $delay) = @_;
 	return if ref($hash) ne 'HASH' || !defined($topic) || ref($topic) || $topic eq '';
 	return if ref($hash->{IODev}) ne 'HASH'
@@ -1091,7 +1371,7 @@ sub MQTT2_DISCOVERY_schedule_availability_refresh($$;$) {
 }
 
 # Entfernt alle noch ausstehenden Topic-Timer einer Discovery-Instanz.
-sub MQTT2_DISCOVERY_clear_availability_refreshes($) {
+sub MQTT2_DISCOVERY_clear_availability_refreshes {
 	my ($hash) = @_;
 	my $refreshes = $hash->{helper}{availability_refreshes};
 	return if ref($refreshes) ne 'HASH';
@@ -1107,7 +1387,7 @@ sub MQTT2_DISCOVERY_clear_availability_refreshes($) {
 }
 
 # Setzt bei wieder geoeffnetem IODev zuvor verbindungslos geparkte Abrufe fort.
-sub MQTT2_DISCOVERY_resume_availability_refreshes($) {
+sub MQTT2_DISCOVERY_resume_availability_refreshes {
 	my ($hash) = @_;
 	return if !MQTT2_DISCOVERY_iodev_available($hash);
 	my $refreshes = $hash->{helper}{availability_refreshes};
@@ -1125,7 +1405,7 @@ sub MQTT2_DISCOVERY_resume_availability_refreshes($) {
 }
 
 # Fordert nach allen Sicherheitspruefungen genau das Retained Availability-Topic an.
-sub MQTT2_DISCOVERY_refresh_availability_topic($) {
+sub MQTT2_DISCOVERY_refresh_availability_topic {
 	my ($timer) = @_;
 	return if ref($timer) ne 'HASH';
 	my $hash = $timer->{discovery};
@@ -1181,7 +1461,7 @@ sub MQTT2_DISCOVERY_refresh_availability_topic($) {
 }
 
 # Verknuepft den IO-Zustand mit den erhaltenen Entity-Availability-Regeln.
-sub MQTT2_DISCOVERY_sync_target_availability($$$) {
+sub MQTT2_DISCOVERY_sync_target_availability {
 	my ($hash, $record, $io_available) = @_;
 	return if ref($record) ne 'HASH' || !keys %{ $record->{entities} || {} };
 	my $name = $record->{name};
@@ -1210,12 +1490,13 @@ sub MQTT2_DISCOVERY_sync_target_availability($$$) {
 		$status = MQTT2_DISCOVERY_device_availability_status(\@states);
 	}
 	$gateway->update_reading($target, $availability_reading, $status, 1)
-		if $gateway->reading_value($name, $availability_reading, '') ne $status;
+		if $availability_reading ne ''
+			&& $gateway->reading_value($name, $availability_reading, '') ne $status;
 	return;
 }
 
 # Uebertraegt eine IO-Zustandsaenderung genau einmal auf alle Registry-Ziele.
-sub MQTT2_DISCOVERY_sync_io_availability($;$$) {
+sub MQTT2_DISCOVERY_sync_io_availability {
 	my ($hash, $force, $override) = @_;
 	my $available = defined($override)
 		? ($override ? 1 : 0)
@@ -1235,7 +1516,7 @@ sub MQTT2_DISCOVERY_sync_io_availability($;$$) {
 }
 
 # Startet vor INITIALIZED gesammelte Arbeit und uebernimmt IO-Zustandsereignisse.
-sub MQTT2_DISCOVERY_Notify($$) {
+sub MQTT2_DISCOVERY_Notify {
 	my ($hash, $device) = @_;
 	return undef if ref($device) ne 'HASH';
 	my $device_name = $device->{NAME} || '';
@@ -1298,7 +1579,7 @@ sub MQTT2_DISCOVERY_Notify($$) {
 }
 
 # Koalesziert Config-Nachrichten pro Topic und plant genau einen kurzen Queue-Timer.
-sub MQTT2_DISCOVERY_enqueue($$$$) {
+sub MQTT2_DISCOVERY_enqueue {
 	my ($hash, $cid, $topic, $payload) = @_;
 	my $queue = $hash->{helper}{queue} ||= { order => [], messages => {}, scheduled => 0 };
 	my $queue_key = $topic;
@@ -1327,7 +1608,7 @@ sub MQTT2_DISCOVERY_enqueue($$$$) {
 
 # Merkt eine vollstaendige Neuerzeugung aus der Registry vor. Dadurch muessen
 # bereits empfangene Discovery-Nachrichten nicht erneut vom Broker kommen.
-sub MQTT2_DISCOVERY_enqueue_rerender($) {
+sub MQTT2_DISCOVERY_enqueue_rerender {
 	my ($hash) = @_;
 	return if ref($hash) ne 'HASH';
 	$hash->{helper}{rerender_pending} = 1;
@@ -1347,7 +1628,7 @@ sub MQTT2_DISCOVERY_enqueue_rerender($) {
 }
 
 # Verarbeitet pro Timerlauf eine Nachricht oder ein vorbereitetes Zieldevice atomar.
-sub MQTT2_DISCOVERY_process_queue($) {
+sub MQTT2_DISCOVERY_process_queue {
 	my ($hash) = @_;
 	my $queue = $hash->{helper}{queue};
 	return if ref($queue) ne 'HASH';
@@ -1396,7 +1677,10 @@ sub MQTT2_DISCOVERY_process_queue($) {
 		last if $message;
 	}
 
-	MQTT2_DISCOVERY_process($hash, @$message, $batch) if $message;
+	# Die Argumente werden einzeln uebergeben: Der Prototyp der Funktion legt jedem
+	# Parameter skalaren Kontext auf, ein aufgeloestes Array zaehlte als ein Argument.
+	MQTT2_DISCOVERY_process($hash, $message->[0], $message->[1], $message->[2], $batch)
+		if $message;
 
 	my $error;
 
@@ -1439,7 +1723,7 @@ sub MQTT2_DISCOVERY_process_queue($) {
 }
 
 # Bricht geplante Queue-Arbeit ab und entfernt den vollstaendigen Batchzustand.
-sub MQTT2_DISCOVERY_clear_queue($) {
+sub MQTT2_DISCOVERY_clear_queue {
 	my ($hash) = @_;
 	MQTT2_DISCOVERY_gateway($hash)->cancel_timer($hash, 'MQTT2_DISCOVERY_process_queue');
 	delete $hash->{helper}{queue} if ref($hash->{helper}) eq 'HASH';
@@ -1452,12 +1736,11 @@ sub MQTT2_DISCOVERY_clear_queue($) {
 }
 
 # Vorwaertsdeklaration der inneren Verarbeitung fuer den davor definierten Fehlerwrapper.
-sub MQTT2_DISCOVERY_process_inner($$$$;$);
 
 # Issues werden pro Topic gespeichert. Ein spaeter erfolgreich verarbeitetes
 # Topic kann dadurch genau seinen vorherigen Fehler oder seine Warnung loeschen.
 # Synchronisiert Fehler- und Warnungszaehler mit den Topic-bezogenen Issue-Tabellen.
-sub MQTT2_DISCOVERY_update_issue_readings($) {
+sub MQTT2_DISCOVERY_update_issue_readings {
 	my ($hash) = @_;
 	my $issues = $hash->{helper}{issues} ||= { error => {}, warning => {} };
 	MQTT2_DISCOVERY_reading($hash, 'errorCount', scalar keys %{ $issues->{error} || {} });
@@ -1466,7 +1749,7 @@ sub MQTT2_DISCOVERY_update_issue_readings($) {
 }
 
 # Speichert einen Fehler oder eine Warnung samt Topic und Adapter in Readings und Speicher.
-sub MQTT2_DISCOVERY_record_issue($$$$$) {
+sub MQTT2_DISCOVERY_record_issue {
 	my ($hash, $level, $topic, $adapter, $reason) = @_;
 	my $issues = $hash->{helper}{issues} ||= { error => {}, warning => {} };
 	$issues->{$level}{$topic} = {
@@ -1481,7 +1764,7 @@ sub MQTT2_DISCOVERY_record_issue($$$$$) {
 }
 
 # Entfernt ein geloestes Topic-Issue und aktualisiert die zugehoerigen Zaehler.
-sub MQTT2_DISCOVERY_clear_issue($$$) {
+sub MQTT2_DISCOVERY_clear_issue {
 	my ($hash, $level, $topic) = @_;
 	my $issues = $hash->{helper}{issues} ||= { error => {}, warning => {} };
 	delete $issues->{$level}{$topic};
@@ -1492,7 +1775,7 @@ sub MQTT2_DISCOVERY_clear_issue($$$) {
 }
 
 # Kapselt die gesamte Topic-Verarbeitung in einer Exception-Grenze und pflegt Issues.
-sub MQTT2_DISCOVERY_process($$$$;$) {
+sub MQTT2_DISCOVERY_process {
 	my ($hash, $cid, $topic, $payload, $batch) = @_;
 	delete $hash->{helper}{process_adapter};
 	delete $hash->{helper}{process_warning};
@@ -1555,7 +1838,7 @@ sub MQTT2_DISCOVERY_process($$$$;$) {
 }
 
 # Fuehrt Formatwahl, Modellierung, Mapping und transaktionales Device-Apply fuer ein Topic aus.
-sub MQTT2_DISCOVERY_process_inner($$$$;$) {
+sub MQTT2_DISCOVERY_process_inner {
 	my ($hash, $cid, $topic, $payload, $batch) = @_;
 	MQTT2_DISCOVERY_log($hash, 3, "processing topic=$topic");
 	MQTT2_DISCOVERY_log($hash, 4, 'message cid=' . (defined($cid) ? $cid : '') . '; payloadLength=' . length(defined($payload) ? $payload : ''));
@@ -1659,6 +1942,11 @@ sub MQTT2_DISCOVERY_process_inner($$$$;$) {
 			}
 			next;
 		}
+		# Die Wertabbildung entsteht bereits beim Mapping, der Schalter muss deshalb
+		# hier schon gelten.
+		local $MQTT2_Discovery::Mapper::FHEM_CONVENTIONS = MQTT2_DISCOVERY_gateway($hash)->attr_value(
+			$hash->{NAME}, 'fhemConventions', 0,
+		) ? 1 : 0;
 		my $mapping = MQTT2_Discovery::Mapper::map_model(
 			model => $event, io_name => $hash->{IODevName},
 			name_prefix => MQTT2_DISCOVERY_gateway($hash)->attr_value(
@@ -1748,7 +2036,7 @@ sub MQTT2_DISCOVERY_process_inner($$$$;$) {
 }
 
 # Prueft, ob eine geladene Registry die fuer sichere Weiterverarbeitung erwartete Struktur hat.
-sub MQTT2_DISCOVERY_registry_valid($) {
+sub MQTT2_DISCOVERY_registry_valid {
 	my ($registry) = @_;
 	return 0 if ref($registry) ne 'HASH' || ref($registry->{devices}) ne 'HASH';
 
@@ -1761,10 +2049,12 @@ sub MQTT2_DISCOVERY_registry_valid($) {
 		return 0 if exists($record->{runtime_refs}) && ref($record->{runtime_refs}) ne 'HASH';
 		return 0 if exists($record->{availability_reading})
 			&& (ref($record->{availability_reading})
-				|| $record->{availability_reading} !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/);
+				|| ($record->{availability_reading} ne ''
+					&& $record->{availability_reading} !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/));
 		return 0 if exists($record->{owned_availability_reading})
 			&& (ref($record->{owned_availability_reading})
-				|| $record->{owned_availability_reading} !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/);
+				|| ($record->{owned_availability_reading} ne ''
+					&& $record->{owned_availability_reading} !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/));
 
 		# Runtime-Referenzen duerfen nur die vom Renderer erzeugte kurze SHA-1-Form
 		# und rein deklarative Hash-Beschreibungen aus dem internen Reading laden.
@@ -1781,7 +2071,7 @@ sub MQTT2_DISCOVERY_registry_valid($) {
 
 # Die versteckte .registry-Reading ueberlebt einen FHEM-Neustart, ohne eine
 # Konfigurationsdatei zu veraendern. Ungueltige Altstaende werden verworfen.
-sub MQTT2_DISCOVERY_registry($) {
+sub MQTT2_DISCOVERY_registry {
 	my ($hash) = @_;
 	return $hash->{helper}{registry} if ref($hash->{helper}{registry}) eq 'HASH';
 	my $may_cache = $main::init_done ? 1 : 0;
@@ -1812,21 +2102,22 @@ sub MQTT2_DISCOVERY_registry($) {
 }
 
 # Erstellt ueber kanonisches JSON eine tiefe Kopie des reinen Registry-Datenmodells.
-sub MQTT2_DISCOVERY_clone_registry($) {
+sub MQTT2_DISCOVERY_clone_registry {
 	my ($registry) = @_;
 	my $json = JSON::PP->new->canonical(1);
 	return $json->decode($json->encode($registry));
 }
 
 # Persistiert den kanonischen Registry-Stand in einer internen, nicht ausloesenden Reading.
-sub MQTT2_DISCOVERY_persist_registry($) {
+sub MQTT2_DISCOVERY_persist_registry {
 	my ($hash) = @_;
 	my $json = JSON::PP->new->canonical(1)->encode(MQTT2_DISCOVERY_registry($hash));
 	MQTT2_DISCOVERY_gateway($hash)->update_reading($hash, '.registry', $json, 0);
+	return;
 }
 
 # Waehlt bei Namenskonflikten einen stabilen, reproduzierbaren Zieldevicenamen.
-sub MQTT2_DISCOVERY_target_name($$$) {
+sub MQTT2_DISCOVERY_target_name {
 	my ($mapping, $registry, $allow_existing) = @_;
 	my $base = $mapping->{proposed_name};
 	return $base if !$defs{$base} || $allow_existing;
@@ -1841,14 +2132,14 @@ sub MQTT2_DISCOVERY_target_name($$$) {
 }
 
 # Erzeugt fuer Transporte ohne Publisher-CID einen stabilen lokalen Routing-Schluessel.
-sub MQTT2_DISCOVERY_virtual_cid($) {
+sub MQTT2_DISCOVERY_virtual_cid {
 	my ($mapping) = @_;
 	return undef if !defined($mapping->{identity}) || $mapping->{identity} eq '';
 	return 'mqtt2_discovery_' . stable_suffix($mapping->{identity}, 16);
 }
 
 # Leitet aus Bridge-Regeln oder fehlender Publisher-Identitaet die Ziel-CID ab.
-sub MQTT2_DISCOVERY_autocreate_cid($$$) {
+sub MQTT2_DISCOVERY_autocreate_cid {
 	my ($mapping, $cid, $io_type) = @_;
 	my $transport_cid = defined($cid) ? $cid : '';
 	my $bridge = $modules{MQTT2_DEVICE}{defptr}{bridge};
@@ -1873,7 +2164,7 @@ sub MQTT2_DISCOVERY_autocreate_cid($$$) {
 				# Transport-CID durch ihre logisch abgeleitete Client-ID ersetzen.
 				if ("$topic:" =~ m/^$regexp$/s || "$transport_cid:$topic:" =~ m/^$regexp$/s) {
 					$matched = 1;
-					$new_cid = eval $rule->{name};
+					$new_cid = eval $rule->{name};  ## no critic (BuiltinFunctions::ProhibitStringyEval)
 					die $@ if $@;
 				}
 				1;
@@ -1906,7 +2197,7 @@ sub MQTT2_DISCOVERY_autocreate_cid($$$) {
 }
 
 # Findet unter Beruecksichtigung fremder Registry-Besitzer ein eindeutiges CID-Zieldevice.
-sub MQTT2_DISCOVERY_existing_cid_target($$$$$) {
+sub MQTT2_DISCOVERY_existing_cid_target {
 	my ($hash, $registry, $identity, $mapping, $cid) = @_;
 	my $devices = MQTT2_DISCOVERY_gateway($hash)->mqtt2_devices_for_cid($cid);
 	return (undef, undef) if ref($devices) ne 'ARRAY' || !@$devices;
@@ -1930,7 +2221,7 @@ sub MQTT2_DISCOVERY_existing_cid_target($$$$$) {
 }
 
 # Ordnet ein Mapping einem bestehenden oder neu angelegten Registry-Zieldevice zu.
-sub MQTT2_DISCOVERY_stage_mapping($$$$;$) {
+sub MQTT2_DISCOVERY_stage_mapping {
 	my ($hash, $registry, $mapping, $cid, $created_now_ref) = @_;
 	my $identity = $mapping->{identity};
 	my $record = $registry->{devices}{$identity};
@@ -2035,7 +2326,7 @@ sub MQTT2_DISCOVERY_stage_mapping($$$$;$) {
 }
 
 # Entfernt nach Fehlern ausschliesslich Devices, die in der aktuellen Transaktion entstanden.
-sub MQTT2_DISCOVERY_cleanup_created_devices($$$) {
+sub MQTT2_DISCOVERY_cleanup_created_devices {
 	my ($hash, $registry, $created_identities) = @_;
 
 	# Ausschliesslich in diesem Lauf neu angelegte Devices duerfen bei einem
@@ -2068,7 +2359,7 @@ sub MQTT2_Discovery_autoDeleteRecord {
 }
 
 # Wendet alle vorgemerkten Batch-Identitaeten an und veroeffentlicht den Registry-Stand.
-sub MQTT2_DISCOVERY_finish_batch($$) {
+sub MQTT2_DISCOVERY_finish_batch {
 	my ($hash, $batch) = @_;
 	return undef if ref($batch) ne 'HASH';
 	my $registry = ref($batch->{registry}) eq 'HASH'
@@ -2095,7 +2386,7 @@ sub MQTT2_DISCOVERY_finish_batch($$) {
 }
 
 # Rendert ein einzelnes Batch-Ziel und fuehrt danach die geschuetzte autoDelete-Entscheidung aus.
-sub MQTT2_DISCOVERY_apply_batch_identity($$$) {
+sub MQTT2_DISCOVERY_apply_batch_identity {
 	my ($hash, $batch, $identity) = @_;
 	my $registry = $batch->{registry};
 	return undef if ref($registry) ne 'HASH';
@@ -2109,7 +2400,7 @@ sub MQTT2_DISCOVERY_apply_batch_identity($$$) {
 }
 
 # Ermittelt die aus Discovery sicher bekannten sichtbaren Reading-Namen.
-sub MQTT2_DISCOVERY_expected_reading_names($) {
+sub MQTT2_DISCOVERY_expected_reading_names {
 	my ($entries) = @_;
 	my @names;
 
@@ -2131,7 +2422,7 @@ sub MQTT2_DISCOVERY_expected_reading_names($) {
 }
 
 # Legt optional fehlende, sicher angekuendigte Zielreadings mit leerem Wert an.
-sub MQTT2_DISCOVERY_initialize_device_readings($$$$) {
+sub MQTT2_DISCOVERY_initialize_device_readings {
 	my ($hash, $record, $names, $conflicts) = @_;
 	my $enabled = MQTT2_DISCOVERY_gateway($hash)->attr_value(
 		$hash->{NAME}, 'createReadings', 0,
@@ -2160,7 +2451,7 @@ sub MQTT2_DISCOVERY_initialize_device_readings($$$$) {
 }
 
 # Entfernt nach erfolgreichem Listenplan alle sichtbaren Readings eines Zieldevices.
-sub MQTT2_DISCOVERY_clear_device_readings($$) {
+sub MQTT2_DISCOVERY_clear_device_readings {
 	my ($hash, $record) = @_;
 	my $target = $defs{ $record->{name} };
 	return if !$target || ref($target->{READINGS}) ne 'HASH';
@@ -2200,7 +2491,7 @@ sub MQTT2_DISCOVERY_clear_device_readings($$) {
 
 # Erstellt eine renderbare Kopie der Registry-Mappings fuer den aktuellen
 # Reading-Modus und den global reservierten Availability-Namen.
-sub MQTT2_DISCOVERY_prepare_device_mappings($$$) {
+sub MQTT2_DISCOVERY_prepare_device_mappings {
 	my ($mappings, $availability_reading, $include_extra_json) = @_;
 	my $json = JSON::PP->new;
 	my $prepared = $json->decode($json->encode(
@@ -2240,7 +2531,7 @@ sub MQTT2_DISCOVERY_prepare_device_mappings($$$) {
 }
 
 # Erkennt atomare Home-Assistant-Device-Discovery auch in aelteren Registry-Eintraegen.
-sub MQTT2_DISCOVERY_is_device_discovery_mapping($) {
+sub MQTT2_DISCOVERY_is_device_discovery_mapping {
 	my ($mapping) = @_;
 	return 0 if ref($mapping) ne 'HASH';
 	return 1 if ($mapping->{source_layout} || '') eq 'device';
@@ -2250,7 +2541,7 @@ sub MQTT2_DISCOVERY_is_device_discovery_mapping($) {
 }
 
 # Beschreibt nur die funktionalen MQTT-Bindings eines Mappings, nicht dessen Anzeigenamen.
-sub MQTT2_DISCOVERY_mapping_function_signature($) {
+sub MQTT2_DISCOVERY_mapping_function_signature {
 	my ($mapping) = @_;
 	return undef if ref($mapping) ne 'HASH';
 	my @readings;
@@ -2284,7 +2575,7 @@ sub MQTT2_DISCOVERY_mapping_function_signature($) {
 }
 
 # Bevorzugt bei paralleler alter und neuer HA-Ankuendigung die atomare Device-Komponente.
-sub MQTT2_DISCOVERY_prefer_device_discovery_mappings($) {
+sub MQTT2_DISCOVERY_prefer_device_discovery_mappings {
 	my ($mappings) = @_;
 	my @source = grep { ref($_) eq 'HASH' } @{ $mappings || [] };
 	my %device_signatures;
@@ -2310,12 +2601,88 @@ sub MQTT2_DISCOVERY_prefer_device_discovery_mappings($) {
 }
 
 # Rendert und setzt alle verwalteten Attribute eines Zieldevices als atomaren Plan.
-sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
+# Ein Geraet mit genau einem schaltbaren Kanal folgt der FHEM-Konvention: Der
+# Zustand gehoert nach state, geschaltet wird mit on und off. Damit schreibt auch
+# MQTT2_DEVICE_Set beim Setzen denselben Wert, den die Rueckmeldung liefert.
+# Schaltet die beim Mapping mitgefuehrte Wertabbildung scharf.
+sub MQTT2_DISCOVERY_enable_boolean_maps {
+	my ($readings) = @_;
+	my $count = 0;
+
+	for my $reading (@$readings) {
+		next if ref($reading) ne 'HASH' || ref($reading->{boolean_map}) ne 'HASH';
+		$reading->{value_map} = { %{ $reading->{boolean_map} } };
+
+		# Mit Abbildung ist die kompakte json2nameValue-Form nicht mehr moeglich.
+		if (($reading->{kind} // '') ne 'reading') {
+			$reading->{kind} = 'reading';
+			delete $reading->{json_key};
+		}
+		$count++;
+	}
+
+	return $count;
+}
+
+sub MQTT2_DISCOVERY_single_channel_state {
+	my ($readings, $sets) = @_;
+	my @switches = grep {
+		ref($_) eq 'HASH' && $_->{primary_switch}
+			&& ($_->{kind} // '') eq 'choice' && ($_->{spec} // '') eq 'on,off'
+			&& ref($_->{mapping}) eq 'HASH'
+			&& defined($_->{mapping}{on}) && defined($_->{mapping}{off})
+	} @$sets;
+	return 0 if @switches != 1;
+	my $switch = $switches[0];
+	my $switch_name = $switch->{name};
+	return 0 if !defined($switch_name) || $switch_name eq '' || $switch_name eq 'state';
+
+	# Ein bereits vergebenes state bleibt unangetastet, ebenso ein vorhandener
+	# Befehl on oder off eines anderen Kanals.
+	return 0 if grep { ref($_) eq 'HASH' && ($_->{name} // '') eq 'state' } @$readings;
+	return 0 if grep {
+		ref($_) eq 'HASH' && defined($_->{name}) && $_->{name} =~ /^(?:on|off)$/
+	} @$sets;
+	my $renamed = 0;
+
+	for my $reading (@$readings) {
+		next if ref($reading) ne 'HASH' || ($reading->{name} // '') ne $switch_name;
+		$reading->{semantic_name} = $switch_name if !defined($reading->{semantic_name});
+		$reading->{name} = 'state';
+		$renamed++;
+	}
+	return 0 if !$renamed;
+
+	# Aus der Auswahl werden die beiden einzelnen Befehle mit festem Payload.
+	@$sets = grep { $_ != $switch } @$sets;
+	push @$sets, {
+		kind => 'button', name => $_, spec => 'noArg',
+		topic => $switch->{topic}, payload => $switch->{mapping}{$_},
+	} for qw(on off);
+	return 1;
+}
+
+sub MQTT2_DISCOVERY_apply_device_lines {
 	my ($hash, $record, $options) = @_;
 	$options = {} if ref($options) ne 'HASH';
 	my $rebuild_lists = $options->{rebuild_lists} ? 1 : 0;
 	my $name = $record->{name};
-	return "Verwaltetes Device $name existiert nicht" if !$defs{$name};
+
+	# Ein von Hand geloeschtes Zieldevice darf die Erkennung nicht dauerhaft
+	# blockieren: Der verwaiste Datensatz wird verworfen, die naechste Erkennung
+	# legt Device und Datensatz neu an.
+	if (!$defs{$name}) {
+		my $registry = MQTT2_DISCOVERY_registry($hash);
+
+		for my $identity (keys %{ $registry->{devices} || {} }) {
+			next if ($registry->{devices}{$identity} // 0) != $record;
+			delete $registry->{devices}{$identity};
+		}
+
+		MQTT2_DISCOVERY_persist_registry($hash);
+		MQTT2_DISCOVERY_log($hash, 2, "verwaisten Registry-Eintrag fuer $name verworfen");
+		return undef;
+	}
 	my %previous_availability_topics = map { ($_ => 1) }
 		grep { defined($_) && !ref($_) && $_ ne '' }
 		@{ $record->{availability_topics} || [] };
@@ -2358,6 +2725,45 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 		push @reading_entries, @{ $mapping->{reading_lines} || [] };
 		push @set_entries, @{ $mapping->{set_lines} || [] };
 	}
+
+	# Die Konventionen aendern bestehende Readingnamen und -werte und sind deshalb
+	# abschaltbar; ohne das Attribut bleibt alles wie bisher.
+	my $fhem_conventions = MQTT2_DISCOVERY_gateway($hash)->attr_value(
+		$hash->{NAME}, 'fhemConventions', 0,
+	) ? 1 : 0;
+	if ($fhem_conventions) {
+		MQTT2_DISCOVERY_enable_boolean_maps(\@reading_entries);
+		my $renamed = MQTT2_DISCOVERY_single_channel_state(\@reading_entries, \@set_entries);
+
+		# Der alte Readingname wird nicht mehr beschrieben und bliebe sonst mit
+		# seinem letzten Wert sichtbar stehen.
+		if ($renamed && ref($defs{$name}{READINGS}) eq 'HASH') {
+
+			for my $reading (@reading_entries) {
+				next if ref($reading) ne 'HASH' || ($reading->{semantic_name} // '') eq '';
+				my $old = $reading->{semantic_name};
+				next if $old eq ($reading->{name} // '') || !exists($defs{$name}{READINGS}{$old});
+				MQTT2_DISCOVERY_gateway($hash)->delete_reading($defs{$name}, $old);
+			}
+
+		}
+	}
+	# Im Dialog abgewaehlte Readings entstehen gar nicht erst, weder als eigene
+	# Zeile noch in den Sammelzeilen fuer die Abfrageantwort und die Ereignisse.
+	my %ignored_entities = map { ($_ => 1) } MQTT2_DISCOVERY_ignored_entities($hash, $record);
+	if (%ignored_entities) {
+
+		# Ohne abgeschaltetes Autocreate haengt MQTT2_DEVICE die abgewaehlten Topics
+		# beim naechsten Eintreffen selbst wieder an; das gilt auch nach einer Neuanlage.
+		CommandAttr(undef, "$name autocreate 0")
+			if AttrVal($name, 'autocreate', '') ne '0';
+		@reading_entries = grep {
+			ref($_) ne 'HASH' || !$ignored_entities{ $_->{name} // '' }
+		} @reading_entries;
+		@set_entries = grep {
+			ref($_) ne 'HASH' || !$ignored_entities{ $_->{name} // '' }
+		} @set_entries;
+	}
 	my @availability_topics = sort stable_unique(map { $_->{topic} }
 		grep {
 			ref($_) eq 'HASH' && ($_->{role} || '') eq 'availability'
@@ -2368,6 +2774,7 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 	my $generated_device_topic = MQTT2_Discovery::DevicePlanner::device_topic($record, \@all_entries);
 	my @device_topic_entries = grep {
 		ref($_) eq 'HASH' && ($_->{role} // '') ne 'availability' && defined($_->{topic})
+			&& $_->{topic} !~ m{^mqtt2_discovery/}
 	} @all_entries;
 	my $old_device_topic_exists = exists($attr{$name}) && exists($attr{$name}{devicetopic});
 	my $old_device_topic = $old_device_topic_exists ? $attr{$name}{devicetopic} : undef;
@@ -2425,12 +2832,76 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 		$matching_device_topic, $record->{cid},
 	);
 	my $initial_reading_names = MQTT2_DISCOVERY_expected_reading_names($prepared_readings);
+	# Das IODev wandelt ':' in empfangenen Topics zu '_'. Die erzeugten
+	# readingList-Zeilen muessen denselben Namen treffen.
+	local $MQTT2_Discovery::Mapper::Renderer::TOPIC_CONVERSION =
+		MQTT2_DISCOVERY_gateway($hash)->attr_value(
+			$hash->{IODevName} // '', 'topicConversion', 1,
+		) ? 1 : 0;
+	local $MQTT2_Discovery::Mapper::Renderer::AVAILABILITY_VISIBLE =
+		MQTT2_DISCOVERY_availability_reading($hash) ne '' ? 1 : 0;
+
 	@reading_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		$prepared_readings, $render_device_topic, $reserved_readings, \%runtime_references,
 	) };
+
+	# Mit setsViaHook entsteht kein setList-Attribut mehr: Die Befehle liegen
+	# strukturiert in der Registry und werden ueber den Hook angeboten und
+	# ausgefuehrt. Nicht unterstuetzte Befehlsarten bleiben im Attribut.
+	my $via_hook = MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'setsViaHook', 0)
+		&& !grep {
+			ref($_) ne 'HASH' || ($_->{kind} // '') !~ /^(?:button|choice)$/
+		} @set_entries;
+	if ($via_hook) {
+		$record->{hook_sets} = [ map { {
+			name => $_->{name}, spec => $_->{spec}, kind => $_->{kind}, topic => $_->{topic},
+			(defined($_->{payload}) ? (payload => $_->{payload}) : ()),
+			(ref($_->{mapping}) eq 'HASH' ? (mapping => { %{ $_->{mapping} } }) : ()),
+		} } @set_entries ];
+		@set_entries = ();
+	} else {
+		delete $record->{hook_sets};
+	}
 	@set_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		\@set_entries, $render_device_topic, undef, \%runtime_references,
 	) };
+
+	# Mit readingsViaParse entsteht kein readingList-Attribut mehr: Die erzeugten
+	# Zeilen werden in Regexp und Runtime-Referenz zerlegt und in der Registry
+	# abgelegt; ausgewertet wird spaeter in ParseFn. Manuelle Zeilen des Anwenders
+	# bleiben im Attribut und arbeiten unveraendert weiter.
+	if (MQTT2_DISCOVERY_gateway($hash)->attr_value($hash->{NAME}, 'readingsViaParse', 0)) {
+		my @parsed;
+
+		for my $entry (@reading_entries) {
+			my $line = ref($entry) eq 'HASH' ? $entry->{line} : $entry;
+			next if !defined($line) || $line eq '';
+			my ($regexp, $reference) = $line =~ /^(\S+):\.\*\s+\{[^}]*'(r_[a-f0-9]+)'/;
+			next if !defined($regexp) || !defined($reference);
+
+			# Der Geraetestamm wird gleich aufgeloest. Ohne readingList-Attribut
+			# braucht das Zielgeraet dann kein devicetopic mehr, und die gespeicherten
+			# Muster haengen nicht an einem Attribut, das jemand aendern kann.
+			$regexp =~ s/\$DEVICETOPIC/$render_device_topic/g
+				if defined($render_device_topic) && $render_device_topic ne '';
+
+			# Das eigene Antworttopic wird nicht gespeichert, sondern beim Auswerten
+			# aus dem aktuellen Namen dieser Instanz und dem Geraeteschluessel
+			# zusammengesetzt. So uebersteht es ein rename des Discovery-Devices.
+			if ($regexp =~ m{^mqtt2_discovery/[^/]+/shelly/([a-f0-9]{16})/state/rpc$}) {
+				$record->{reply_key} = $1;
+				$record->{reply_reference} = $reference;
+				next;
+			}
+			push @parsed, { regexp => "$regexp:.*", reference => $reference };
+		}
+
+		$record->{parse_readings} = \@parsed;
+		@reading_entries = ();
+	} else {
+		delete $record->{parse_readings};
+	}
+	MQTT2_DISCOVERY_update_match();
 	my $reading = merge_generated_lines(
 		kind => 'reading', mode => $effective_mode, current => $prepared_old_reading,
 		previous_owned => $previous_owned_reading, generated => \@reading_entries,
@@ -2439,6 +2910,12 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 		kind => 'set', mode => $effective_mode, current => $merge_set,
 		previous_owned => $previous_owned_set, generated => \@set_entries,
 	);
+	# Ohne erzeugte readingList und setList braucht das Zielgeraet keinen
+	# Topic-Stamm mehr; ein vorhandenes devicetopic bleibt unangetastet, falls
+	# manuelle Zeilen es verwenden.
+	$manage_device_topic = 0
+		if $reading->{value} eq '' && $set->{value} eq ''
+			&& !exists($attr{$name}{devicetopic});
 	my $plan = MQTT2_Discovery::DevicePlanner::attribute_plan(
 		device => $name,
 		manage_device_topic => $manage_device_topic,
@@ -2517,7 +2994,7 @@ sub MQTT2_DISCOVERY_apply_device_lines($$;$) {
 }
 
 # Komponiert und hinterlegt semantische Metadaten fuer automatisch erzeugte Devices.
-sub MQTT2_DISCOVERY_apply_device_semantics($$;$) {
+sub MQTT2_DISCOVERY_apply_device_semantics {
 	my ($hash, $record, $resolved) = @_;
 
 	# Uebernommene Bestandsdevices erhalten keine automatisch erzeugten
@@ -2573,7 +3050,7 @@ sub MQTT2_DISCOVERY_apply_device_semantics($$;$) {
 }
 
 # Erzeugt aus der aktuellen Beschreibung ein semantisches Upsert- oder Remove-Ereignis.
-sub MQTT2_DISCOVERY_publish_semantic_update($$) {
+sub MQTT2_DISCOVERY_publish_semantic_update {
 	my ($hash, $name) = @_;
 	my $gateway = MQTT2_DISCOVERY_gateway($hash);
 	return if !$gateway->can_publish_semantics();
@@ -2594,7 +3071,7 @@ sub MQTT2_DISCOVERY_publish_semantic_update($$) {
 }
 
 # Entfernt passende Entities aus der Registry und rendert betroffene Devices neu.
-sub MQTT2_DISCOVERY_delete_entity($$$;$) {
+sub MQTT2_DISCOVERY_delete_entity {
 	my ($hash, $registry, $entity, $batch) = @_;
 
 	for my $identity (sort keys %{ $registry->{devices} }) {
@@ -2641,7 +3118,7 @@ sub MQTT2_DISCOVERY_delete_entity($$$;$) {
 }
 
 # Erkennt konservativ, ob ein verwaltetes Device noch benutzereigene Konfiguration enthaelt.
-sub MQTT2_DISCOVERY_record_has_manual_lines($$) {
+sub MQTT2_DISCOVERY_record_has_manual_lines {
 	my ($hash, $record) = @_;
 	my $name = $record->{name};
 	return 1 if !$defs{$name};
@@ -2667,7 +3144,7 @@ sub MQTT2_DISCOVERY_record_has_manual_lines($$) {
 }
 
 # Berechnet und schreibt die Anzahl aktiver Registry-Devices und Entities.
-sub MQTT2_DISCOVERY_update_counts($) {
+sub MQTT2_DISCOVERY_update_counts {
 	my ($hash) = @_;
 	my $registry = MQTT2_DISCOVERY_registry($hash);
 	my ($devices, $entities) = (0, 0);
@@ -2681,14 +3158,16 @@ sub MQTT2_DISCOVERY_update_counts($) {
 	MQTT2_DISCOVERY_reading($hash, 'discoveredDevices', $devices);
 	MQTT2_DISCOVERY_reading($hash, 'discoveredEntities', $entities);
 	MQTT2_DISCOVERY_log($hash, 4, "counts updated; devices=$devices; entities=$entities");
+	return;
 }
 
 # Schreibt ein Modulreading ueber das Gateway mit normalisiertem undef-Wert.
-sub MQTT2_DISCOVERY_reading($$$) {
+sub MQTT2_DISCOVERY_reading {
 	my ($hash, $name, $value) = @_;
 	MQTT2_DISCOVERY_gateway($hash)->update_reading(
 		$hash, $name, defined($value) ? $value : '', 1,
 	);
+	return;
 }
 
 # Entfernt den Set-Kommandonamen und liefert nur den vom Benutzer uebergebenen Wert.
@@ -2700,7 +3179,7 @@ sub MQTT2_Discovery_commandValue {
 }
 
 # Baut den sicheren Home-Assistant-Kontext fuer MQTT-Device-Trigger auf.
-sub MQTT2_DISCOVERY_triggerVars($) {
+sub MQTT2_DISCOVERY_triggerVars {
 	my ($event) = @_;
 	$event = '' if !defined $event;
 	my ($decoded, $has_json);
@@ -2721,7 +3200,7 @@ sub MQTT2_DISCOVERY_triggerVars($) {
 }
 
 # Baut einen JSON-Payload aus einem dynamischen Wert und validierten Konstantfeldern.
-sub MQTT2_DISCOVERY_jsonPayload($$$) {
+sub MQTT2_DISCOVERY_jsonPayload {
 	my ($key, $value, $constants) = @_;
 	return undef if !defined($key) || ref($key) || $key !~ /^[A-Za-z_][A-Za-z0-9_]*$/;
 	$constants = {} if !defined $constants;
@@ -2743,6 +3222,20 @@ sub MQTT2_DISCOVERY_jsonPayload($$$) {
 }
 
 # Der Dispatcher ruft nur die sichere Template-Engine auf; Discovery-Text wird nie als Perl-Code evaluiert.
+# Bildet genau ein Reading ueber seine angekuendigte Wertetabelle ab. Unbekannte
+# Werte bleiben unveraendert, damit nichts still verschwindet.
+sub MQTT2_DISCOVERY_applyValueMap {
+	my ($values, $name, $map) = @_;
+	return $values if ref($values) ne 'HASH' || ref($map) ne 'HASH'
+		|| !defined($name) || !exists($values->{$name});
+	my $value = $values->{$name};
+	return $values if !defined($value) || ref($value);
+	return $values if grep { !defined($_) || ref($_) || /[\x00-\x1f]/ }
+		(keys %$map, values %$map);
+	$values->{$name} = $map->{"$value"} if exists($map->{"$value"});
+	return $values;
+}
+
 sub MQTT2_Discovery_runtime {
 	my ($operation, @arguments) = @_;
 	my $answer;
@@ -2839,6 +3332,8 @@ sub MQTT2_Discovery_runtime {
 						} keys %{ $items->{match} };
 						my $values = MQTT2_Discovery_runtime('reading', $reading->{template},
 							JSON::PP::encode_json($item), $reading->{name});
+						$values = MQTT2_DISCOVERY_applyValueMap($values, $reading->{name}, $reading->{map})
+							if ref($reading->{map}) eq 'HASH';
 						@updates{keys %$values} = values %$values if ref($values) eq 'HASH';
 					}
 
@@ -2849,6 +3344,8 @@ sub MQTT2_Discovery_runtime {
 				my $values = MQTT2_Discovery_runtime(
 					$reading_operation, $reading->{template}, $event, $reading->{name},
 				);
+				$values = MQTT2_DISCOVERY_applyValueMap($values, $reading->{name}, $reading->{map})
+					if ref($reading->{map}) eq 'HASH';
 				@updates{keys %$values} = values %$values if ref($values) eq 'HASH';
 			}
 
@@ -2867,10 +3364,13 @@ sub MQTT2_Discovery_runtime {
 				if ref($configuration) ne 'HASH'
 					|| ref($configuration->{sources}) ne 'ARRAY'
 					|| ref($configuration->{policies}) ne 'ARRAY';
+			# Ein leerer Name unterdrueckt das sichtbare Reading; ein fehlender
+			# Schluessel behaelt den bisherigen Standardnamen.
 			my $availability_reading = $configuration->{reading} // 'availability';
+			$availability_reading = undef if $availability_reading eq '';
 			die 'Ungueltiger Availability-Readingname'
-				if ref($availability_reading)
-					|| $availability_reading !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+				if defined($availability_reading) && (ref($availability_reading)
+					|| $availability_reading !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/);
 			my (%updates, %updated_sources);
 
 			# Jede fuer das aktuelle Topic deklarierte Quelle wertet ihren eigenen
@@ -2929,7 +3429,8 @@ sub MQTT2_Discovery_runtime {
 			# Die Entity-Regeln behalten ihre jeweilige HA-Semantik. Das gruppierte
 			# FHEM-Device ist online, sobald mindestens eine seiner Entities verfuegbar
 			# ist, und erst offline, wenn alle Entities sicher offline sind.
-			if (%updated_sources && @{ $configuration->{policies} }) {
+			if (defined($availability_reading) && %updated_sources
+					&& @{ $configuration->{policies} }) {
 				my @policy_states = map {
 					exists($updates{ $_->{reading} })
 						? $updates{ $_->{reading} }
@@ -2944,7 +3445,7 @@ sub MQTT2_Discovery_runtime {
 			# Quell- und Regelreadings werden auch offline aktualisiert, der sichtbare
 			# Zustand darf dadurch aber nicht wieder online werden.
 			$updates{$availability_reading} = 'offline'
-				if %updated_sources
+				if defined($availability_reading) && %updated_sources
 					&& ReadingsVal($device, '.availability_io', 'online') ne 'online';
 			$answer = \%updates;
 		} elsif ($operation eq 'templatePublish') {
@@ -3003,7 +3504,7 @@ sub MQTT2_Discovery_runtime {
 }
 
 # Findet den Registry-Eintrag eines verwalteten Zieldevices.
-sub MQTT2_DISCOVERY_runtimeRegistryRecord($) {
+sub MQTT2_DISCOVERY_runtimeRegistryRecord {
 	my ($device) = @_;
 	return if !defined($device) || ref($device) || $device eq '';
 	my $registered = $modules{MQTT2_DISCOVERY}{defptr};
@@ -3028,7 +3529,7 @@ sub MQTT2_DISCOVERY_runtimeRegistryRecord($) {
 }
 
 # Findet die zu einem Zieldevice gehoerende deklarative Runtime-Referenz.
-sub MQTT2_DISCOVERY_runtimeReference($$) {
+sub MQTT2_DISCOVERY_runtimeReference {
 	my ($device, $reference) = @_;
 	return undef if !defined($device) || ref($device) || $device eq ''
 		|| !defined($reference) || ref($reference)
@@ -3051,7 +3552,7 @@ sub MQTT2_DISCOVERY_runtimeReference($$) {
 }
 
 # Liefert skalare Runtime-Ergebnisse als eindeutigen UTF-8-Bytestrom an MQTT2_DEVICE weiter.
-sub MQTT2_DISCOVERY_mqttBytes($) {
+sub MQTT2_DISCOVERY_mqttBytes {
 	my ($value) = @_;
 	return $value if !defined($value) || ref($value) || !utf8::is_utf8($value);
 	return Encode::encode('UTF-8', $value);
@@ -3059,7 +3560,7 @@ sub MQTT2_DISCOVERY_mqttBytes($) {
 
 # Codiert alle skalaren Readingwerte fuer FHEMs bytestream-basierte Laufzeit,
 # ohne bereits codierte MQTT-Payloads oder nichtskalare Werte zu veraendern.
-sub MQTT2_DISCOVERY_mqttReadingBytes($) {
+sub MQTT2_DISCOVERY_mqttReadingBytes {
 	my ($readings) = @_;
 	return {} if ref($readings) ne 'HASH';
 	my %encoded = %$readings;
@@ -3074,7 +3575,7 @@ sub MQTT2_DISCOVERY_mqttReadingBytes($) {
 
 # Loest eine kurze Attributreferenz ausschliesslich ueber fest implementierte
 # Runtime-Operationen auf; gespeicherter Discovery-Text wird niemals evaluiert.
-sub MQTT2_DISCOVERY_runtimeRef($$$) {
+sub MQTT2_DISCOVERY_runtimeRef {
 	my ($device, $reference, $event) = @_;
 	my $descriptor = MQTT2_DISCOVERY_runtimeReference($device, $reference);
 	return undef if ref($descriptor) ne 'HASH';
@@ -3094,6 +3595,8 @@ sub MQTT2_DISCOVERY_runtimeRef($$$) {
 			($runtime eq 'triggerReading' && ref($descriptor->{filter}) eq 'HASH'
 				? ($descriptor->{filter}) : ()),
 		);
+		$answer = MQTT2_DISCOVERY_applyValueMap($answer, $name, $descriptor->{map})
+			if ref($descriptor->{map}) eq 'HASH';
 		return MQTT2_DISCOVERY_mqttReadingBytes($answer);
 	}
 	if ($operation eq 'topic' || $operation eq 'availability') {
@@ -3147,7 +3650,7 @@ sub MQTT2_DISCOVERY_runtimeRef($$$) {
 
 # Liefert fuer freie JSON-Auswertung den aktuell verbindlich reservierten
 # Availability-Namen des verwalteten Zieldevices.
-sub MQTT2_DISCOVERY_runtimeAvailabilityReading($) {
+sub MQTT2_DISCOVERY_runtimeAvailabilityReading {
 	my ($device) = @_;
 	return $MQTT2_DISCOVERY_DEFAULT_AVAILABILITY_READING
 		if !defined($device) || ref($device) || $device eq '';
@@ -3171,7 +3674,7 @@ sub MQTT2_DISCOVERY_runtimeAvailabilityReading($) {
 }
 
 # Ergaenzt JSON-Zuordnungen um kollisionsfreie Namen reservierter Rollenreadings.
-sub MQTT2_DISCOVERY_runtimeJSONMap($$) {
+sub MQTT2_DISCOVERY_runtimeJSONMap {
 	my ($device_or_map, $renames) = @_;
 	my $json_map = ref($device_or_map) eq 'HASH'
 		? $device_or_map
@@ -3203,7 +3706,7 @@ sub MQTT2_DISCOVERY_runtimeJSONMap($$) {
 
 # Entpackt freie JSON-Payloads ueber FHEMs Standardhelfer und schuetzt den frei
 # konfigurierbaren Availability-Namen mit einem topicbezogenen Zielnamen.
-sub MQTT2_DISCOVERY_jsonReadings($$$;$) {
+sub MQTT2_DISCOVERY_jsonReadings {
 	my ($device, $path, $event, $renames) = @_;
 	return '' if !defined($path) || ref($path)
 		|| !defined($event) || ref($event);

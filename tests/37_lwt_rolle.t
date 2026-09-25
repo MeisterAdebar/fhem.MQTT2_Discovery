@@ -101,32 +101,14 @@ sub readings_for {
 	return \%updates;
 }
 
-subtest 'Nur die am Geraet aktiven Meldewege erzeugen Zeilen' => sub {
+subtest 'Der letzte Wille erscheint als sichtbares Reading lwt' => sub {
 	my $hash = setup();
-	my $reading_list = discover($hash, status => 1);
-	unlike($reading_list, qr{\Qevents/rpc\E}, 'ohne rpc_ntf entsteht keine Ereigniszeile');
-	like($reading_list, qr{\Qstatus/switch_0\E}, 'mit status_ntf entsteht die Komponentenzeile');
+	discover($hash, status => 1);
+	is(readings_for("$id/online", 'true')->{lwt}, 'online', 'online setzt lwt');
+	is(readings_for("$id/online", 'false')->{lwt}, 'offline', 'der letzte Wille setzt lwt offline');
+	ok(exists(readings_for("$id/online", 'true')->{availability}),
+		'das verdichtete Reading bleibt daneben bestehen');
 
-	$hash = setup();
-	$reading_list = discover($hash, rpc => 1);
-	like($reading_list, qr{\Qevents/rpc\E}, 'mit rpc_ntf entsteht die Ereigniszeile');
-	unlike($reading_list, qr{\Qstatus/switch\E}, 'ohne status_ntf entsteht keine Komponentenzeile');
-	is(readings_for("$id/events/rpc",
-		{ src => $id, method => 'NotifyStatus', params => { 'switch:0' => { output => JSON::PP::false } } })->{switch_0},
-		'false', 'der Ereignisweg liefert den Wert');
-
-	# Die Antwort der eigenen Abfrage traegt in beiden Faellen die Initialwerte.
-	like($reading_list, qr{\Qmqtt2_discovery/discovery/shelly/\E}, 'die Abfrageantwort bleibt immer gebunden');
-};
-
-subtest 'Ohne jeden Meldeweg bleibt die Abfrage samt Warnung' => sub {
-	my $hash = setup();
-	my $reading_list = discover($hash);
-	unlike($reading_list, qr{\Qevents/rpc\E}, 'keine Ereigniszeile');
-	unlike($reading_list, qr{\Qstatus/switch\E}, 'keine Komponentenzeile');
-	like($reading_list, qr{\Qmqtt2_discovery/discovery/shelly/\E}, 'die Abfrageantwort bleibt');
-	like(reading_value('discovery', 'lastWarning'), qr/weder rpc_ntf noch status_ntf/,
-		'die Warnung benennt die fehlenden Wege');
 };
 
 done_testing();

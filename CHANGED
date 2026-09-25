@@ -1,6 +1,20 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 6f05376b387178a8bdf9f888be6a4255a78d6b77aed4cbf8366ad98c3b861323
+# Msg-SHA256: 662dc84df4d225b9a9769cd03afda536a3473164449888bd61dd1647b24ba6b2
+- change: MQTT2_DISCOVERY: Vier Funktionen im Modul, perlcritic auf Stufe 4
+  - Einkanalige Geraete folgen der FHEM-Konvention: Das Zustandsreading heisst
+    state, der Setter bietet on und off, und FHEMs SetExtensions greifen.
+  - Der beim Broker angemeldete letzte Wille erscheint als sichtbares Reading,
+    getrennt von der verdichteten Erreichbarkeit.
+  - Die Readings eines Geraets sind auswaehlbar. Abgewaehlte Namen stehen je
+    Geraet in der Registry und werden vor dem Rendern aus Readings und Sets
+    gefiltert.
+  - Set-Befehle koennen ueber einen registrierten Hook laufen statt ueber das
+    Attribut setList.
+  - Readings koennen ohne readingList entstehen: Das Modul wertet die Nutzdaten
+    in der ParseFn selbst aus.
+  - perlcritic laeuft auf Stufe 4 mit eigener Konfiguration, eigenem Test und
+    eigenem CI-Job. Die dort vermerkten Ausnahmen sind begruendet.
 - change: MQTT2_DISCOVERY: Fehler der Erkennung behoben
   - Ein geloeschtes MQTT2_DEVICE hinterlaesst keinen Registry-Eintrag mehr, der
     die Neuanlage blockiert und bei jedem Lauf "queue apply failed" ins Log

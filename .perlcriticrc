@@ -1,0 +1,23 @@
+# Prueflatte fuer dieses Repository. Stufe 4 ist erreicht und wird von
+# tests/98_perlcritic.t abgesichert; darunter liegende Stufen enthalten fuer ein
+# FHEM-Modul zu viel, was hier bewusst anders ist (Regexpe ohne /x, Package-
+# Variablen wie %defs und %attr, lange Fallunterscheidungen im Protokollteil).
+severity = 4
+verbose = %f:%l %p: %m\n
+
+# "return undef" bleibt absichtlich stehen. Ein nacktes "return" liefert im
+# Listenkontext die leere Liste, und genau das passiert hier: Viele Ergebnisse
+# werden direkt als Argument weitergereicht. Aus
+# _add_entry($list, $warnings, _build(...), $context) wuerde dann
+# _add_entry($list, $warnings, $context) - die Argumente verrutschen lautlos.
+[-Subroutines::ProhibitExplicitReturnUndef]
+
+# Einzeilige Weiterreichungen an eine andere Funktion duerfen @_ durchreichen;
+# ein Auspacken haette dort keinen Leser und keinen Nutzen.
+[Subroutines::RequireArgUnpacking]
+short_subroutine_statements = 2
+
+# Ein auf eine Kategorie eingegrenztes "no warnings" ist eine Aussage ueber eine
+# bestimmte Stelle und kein pauschales Abschalten.
+[TestingAndDebugging::ProhibitNoWarnings]
+allow_with_category_restriction = 1

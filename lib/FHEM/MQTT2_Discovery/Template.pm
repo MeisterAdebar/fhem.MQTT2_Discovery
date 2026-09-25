@@ -633,12 +633,14 @@ sub _json_key_with_filter_property {
 
 # Liefert den fachlichen JSON-Hauptpfad auch hinter wertveraendernden Filtern.
 sub source_json_key {
-	return _json_key_with_filter_property($_[0], $_[1], 'source_path');
+	my ($template, $compiled) = @_;
+	return _json_key_with_filter_property($template, $compiled, 'source_path');
 }
 
 # Liefert nur JSON-Pfade, die ohne Werttransformation direkt gerendert werden duerfen.
 sub simple_json_key {
-	return _json_key_with_filter_property($_[0], $_[1], 'value_identity');
+	my ($template, $compiled) = @_;
+	return _json_key_with_filter_property($template, $compiled, 'value_identity');
 }
 
 1;

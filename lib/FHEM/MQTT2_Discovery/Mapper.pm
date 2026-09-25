@@ -314,6 +314,23 @@ sub _command_set_name {
 sub render_entries { return MQTT2_Discovery::Mapper::Renderer::render_entries(@_); }
 
 
+# Schaltbar ueber das Attribut fhemConventions am Discovery-Device; ohne das
+# Attribut bleiben Readingnamen und -werte unveraendert.
+our $FHEM_CONVENTIONS = 0;
+
+# Liefert die Abbildung der angekuendigten Zustandswerte auf die FHEM-Schreibweise.
+# Nur ausdruecklich erklaerte Zustandswerte werden abgebildet; payload_on und
+# payload_off beschreiben bei Home Assistant und Tasmota den Befehlspayload.
+sub _boolean_value_map {
+	my ($entity, $component) = @_;
+	return undef if ref($entity) ne 'HASH';
+	return undef if ($component // '') !~ /^(?:switch|binary_sensor|light)$/;
+	my ($on, $off) = ($entity->{state_on}, $entity->{state_off});
+	return undef if !defined($on) || ref($on) || !defined($off) || ref($off);
+	return undef if "$on" eq "$off" || "$on" =~ /[\x00-\x1f]/ || "$off" =~ /[\x00-\x1f]/;
+	return { "$on" => 'on', "$off" => 'off' };
+}
+
 # Erzeugt einen abstrakten Reading-Eintrag aus Topic, Template und Zielnamen.
 sub _reading {
 	my ($topic, $template, $name, $payload, $json_autocreate, $json_reading_name, $semantic_name) = @_;
@@ -387,7 +404,11 @@ sub _availability_source {
 		topic => $topic, template => $template,
 		payload_available => "$available",
 		payload_not_available => "$unavailable",
-		source_reading => '.availability_' . stable_suffix($signature, 8),
+		# Nur ein Adapter, der die Quelle selbst baut, kennt ihre Art. Ein erklaerter
+		# letzter Wille bekommt deshalb das in FHEM uebliche Reading lwt, alle
+		# uebrigen Quellen bleiben wie bisher intern und versteckt.
+		source_reading => ($source->{role} // '') eq 'lwt'
+			? 'lwt' : '.availability_' . stable_suffix($signature, 8),
 	};
 }
 
@@ -492,6 +513,7 @@ sub _add_entry {
 		return;
 	}
 	push @$list, $entry;
+	return;
 }
 
 # Verknuepft einen Set-Eintrag mit demselben logischen Namen wie sein Reading.
@@ -557,7 +579,7 @@ sub _add_supplemental_signals {
 			push @$warnings, "Nicht unterstuetzter Zusatzsignaltyp: " . ($type // '');
 		}
 	}
-
+	return;
 }
 
 # Validiert ein kanonisches Event und bildet es auf die gemeinsame Mapper-Ausgabe ab.
@@ -630,6 +652,21 @@ sub _map_canonical_entity {
 
 	_add_supplemental_signals(\@readings, \@warnings, $extensions->{supplemental_signals});
 
+	# Aus den angekuendigten Zustandswerten entsteht eine Abbildung auf on und off,
+	# damit Reading und Setter denselben Wert verwenden.
+	# Die moegliche Abbildung wird immer mitgefuehrt, aber erst beim Anwenden
+	# scharf geschaltet. Dadurch genuegt nach dem Setzen des Attributs ein
+	# rebuildDevice, es braucht keine neue Erkennung.
+	my $value_map = _boolean_value_map($entity, $component);
+	if (ref($value_map) eq 'HASH') {
+
+		for my $reading (@readings) {
+			next if ref($reading) ne 'HASH' || ($reading->{name} // '') ne $state_reading_name;
+			$reading->{boolean_map} = { %$value_map };
+		}
+
+	}
+
 	# JSON-Autocreate kann den sichtbaren Reading-Namen veraendern. Set-Befehle
 	# muessen den danach tatsaechlich vorhandenen Namen verwenden.
 	my %primary_read_name = MQTT2_Discovery::Mapper::Semantics::entry_read_names(\@readings);
@@ -645,6 +682,10 @@ sub _map_canonical_entity {
 		_add_entry(\@sets, \@warnings,
 			_choice_command($command_set_name, 'on,off', $entity->{command_topic}, \%mapping,
 				undef, $entity->{command_codec}), 'switch');
+
+		# Kennzeichnet den Hauptschalter; ein binaerer Nebenbefehl wie mute einer
+		# Mediawiedergabe ist kein Kanal und darf state nicht beanspruchen.
+		$sets[-1]{primary_switch} = 1 if @sets && ref($sets[-1]) eq 'HASH';
 		push @set_state, $command_set_name;
 	} elsif ($component eq 'button') {
 		_add_entry(\@sets, \@warnings,

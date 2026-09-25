@@ -185,6 +185,31 @@ sub update_reading {
 	return $callback->($hash, $name, defined($value) ? $value : '', $trigger ? 1 : 0);
 }
 
+# Schreibt mehrere Readings eines Zielgeraets in einem Ereignisblock, wie es
+# MQTT_GENERIC_BRIDGE fuer fremde Devices tut.
+sub update_readings {
+	my ($self, $hash, $values) = @_;
+	return undef if ref($hash) ne 'HASH' || ref($values) ne 'HASH' || !keys %$values;
+	my $callback = $self->_callback(update_readings => sub {
+		my ($target, $readings) = @_;
+
+		# Schlanke Umgebungen ohne Ereignisblock erhalten dieselben Werte einzeln.
+		if (!defined(&main::readingsBeginUpdate)) {
+			$self->update_reading($target, $_, $readings->{$_}, 1) for sort keys %$readings;
+			return undef;
+		}
+		main::readingsBeginUpdate($target);
+
+		for my $name (sort keys %$readings) {
+			main::readingsBulkUpdate($target, $name, $readings->{$name});
+		}
+
+		main::readingsEndUpdate($target, 1);
+		return undef;
+	});
+	return $callback->($hash, $values);
+}
+
 # Entfernt genau ein Reading, nachdem dessen Besitz durch den Aufrufer geprueft wurde.
 sub delete_reading {
 	my ($self, $hash, $name) = @_;
@@ -214,7 +239,8 @@ sub delete_reading {
 }
 
 # Schreibt eine bereits aufbereitete Meldung mit Name und Stufe in FHEMs Log.
-sub log {
+# Der Name lautet nicht log, damit er sich nicht mit Perls eingebautem log deckt.
+sub log_message {
 	my ($self, $name, $level, $message) = @_;
 	my $callback = $self->_callback(log => sub {
 		return main::Log3($_[0], $_[1], $_[2]);

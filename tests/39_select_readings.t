@@ -101,32 +101,35 @@ sub readings_for {
 	return \%updates;
 }
 
-subtest 'Nur die am Geraet aktiven Meldewege erzeugen Zeilen' => sub {
+use Digest::SHA ();
+subtest 'selectReadings filtert Entities und ueberlebt den Geraetedatensatz' => sub {
 	my $hash = setup();
-	my $reading_list = discover($hash, status => 1);
-	unlike($reading_list, qr{\Qevents/rpc\E}, 'ohne rpc_ntf entsteht keine Ereigniszeile');
-	like($reading_list, qr{\Qstatus/switch_0\E}, 'mit status_ntf entsteht die Komponentenzeile');
+	discover($hash, status => 1);
+	like(attr_value($target, 'readingList'), qr{\Qstatus/wifi\E}, 'die WLAN-Zeile entsteht zunaechst');
+	is(main::MQTT2_DISCOVERY_Set($hash, 'discovery', 'selectReadings', $target,
+		'switch_0=1', 'switch_0_temperature=1', 'wifi_rssi=0', 'sys_uptime=0'), undef,
+		'die Auswahl wird uebernommen');
+	my $reading_list = attr_value($target, 'readingList');
+	unlike($reading_list, qr{\Qstatus/wifi\E}, 'die abgewaehlte WLAN-Zeile entfaellt');
+	unlike($reading_list, qr{\Qstatus/sys\E}, 'die abgewaehlte Laufzeitzeile entfaellt');
+	is(attr_value($target, 'autocreate'), '0', 'autocreate wird am Zielgeraet abgeschaltet');
 
-	$hash = setup();
-	$reading_list = discover($hash, rpc => 1);
-	like($reading_list, qr{\Qevents/rpc\E}, 'mit rpc_ntf entsteht die Ereigniszeile');
-	unlike($reading_list, qr{\Qstatus/switch\E}, 'ohne status_ntf entsteht keine Komponentenzeile');
-	is(readings_for("$id/events/rpc",
-		{ src => $id, method => 'NotifyStatus', params => { 'switch:0' => { output => JSON::PP::false } } })->{switch_0},
-		'false', 'der Ereignisweg liefert den Wert');
+	# Auch die gemeinsame Abfrageantwort darf die Werte nicht mehr liefern.
+	my $values = readings_for('mqtt2_discovery/discovery/shelly/'
+		. substr(Digest::SHA::sha1_hex($id), 0, 16) . '/state/rpc',
+		{ src => $id, result => status() });
+	ok(!exists($values->{wifi_rssi}), 'die Abfrageantwort liefert das abgewaehlte Reading nicht mehr');
+	is($values->{switch_0}, 'true', 'die gewaehlten Readings bleiben erhalten');
 
-	# Die Antwort der eigenen Abfrage traegt in beiden Faellen die Initialwerte.
-	like($reading_list, qr{\Qmqtt2_discovery/discovery/shelly/\E}, 'die Abfrageantwort bleibt immer gebunden');
-};
-
-subtest 'Ohne jeden Meldeweg bleibt die Abfrage samt Warnung' => sub {
-	my $hash = setup();
-	my $reading_list = discover($hash);
-	unlike($reading_list, qr{\Qevents/rpc\E}, 'keine Ereigniszeile');
-	unlike($reading_list, qr{\Qstatus/switch\E}, 'keine Komponentenzeile');
-	like($reading_list, qr{\Qmqtt2_discovery/discovery/shelly/\E}, 'die Abfrageantwort bleibt');
-	like(reading_value('discovery', 'lastWarning'), qr/weder rpc_ntf noch status_ntf/,
-		'die Warnung benennt die fehlenden Wege');
+	# Die Auswahl liegt neben den Geraetedatensaetzen und ueberdauert deren Verlust.
+	my $registry = main::MQTT2_DISCOVERY_registry($hash);
+	is([sort @{ $registry->{selections}{$target} }], ['sys_uptime', 'wifi_rssi'],
+		'die Auswahl steht ausserhalb des Geraetedatensatzes');
+	delete $registry->{devices}{$_} for keys %{ $registry->{devices} };
+	$_->{started} -= 60 for values %{ $hash->{helper}{formats}{shelly}{devices} || {} };
+	discover($hash, status => 1);
+	unlike(attr_value($target, 'readingList'), qr{\Qstatus/wifi\E},
+		'nach einer erneuten Erkennung bleibt die Auswahl wirksam');
 };
 
 done_testing();

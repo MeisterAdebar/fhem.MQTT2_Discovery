@@ -129,6 +129,7 @@ sub _project_bindings {
 		$configuration->{$codec_key} = { %{ $binding->{codec} } }
 			if defined($codec_key) && ref($binding->{codec}) eq 'HASH';
 	}
+	return;
 }
 
 # Konvertiert eine Parser-Entity in ein formatunabhaengiges kanonisches Event.

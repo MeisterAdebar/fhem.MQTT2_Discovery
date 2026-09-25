@@ -23,6 +23,18 @@ jobs:
       - name: Run tests with fatal warnings
         run: prove --exec 'perl -Mwarnings=FATAL -Itests/lib' -lv tests
 
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: '5.42'
+      - name: Install style dependencies
+        run: cpanm --installdeps --with-develop .
+      - name: Run perlcritic
+        run: perlcritic --profile .perlcriticrc FHEM lib
+
   coverage:
     runs-on: ubuntu-latest
     steps:
