@@ -15,6 +15,7 @@ use Encode ();
 # Vermeidet JSON-Funktionsimporte in den mit anderen FHEM-Modulen geteilten Namensraum.
 use JSON::PP ();
 use Scalar::Util ();
+use MIME::Base64 ();
 use MQTT2_Discovery::Helper qw(stable_unique stable_suffix split_lines line_key merge_generated_lines);
 use MQTT2_Discovery::FormatRegistry ();
 use MQTT2_Discovery::Model ();
@@ -907,8 +908,55 @@ sub remember_payload {
 # durch, und ein Shelly liefert auf Shelly.GetConfig auch sein WLAN-Passwort.
 our $SECRET_KEYS = qr/(?:pass|pwd|psk|secret|token|api_?key|auth|user)/i;
 
-# Ersetzt Geheimnisse durch einen Platzhalter, laesst die Nachricht sonst in
-# Ruhe. Was sich nicht als JSON lesen laesst, bleibt unveraendert; es ist dann
+# Werte, die das Netz des Anwenders beschreiben. Sie werden nicht geschwaerzt,
+# sondern durch unverfaengliche ersetzt, damit die Nachricht auswertbar bleibt.
+our %ANONYMOUS_KEYS = (
+	hn => 'host', hostname => 'host', ssid => 'WLAN', ip => '192.0.2.10',
+	ipv6 => '2001:db8::1', gw => '192.0.2.1', ntp => 'ntp.example',
+);
+
+# Kennungen tauchen im Topic und im Payload auf und muessen ueberall gleich
+# ersetzt werden, sonst passen die Nachrichten nicht mehr zueinander. Das
+# Ersatzstueck entsteht aus der Kennung selbst und bleibt damit ueber Aufrufe
+# hinweg dasselbe.
+sub pseudonyms {
+	my ($texts) = @_;
+	my %map;
+
+	for my $text (@{ $texts || [] }) {
+		next if !defined($text) || ref($text);
+
+		for my $token ($text =~ /([0-9A-Fa-f]{12,16})/g) {
+			next if exists($map{$token});
+			my $replacement = stable_suffix("mqtt2_discovery:$token", length($token));
+			$replacement = uc($replacement) if $token eq uc($token);
+			$map{$token} = $replacement;
+
+			# Viele Geraete fuehren zusaetzlich das Ende ihrer MAC, etwa im
+			# eigenen Topic (tasmota_005301).
+			next if length($token) != 12;
+			my $short = substr($token, -6);
+			$map{$short} = substr($replacement, -6) if !exists($map{$short});
+		}
+	}
+
+	return \%map;
+}
+
+# Wendet die Ersetzungen auf einen Text an.
+sub pseudonymise {
+	my ($text, $map) = @_;
+	return $text if !defined($text) || ref($map) ne 'HASH';
+
+	for my $token (sort { length($b) <=> length($a) } keys %$map) {
+		$text =~ s/\Q$token\E/$map->{$token}/g;
+	}
+
+	return $text;
+}
+
+# Ersetzt Geheimnisse durch einen Platzhalter und Netzangaben durch feste
+# Beispielwerte. Was sich nicht als JSON lesen laesst, bleibt unveraendert; es ist dann
 # ein einfacher Wert wie true oder online.
 sub redact_payload {
 	my ($payload) = @_;
@@ -930,14 +978,57 @@ sub redact_value {
 				$value->{$key} = 'xxx';
 				next;
 			}
+
+			if (exists($ANONYMOUS_KEYS{ lc $key }) && !ref($value->{$key})
+					&& defined($value->{$key}) && $value->{$key} ne '') {
+				$value->{$key} = $ANONYMOUS_KEYS{ lc $key };
+				next;
+			}
+
+			if (!ref($value->{$key})) {
+				$value->{$key} = anonymous_value($value->{$key});
+				next;
+			}
 			redact_value($value->{$key});
 		}
 
 	} elsif (ref($value) eq 'ARRAY') {
-		redact_value($_) for @$value;
+		$_ = anonymous_value($_) for grep { !ref($_) } @$value;
+		redact_value($_) for grep { ref($_) } @$value;
 	}
 
 	return;
+}
+
+# Adressen und Hardwarekennungen erkennt man an ihrer Form, nicht am Namen ihres
+# Schluessels: Dasselbe Geraet nennt sie ip, sta_ip, server oder bssid. Ersetzt
+# wird durch die fuer Beispiele vorgesehenen Bereiche.
+sub anonymous_value {
+	my ($value) = @_;
+	return $value if !defined($value) || ref($value) || $value eq '';
+	return $value =~ s/\d{1,3}(?:\.\d{1,3}){3}/192.0.2.10/gr
+		if $value =~ /\A\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\z/;
+	# Eine MAC sieht wie eine kurze IPv6 aus und muss deshalb zuerst geprueft werden.
+	return 'de:ad:be:ef:00:01' if $value =~ /\A(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\z/;
+	return '2001:db8::1' if $value =~ /\A[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}\z/;
+	return $value;
+}
+
+# FHEMWEB zeigt die Antwort eines get in einem Dialog, dessen Breite der
+# laengsten Zeile folgt; eine einzelne Nutzdatenzeile sprengt damit den
+# Bildschirm. In einem Textfeld steht sie in fester Groesse und laesst sich
+# trotzdem im Ganzen markieren und kopieren. Andere Aufrufer, etwa ein Skript
+# oder telnet, bekommen den Block unveraendert.
+sub payload_answer {
+	my ($hash, $block) = @_;
+	my $client = $hash->{CL};
+	return $block if ref($client) ne 'HASH' || ($client->{TYPE} // '') ne 'FHEMWEB';
+	my $rows = () = $block =~ /\n/g;
+	$rows = 25 if $rows > 25;
+	$rows = 8 if $rows < 8;
+	return '<html><textarea readonly rows="' . $rows . '" cols="100" '
+		. 'style="width:98%;white-space:pre;overflow:auto;font-family:monospace">'
+		. html_escape($block) . '</textarea></html>';
 }
 
 # Stellt die Nachrichten eines Geraets als Textblock zum Einfuegen bereit.
@@ -961,14 +1052,104 @@ sub payloads {
 			. ' bei einem Adapter ohne Abfrage hilft nur, auf die naechste Ankuendigung zu warten.';
 	}
 	my $entities = scalar keys %{ $record->{entities} || {} };
+	# Kennungen werden ueber alle Nachrichten hinweg gleich ersetzt, damit Topic
+	# und Inhalt zueinander passen und der Block einspielbar bleibt.
+	my $map = pseudonyms([ keys %$store, values %$store ]);
 	my @lines = (
-		"# MQTT2_DISCOVERY $VERSION, Geraet $name, Adapter "
-			. ($record->{adapter} // 'unbekannt') . ", Entities $entities",
-		'# Geheimnisse sind durch xxx ersetzt. Einspielen mit:'
-			. " set <MQTT2_DISCOVERY> replayPayloads <datei>",
+		'# MQTT2_DISCOVERY ' . $VERSION . ', Geraet ' . pseudonymise($name, $map)
+			. ', Adapter ' . ($record->{adapter} // 'unbekannt') . ", Entities $entities",
+		'# Geheimnisse stehen als xxx. Kennungen, Adressen und Namen aus dem Netz',
+		'# sind durch Beispielwerte ersetzt, in Topic und Inhalt durch dieselben.',
+		'# Einspielen mit: set <MQTT2_DISCOVERY> replayPayloads <datei>',
 	);
-	push @lines, "$_ " . redact_payload($store->{$_}) for sort keys %$store;
-	return join("\n", @lines);
+	push @lines, pseudonymise($_, $map) . ' ' . pseudonymise(redact_payload($store->{$_}), $map)
+		for sort keys %$store;
+	return payload_answer($hash, join("\n", @lines));
+}
+
+# Fragt den Block im Frontend ab. Ein eingefuegter Text enthaelt Leerzeichen und
+# Zeilenumbrueche und wuerde die Befehlszeile zerlegen; er geht deshalb als ein
+# Stueck in base64 zurueck. Gesendet wird per POST, ein Block sprengt sonst die
+# Laenge einer Adresse.
+sub replay_dialog {
+	my ($hash) = @_;
+	my $client = $hash->{CL};
+	return 'Aufruf: set <name> replayPayloads <datei>'
+		if ref($client) ne 'HASH' || ($client->{TYPE} // '') ne 'FHEMWEB';
+	my $name = html_escape($hash->{NAME});
+	return '<html>'
+		. "<p>Block aus <code>get $name payloads &lt;device&gt;</code> einfuegen:</p>"
+		. '<textarea id="m2dReplayText" rows="12" cols="100" '
+			. 'style="width:98%;white-space:pre;overflow:auto;font-family:monospace"></textarea>'
+		. '<br><input type="button" id="m2dReplayOk" value="Einspielen">'
+		. qq{<script>
+			(function(){
+				var apply = function(){
+					var text = document.getElementById("m2dReplayText").value;
+					if(!text.replace(/\\s/g, "")) return;
+					var block = btoa(unescape(encodeURIComponent(text)));
+					var cmd = "set $name replayPayloads base64:"+block;
+					var xhr = new XMLHttpRequest();
+					xhr.open("POST", FW_root+"?XHR=1"+FW_csrf, true);
+					xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+					xhr.onload = function(){
+						location.href = FW_root+"?detail=$name";
+					};
+					xhr.send("cmd="+encodeURIComponent(cmd));
+				};
+				document.getElementById("m2dReplayOk").onclick = apply;
+
+				// Im Popup von FHEMWEB uebernimmt zusaetzlich dessen eigener Knopf.
+				if(typeof \$ == "function" && \$("#FW_okDialog").length) {
+					\$("#FW_okDialog").parent().find("button").css("display","block");
+					\$("#FW_okDialog").parent().find(".ui-dialog-buttonpane button")
+						.unbind("click").click(function(){ apply(); \$("#FW_okDialog").remove(); });
+				}
+			})();
+		</script>}
+		. '</html>';
+}
+
+# Spielt die Antworten einer Shelly-Abfrage ein. Sie ergeben nur im Ablauf einer
+# Abfrage einen Sinn: Der Adapter nimmt eine Antwort nur zu der Anfrage an, die
+# gerade offen ist, und erkennt sie an deren ID. Der Replay eroeffnet deshalb
+# eine eigene Abfrage und schreibt jede gespeicherte Antwort auf die jeweils
+# offene um.
+sub replay_shelly {
+	my ($hash, $parts) = @_;
+	my $json = JSON::PP->new;
+	my $info = eval { $json->decode($parts->{info} // '') };
+	return (0, 1) if ref($info) ne 'HASH' || ref($info->{result}) ne 'HASH'
+		|| !defined($info->{result}{id});
+	my $config = eval { $json->decode($parts->{config} // '') };
+
+	# Ohne eigenen Prefix meldet sich ein Shelly unter seiner Kennung.
+	my $prefix = ref($config) eq 'HASH' && ref($config->{result}) eq 'HASH'
+		&& ref($config->{result}{mqtt}) eq 'HASH'
+		&& defined($config->{result}{mqtt}{topic_prefix})
+		? $config->{result}{mqtt}{topic_prefix} : $info->{result}{id};
+	my $error = discover_shelly($hash, $prefix);
+	return (0, 1) if defined($error) && $error ne '';
+	my ($processed, $failed) = (0, 0);
+	my $guard = 0;
+
+	while (my $open = MQTT2_Discovery::Format::Shelly::pending(
+			$hash->{helper}{formats}{shelly}, $prefix)) {
+		last if ++$guard > 10;
+		my $payload = $parts->{ $open->{part} };
+		last if !defined($payload);
+		my $data = eval { $json->decode($payload) };
+		last if ref($data) ne 'HASH';
+
+		# Die gespeicherte Antwort traegt die ID der damaligen Abfrage.
+		$data->{id} = $open->{id};
+		my $status = process($hash, 'replay', "$open->{reply}/$open->{part}/rpc",
+			$json->canonical(1)->encode($data));
+		$status eq 'error' ? $failed++ : $processed++;
+		last if $status eq 'error';
+	}
+
+	return ($processed, $failed);
 }
 
 # Spielt einen mit get payloads erzeugten Block wieder ein. Damit entsteht ein
@@ -976,37 +1157,80 @@ sub payloads {
 # Forum nachzugehen.
 sub replay_payloads {
 	my ($hash, $file) = @_;
-	return 'Aufruf: set <name> replayPayloads <datei>' if !defined($file) || $file eq '';
-	return 'Der Dateiname darf nicht aus dem Verzeichnis herausfuehren' if $file =~ m{\.\.};
+
+	# Ohne Angabe fragt das Frontend den Block ab; einen Umweg ueber eine Datei
+	# braucht es dafuer nicht.
+	return replay_dialog($hash) if !defined($file) || $file eq '';
 	my @lines;
-	{
+	my $source = $file;
+
+	# Aus dem Eingabefeld kommt der Block als ein Stueck, damit Leerzeichen und
+	# Zeilenumbrueche die Befehlszeile nicht zerlegen.
+	if ($file =~ /\Abase64:(.*)\z/s) {
+		my $text = MIME::Base64::decode_base64($1);
+		return 'Der eingefuegte Block ist leer' if !defined($text) || $text !~ /\S/;
+		@lines = split /\r?\n/, $text;
+		$source = 'dem eingefuegten Block';
+	} else {
+		return 'Der Dateiname darf nicht aus dem Verzeichnis herausfuehren' if $file =~ m{\.\.};
 		open my $input, '<', $file or return "Kann $file nicht lesen: $!";
 		@lines = <$input>;
 		close $input or return "Kann $file nicht schliessen: $!";
 	}
-	my @messages;
+	my (@messages, $ignored);
 
 	for my $line (@lines) {
 		chomp $line;
 		next if $line =~ /^\s*(?:#|$)/;
 		my ($topic, $payload) = split /\s+/, $line, 2;
-		next if !defined($topic) || !defined($payload) || $topic eq '';
+
+		# Eine Nachrichtenzeile besteht aus Topic und Nutzdaten. Ein Topic ohne
+		# Schraegstrich ist keines, ebenso wenig eines mit Platzhaltern. So
+		# bleibt etwa ein FileLog draussen, dessen erste Spalte ein Zeitstempel
+		# ist; sonst wuerde er stillschweigend als verarbeitet gezaehlt.
+		if (!defined($topic) || !defined($payload) || $topic !~ m{/} || $topic =~ /[+#]/) {
+			$ignored++;
+			next;
+		}
 
 		# Das eigene Antworttopic traegt den Namen der Instanz, die gefragt hat.
 		# Beim Einspielen ist das diese hier.
 		$topic =~ s{^mqtt2_discovery/[^/]+/}{mqtt2_discovery/$hash->{NAME}/};
 		push @messages, [$topic, $payload];
 	}
-	return "In $file stehen keine Nachrichten" if !@messages;
+	return "In $source steht keine Zeile aus Topic und Nutzdaten;"
+		. ' erwartet wird die Ausgabe von get <MQTT2_DISCOVERY> payloads <device>'
+		if !@messages;
 	my ($processed, $failed) = (0, 0);
 
+	# Antworten auf eigene Abfragen gelten nur innerhalb einer laufenden
+	# Abfrage; sie werden deshalb getrennt behandelt.
+	my (@plain, %sessions);
+
 	for my $message (@messages) {
+		my ($topic, $payload) = @$message;
+
+		if ($topic =~ m{\Amqtt2_discovery/[^/]+/shelly/([a-f0-9]{16})/([a-z]+)/rpc\z}) {
+			$sessions{$1}{$2} = $payload;
+			next;
+		}
+		push @plain, $message;
+	}
+
+	for my $message (@plain) {
 		my $status = process($hash, 'replay', @$message);
 		$status eq 'error' ? $failed++ : $processed++;
 	}
-	my $result = "processed=$processed failed=$failed";
+
+	for my $key (sort keys %sessions) {
+		my ($done, $error) = replay_shelly($hash, $sessions{$key});
+		$processed += $done;
+		$failed += $error;
+	}
+	my $result = "processed=$processed failed=$failed"
+		. ($ignored ? " ignored=$ignored" : '');
 	reading($hash, 'lastReplay', $result);
-	log_message($hash, 2, "replayPayloads aus $file: $result");
+	log_message($hash, 2, "replayPayloads aus $source: $result");
 	return $failed ? "Nicht alle Nachrichten konnten verarbeitet werden: $result" : undef;
 }
 
@@ -1175,8 +1399,8 @@ sub Set {
 		if $command eq 'discoverShelly' && @arguments <= 1;
 	return select_readings($hash, @arguments) if $command eq 'selectReadings';
 	return device_key($hash, @arguments) if $command eq 'deviceKey';
-	return replay_payloads($hash, $arguments[0])
-		if $command eq 'replayPayloads' && @arguments == 1;
+	return replay_payloads($hash, join(' ', @arguments))
+		if $command eq 'replayPayloads' && @arguments <= 1;
 	return "Unknown argument $command, choose one of " . set_list($hash);
 }
 
@@ -4510,11 +4734,18 @@ work, marks all managed targets offline and leaves this discovery device inactiv
 <li><a id="MQTT2_DISCOVERY-get-payloads"></a><b>payloads &lt;device&gt;</b><br>
 Returns the discovery messages a managed device was built from, as a block ready
 to paste into a forum post. Values behind keys such as <code>pass</code>,
-<code>user</code> or <code>token</code> are replaced by <code>xxx</code>. The
+<code>user</code> or <code>token</code> are replaced by <code>xxx</code>, and
+anything identifying the installation is replaced by something harmless:
+identifiers such as a MAC appear as a substitute that stays the same across topic
+and content, so the block remains usable; host name, SSID and addresses become
+fixed example values. The
 messages are kept in memory only, so after a restart they reappear with the next
 discovery; for a natively queried adapter the call starts that query itself.
-Someone helping can rebuild the device without the hardware, see
-<a href="#MQTT2_DISCOVERY-set-replayPayloads">replayPayloads</a>.
+The block is only shown, no file is written: in FHEMWEB it appears in a text box
+to copy from, everywhere else it is plain text. Paste it into a post, or save it
+yourself if you want to attach it. Someone helping reads it back with
+<a href="#MQTT2_DISCOVERY-set-replayPayloads">replayPayloads</a> and rebuilds the
+device without the hardware.
 </li><br>
 <li><a id="MQTT2_DISCOVERY-get-devices"></a><b>devices</b><br>
 Lists all currently existing <code>MQTT2_DEVICE</code> devices bound to the same
@@ -4562,12 +4793,21 @@ An empty value takes a single key back, it then falls through to family and
 global level (see <a href="#MQTT2_DISCOVERY-attr-keys">keys</a>).<br>
 Example: <code>set &lt;name&gt; deviceKey Werkstatt sets=hook</code>
 </li><br>
-<li><a id="MQTT2_DISCOVERY-set-replayPayloads"></a><b>replayPayloads &lt;file&gt;</b><br>
+<li><a id="MQTT2_DISCOVERY-set-replayPayloads"></a><b>replayPayloads [&lt;file&gt;]</b><br>
+Takes a block from <a href="#MQTT2_DISCOVERY-get-payloads">payloads</a>, which
+returns it as text without writing it anywhere. Without an argument FHEMWEB opens
+an input field: paste the block there and press the button. With an argument it
+reads a file you saved the block to.<br>
 Reads a block produced by <a href="#MQTT2_DISCOVERY-get-payloads">payloads</a>
 from a file and processes its messages as if they had just arrived. The device is
 created without its hardware being present, which makes a foreign report
-reproducible. Comment lines starting with <code>#</code> are ignored.<br>
-Example: <code>set &lt;name&gt; replayPayloads ./log/aus-dem-forum.txt</code>
+reproducible.<br>
+The file holds one message per line, topic and payload separated by a blank, as
+<code>get payloads</code> prints them. Lines starting with <code>#</code> and
+anything that is not such a line are ignored and reported as <code>ignored</code>;
+a file without a single message line is rejected. A log file is therefore not a
+valid input, however similar it may look.<br>
+Example: <code>set &lt;name&gt; replayPayloads /tmp/aus-dem-forum.txt</code>
 </li><br>
 <li><a id="MQTT2_DISCOVERY-set-rescan"></a><b>rescan</b><br>
 Processes matching retained discovery messages from an <code>MQTT2_SERVER</code>
@@ -4733,11 +4973,17 @@ Discovery-Device bleibt als <code>inactive</code> definiert.</p>
 Liefert die Discovery-Nachrichten, aus denen ein verwaltetes Geraet entstanden
 ist, als Block zum Einfuegen in einen Forumsbeitrag. Werte hinter Schluesseln wie
 <code>pass</code>, <code>user</code> oder <code>token</code> sind durch
-<code>xxx</code> ersetzt. Die Nachrichten liegen nur im Speicher; nach einem
+<code>xxx</code> ersetzt, und alles, was die Anlage kenntlich macht, durch
+Unverfaengliches: Kennungen wie eine MAC erscheinen als Ersatzkennung, die in
+Topic und Inhalt dieselbe bleibt, damit der Block einspielbar bleibt; Hostname,
+SSID und Adressen werden zu festen Beispielwerten. Die Nachrichten liegen nur im Speicher; nach einem
 Neustart entstehen sie mit der naechsten Erkennung neu, bei einem nativ
 abgefragten Adapter stoesst der Aufruf die Abfrage selbst an. Ein Helfer kann das
-Geraet damit ohne die Hardware nachbauen, siehe
-<a href="#MQTT2_DISCOVERY-set-replayPayloads">replayPayloads</a>.
+Der Block wird nur angezeigt, es entsteht keine Datei: In FHEMWEB steht er in
+einem Textfeld zum Kopieren, sonst als reiner Text. Er gehoert in den Beitrag
+oder, wenn er angehaengt werden soll, in eine selbst angelegte Datei. Ein Helfer
+liest ihn mit <a href="#MQTT2_DISCOVERY-set-replayPayloads">replayPayloads</a>
+wieder ein und baut das Geraet ohne die Hardware nach.
 </li><br>
 <li><a id="MQTT2_DISCOVERY-get-devices"></a><b>devices</b><br>
 Listet alle aktuell vorhandenen <code>MQTT2_DEVICE</code>-Devices am selben IODev,
@@ -4788,13 +5034,22 @@ er faellt dann auf Familien- und globale Ebene
 (siehe <a href="#MQTT2_DISCOVERY-attr-keys">keys</a>).<br>
 Beispiel: <code>set &lt;name&gt; deviceKey Werkstatt sets=hook</code>
 </li><br>
-<li><a id="MQTT2_DISCOVERY-set-replayPayloads"></a><b>replayPayloads &lt;datei&gt;</b><br>
+<li><a id="MQTT2_DISCOVERY-set-replayPayloads"></a><b>replayPayloads [&lt;datei&gt;]</b><br>
+Nimmt einen Block von <a href="#MQTT2_DISCOVERY-get-payloads">payloads</a>, der
+ihn als Text liefert und nirgends ablegt. Ohne Angabe oeffnet FHEMWEB ein
+Eingabefeld: Block einfuegen, Knopf druecken, fertig. Mit Angabe liest der Befehl
+eine Datei, in der der Block selbst abgelegt wurde.<br>
 Liest einen mit <a href="#MQTT2_DISCOVERY-get-payloads">payloads</a> erzeugten
 Block aus einer Datei und verarbeitet seine Nachrichten, als waeren sie gerade
 eingetroffen. Das Geraet entsteht damit ohne die zugehoerige Hardware, eine
-fremde Meldung wird so nachstellbar. Zeilen mit <code>#</code> am Anfang werden
-uebergangen.<br>
-Beispiel: <code>set &lt;name&gt; replayPayloads ./log/aus-dem-forum.txt</code>
+fremde Meldung wird so nachstellbar.<br>
+Die Datei enthaelt je Zeile eine Nachricht, Topic und Nutzdaten durch ein
+Leerzeichen getrennt, so wie <code>get payloads</code> sie ausgibt. Zeilen mit
+<code>#</code> am Anfang und alles, was keine solche Zeile ist, werden
+uebergangen und als <code>ignored</code> gemeldet; eine Datei ohne eine einzige
+Nachrichtenzeile wird abgewiesen. Eine Logdatei ist also keine gueltige Eingabe,
+so aehnlich sie auch aussieht.<br>
+Beispiel: <code>set &lt;name&gt; replayPayloads /tmp/aus-dem-forum.txt</code>
 </li><br>
 <li><a id="MQTT2_DISCOVERY-set-rescan"></a><b>rescan</b><br>
 Verarbeitet passende retained Discovery-Nachrichten aus dem lokalen Cache eines

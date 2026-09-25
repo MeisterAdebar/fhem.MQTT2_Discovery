@@ -39,11 +39,14 @@ Jedes Event ist ein Hash mit diesen Pflichtfeldern:
   },
 
   device => {
-    identifiers  => ['node'],
-    connections  => [],
-    name         => 'Node',
-    manufacturer => 'Example',
-    model        => 'TH-1',
+    identifiers   => ['node'],
+    connections   => [],
+    name          => 'Node',
+    manufacturer  => 'Example',
+    model         => 'TH-1',
+    kind          => 'Switch',     # Art des Geraets aus dem Protokoll
+    short_id      => '005301',     # unterscheidende Kennung
+    friendly_name => 'Wasser',     # Name des einzigen benannten Kanals
   },
 
   entity => {
@@ -51,6 +54,8 @@ Jedes Event ist ein Hash mit diesen Pflichtfeldern:
     kind          => 'sensor',
     name          => 'Temperature',
     logical_name  => 'temperature',
+    channel       => undef,        # Nummer des Kanals, falls mehrkanalig
+    channel_name  => undef,        # Name dieses Kanals
     category      => undef,
     configuration => { ... },
   },
@@ -76,6 +81,14 @@ normalisierte, ausgeschriebene Domainfelder, die weder Signal noch Command sind.
 Binding-Topics, Templates, Namen und Codecs stehen ausschliesslich in `signals`
 beziehungsweise `commands`; Rohabkuerzungen eines Discovery-Protokolls gehoeren
 nicht in diese Ebene.
+
+`device.kind`, `device.short_id` und `device.friendly_name` bestimmen den
+Geraetenamen. Der Formatadapter fuellt sie nach den Regeln seines Protokolls;
+der Mapper setzt daraus Name, Art und Kennung zusammen oder, bei genau einem
+benannten Kanal, Name und Kanalname. Die Zuordnung eines Eintrags zu einem Kanal
+steht in `entity.channel` und `entity.channel_name`. Mehrkanalige Geraete werden
+daraus in ein Hauptgeraet und je Kanal ein Geraet aufgeteilt; Eintraege ohne
+Kanal bleiben beim Hauptgeraet.
 
 `entity.name` bewahrt den ausdruecklichen Anzeigenamen des Quellprotokolls.
 `entity.logical_name` ist dagegen ein optionaler, bereits vom Formatadapter nach

@@ -1,6 +1,17 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: abef444f7a2d625b5bfdbf4f32383d116e426ffbf0d716ec4e64ce205f44cada
+# Msg-SHA256: a2973b46ea279e3e44ca20c3aaad6ef25d50ac568c1c128f16062192625f8d74
+- change: MQTT2_DISCOVERY: Der Block wird eingefuegt statt abgelegt
+  - Im Frontend antwortet get payloads in einem Textfeld zum Kopieren, sonst
+    als reiner Text. Es entsteht keine Datei.
+  - replayPayloads nimmt den Block im Eingabefeld an und liest weiter auch eine
+    Datei.
+  - Eine Datei ohne Nachrichtenzeilen wird als solche benannt. Ein FileLog
+    sieht zeilenweise aehnlich aus, ist aber keines.
+  - replayPayloads spielt auch die Antworten einer nativen Abfrage ein. Sie
+    ergeben nur im Ablauf einer Abfrage Sinn, deshalb eroeffnet der Replay eine
+    eigene.
+  - Die Doku im Repo beschreibt den Stand des Moduls.
 - change: MQTT2_DISCOVERY: Paket, Kanalaufteilung und ein Index statt eines
   Vergleichs je Muster
   - Das Modul liegt im Paket FHEM::MQTT2_DISCOVERY und bezieht die Symbole des

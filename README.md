@@ -57,6 +57,9 @@ Moduls an. Nach einem Modulupdate ist `shutdown restart` erforderlich.
 
 ## Konfiguration
 
+- `keys`: Einstellungen als `schluessel=wert`, durch Leerzeichen getrennt,
+  optional mit vorangestellter Familie, siehe [Schluessel statt
+  Einzelattribute](#schluessel-statt-einzelattribute)
 - `discoveryPrefixes`: kommaseparierte Prefixe, Default
   `homeassistant,tasmota/discovery,sonos2mqtt`
 - `shellyDiscovery`: native Shelly-Erkennung unabhaengig von `discoveryPrefixes`, Default `1`.
@@ -135,6 +138,111 @@ oder geloescht wird. `errorCount`, `lastError`, `lastErrorAdapter` und
 `warningCount`, `lastWarning`, `lastWarningAdapter` und `lastWarningTopic`
 weiterhin bestehende Teilabbildungen. Eine erfolgreiche Nachricht eines anderen
 Geraets verdeckt einen vorhandenen Fehler nicht.
+
+## Schluessel statt Einzelattribute
+
+Verhaltensschalter liegen nicht mehr je ein Attribut nebeneinander, sondern in
+einem gemeinsamen Schluesselraum. Ein Schluessel wird von unten nach oben
+gesucht:
+
+1. am Zielgeraet im Attribut `mqttDiscoveryKeys`,
+2. am Discovery-Device im Attribut `keys` fuer die Familie des Geraets,
+3. am Discovery-Device im Attribut `keys` ohne Familie,
+4. in den veralteten Einzelattributen,
+5. in der Vorgabe des Moduls.
+
+Die Familie ist der Adapter, der das Geraet erkannt hat: `shelly`, `tasmota`,
+`homeassistant` oder `sonos2mqtt`. Sie steht dem Schluessel mit Doppelpunkt
+voran.
+
+```
+attr mqttDiscovery keys style=fhem shelly:sets=hook
+set mqttDiscovery deviceKey Werkstatt sets=hook
+```
+
+Bekannte Schluessel:
+
+| Schluessel | Werte | Vorgabe | Bedeutung |
+| --- | --- | --- | --- |
+| `style` | `raw`, `fhem` | `raw` | Readingnamen roh aus der Discovery oder nach FHEM-Konvention |
+| `sets` | `list`, `hook` | `list` | Schaltbefehle als `setList`-Zeilen oder ueber die `SetExtensionsFn` |
+| `readings` | `list`, `parse` | `list` | Readings ueber `readingList`-Zeilen oder ueber die eigene Auswertung |
+| `availability` | `combined`, `source`, `none` | `combined` | verdichtetes Reading und Quellen, nur Quellen oder nichts davon |
+| `forceNEXT` | `0`, `1` | `0` | Discovery-Nachricht zusaetzlich an weitere Module durchreichen |
+| `hide` | Readingnamen, kommasepariert | leer | einzelne Readings nicht anlegen |
+
+Mit `readings=parse` wertet das Modul die Nutzdaten selbst aus, statt sie ueber
+`readingList`-Zeilen an `MQTT2_DEVICE` zu geben. Sein `Match` steht dann weit,
+sodass jede Nachricht des IODev durch das Modul laeuft. Die gespeicherten Muster
+werden deshalb nicht linear durchsucht, sondern ueber einen Index nach Topic
+angesprochen; fremde Nachrichten kosten damit unter eine Mikrosekunde statt
+einiger hundert. Zeilen ohne Laufzeitreferenz bleiben in der `readingList`, sie
+lassen sich nicht in die eigene Auswertung uebernehmen.
+
+Ein leerer Wert nimmt einen Schluessel auf seiner Ebene zurueck, sodass wieder
+die naechsthoehere gilt. `set <name> deviceKey <device> <schluessel>=<wert>`
+schreibt die Geraeteebene und prueft dabei Schluessel und Wert; eine Familie ist
+dort nicht erlaubt, weil die Familie des Geraets bereits feststeht.
+
+Die frueheren Attribute `fhemConventions`, `setsViaHook` und `readingsViaParse`
+bleiben als veraltete Schreibweise gueltig und wirken wie `style=fhem`,
+`sets=hook` und `readings=parse`. `availabilityReading none` entspricht
+`availability=source`: Das verdichtete Reading entfaellt, die Quellreadings
+bleiben. Ein Geraet, das unter `style=fhem` entstanden ist, behaelt die
+Konvention auch dann, wenn der Schluessel spaeter wieder entfaellt; sonst
+kippten bestehende Readingwerte auf neue Namen.
+
+## Geraetenamen
+
+Ohne eigenen Namen liefern die Protokolle nichts Unterscheidendes: Tasmota
+meldet als Geraetenamen schlicht `Tasmota`, Shelly gar keinen. Der Name entsteht
+deshalb aus drei Teilen:
+
+- **Name, Art und Kennung** als Regelfall, etwa `Tasmota_Switch_005301` oder
+  `Shelly_Switch_00005e005302`. Die Art kommt aus dem Protokoll (bei Tasmota aus
+  den Relaytypen, dem Lichttyp und iFan, bei Shelly aus den konfigurierten
+  Komponenten), die Kennung aus dem eigenen Topic und ersatzweise aus dem Ende
+  der MAC.
+- **Name und Kanalname**, wenn das Geraet genau einen benannten Kanal hat
+  (`fn` bei Tasmota, der Komponentenname bei Shelly): `Tasmota_Wasser`.
+- Ist der so entstandene Name bereits belegt, gilt wieder Name, Art und Kennung.
+
+Ein selbst vergebener Geraetename ersetzt nur den Vorgabenamen des Herstellers
+und bleibt sonst unangetastet; `deviceNamePrefix` wirkt zusaetzlich.
+
+## Mehrkanalige Geraete
+
+Meldet ein Geraet mehr als einen Kanal, entsteht je Kanal ein eigenes
+`MQTT2_DEVICE`. Das Hauptgeraet behaelt, was zu keinem einzelnen Kanal gehoert,
+also Telemetrie und Erreichbarkeit, und schaltet selbst nichts. Jedes
+Kanalgeraet schaltet genau seinen Ausgang, liest genau seinen Zustand und kennt
+die Erreichbarkeit des gemeinsamen Geraets.
+
+Die Kanalnamen stammen aus der Discovery; fehlen sie, haengt der Kanal seine
+Nummer an den Geraetenamen (`Schwimmbad_Switch_CF9A44_1`). Leere Steckplaetze
+verschieben die Nummerierung nicht: Tasmota zaehlt nach der Position in `rl`,
+ein unbelegter erster Steckplatz bleibt unbelegt.
+
+## Payloads weitergeben
+
+Fuer Fehlermeldungen im Forum braucht der Gegenueber die Nachrichten, aus denen
+ein Geraet entstanden ist. `get <name> payloads <device>` zeigt genau diese
+Nachrichten in einem Fenster zum Kopieren; eine Datei entsteht dabei nicht.
+
+Der Block ist immer anonymisiert. Geheimnisse (Passwoerter, Tokens, Schluessel)
+werden durch `xxx` ersetzt. Angaben zum Netz des Anwenders werden nicht
+geschwaerzt, sondern durch unverfaengliche ersetzt, damit die Nachricht
+auswertbar bleibt: Hostnamen werden zu `host`, SSIDs zu `WLAN`, Adressen zu
+Beispieladressen aus RFC 5737 und RFC 3849. Kennungen wie MAC-Adressen behalten
+ihre Form, werden aber durch ein gleich langes Ersatzstueck ersetzt, das aus der
+Kennung selbst entsteht und deshalb in Topic und Payload dasselbe bleibt.
+
+`set <name> replayPayloads` spielt einen solchen Block wieder ein. Ohne Angabe
+oeffnet FHEMWEB ein Eingabefeld, in das der Block eingefuegt wird; alternativ
+nimmt der Befehl den Pfad einer selbst angelegten Datei. Beides erzeugt dieselben
+Devices, als haetten die Nachrichten den Broker erreicht -- bei Shelly
+einschliesslich der Antworten auf die eigenen Abfragen, ohne dass ein Geraet im
+Netz vorhanden sein muss.
 
 ## Native Shelly-Discovery (Gen2, Gen3 und Gen4)
 
@@ -398,6 +506,29 @@ Suffix ihres logischen Discovery-Pfads. Eine allein vorkommende Komponente
 werden die kollidierenden Namen qualifiziert, beispielsweise `sensor_battery`
 und `device_battery`. Die Regel gilt einheitlich fuer Readings, Setter und die
 darauf verweisenden SemanticUI-Metadaten.
+
+## Readingnamen nach FHEM-Konvention
+
+Mit `style=fhem` folgen die Readingnamen den Namen, die FHEM fuer bekannte
+Rollen vorsieht. Massgeblich sind das Wiki `DevelopmentGuidelinesReadings` und
+der Forumsthread 117933. Vier Dinge weichen dadurch vom rohen Discovery-Namen
+ab:
+
+- Der Praefix der Komponente faellt weg, wenn die Komponente im Geraet nur
+  einmal vorkommt: aus `thermostat_target_temperature` wird `desired-temp`, aus
+  `switch_0_temperature` bei einem Relais `temperature`. Bei zwei Relais stellt
+  die Namensaufloesung `switch_0_temperature` und `switch_1_temperature` wieder
+  her.
+- Bekannte Rollen tragen ihren FHEM-Namen: Sollwert `desired-temp`, Istwert
+  `temperature`. Der zugehoerige Setter heisst ebenso.
+- Die Batterie folgt den drei vorgesehenen Namen: `batteryPercent` fuer den
+  Prozentwert, `batteryVoltage` fuer die Spannung, `batteryState` fuer die
+  binaere Meldung.
+- `batteryState` meldet `ok` und `low` statt `on` und `off`.
+
+Umbenannt wird nur, wenn der Zielname im Geraet frei bleibt; zwei Readings
+duerfen nicht auf denselben Namen fallen. Ohne den Schluessel bleibt alles so,
+wie die Discovery es liefert.
 
 ## SemanticUI
 

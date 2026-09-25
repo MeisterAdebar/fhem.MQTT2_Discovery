@@ -24,5 +24,27 @@ Ergaenzend am 08.09.2026 fuer native Shelly-Abfragen geprueft:
 - Der lokale Vertragstest in `tests/28_shelly.t` prueft die Argumente der
   Gateway-Grenze und simuliert Antworten ueber beide MQTT-Dispatchpfade.
 
+Ergaenzend am 22.09.2026 an einer laufenden FHEM-Installation geprueft:
+
+- `CommandReload` ruft `<Modul>_Initialize` mit einem **neuen** Modulhash auf und
+  setzt `$modules{<Typ>}` erst danach darauf. Wer in `Initialize` nach
+  `$modules{<Typ>}{...}` schreibt statt nach `$hash->{...}`, schreibt ins alte,
+  gleich verworfene Hash. Uebernommen werden nur `defptr` und `ldata`. Ein
+  Modul, das seinen `Match` zur Laufzeit weitet, hat ihn nach einem `reload`
+  deshalb wieder eng, waehrend die Instanzen ueber `defptr` weiterleben.
+- Waehrend einer `ParseFn` setzt `fhem.pl` `$readingsUpdateDelayTrigger`, sodass
+  `readingsEndUpdate($hash, 1)` an einem fremden Geraet kein Ereignis erzeugt:
+  kein Longpoll in FHEMWEB, keine Notifies, keine Logs. `Dispatch()` holt den
+  Trigger danach nur fuer die Geraete nach, deren Namen die `ParseFn`
+  zurueckgibt. Die Marke `[NEXT]` darf diese Namen mitfuehren; `fhem.pl` nimmt
+  sie nach dem `shift` in die Fundliste auf. `MQTT2_DISCOVERY` gibt deshalb
+  `('[NEXT]', @geschriebene_devices)` zurueck, wenn es aus der `ParseFn` heraus
+  Readings an verwalteten Geraeten schreibt.
+- `MQTT2_SERVER` besitzt keine `GetFn`; seine Sets sind `publish`, `reopen` und
+  `clearRetain`. Ein Zugriff auf gesehene Nachrichten ist von aussen nur ueber
+  den Retain-Cache moeglich, und den fuellt der Server nur bei aktivem
+  `respectRetain` (ab Featurelevel 6.1 nicht mehr Vorgabe) und nur fuer
+  Nachrichten mit Retain-Flag.
+
 Quellen: [MQTT2_CLIENT](https://raw.githubusercontent.com/fhem/fhem-mirror/master/fhem/FHEM/00_MQTT2_CLIENT.pm)
 und [MQTT2_SERVER](https://raw.githubusercontent.com/fhem/fhem-mirror/master/fhem/FHEM/00_MQTT2_SERVER.pm).

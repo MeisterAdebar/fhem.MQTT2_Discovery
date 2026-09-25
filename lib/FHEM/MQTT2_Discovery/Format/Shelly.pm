@@ -67,6 +67,19 @@ sub claims {
 	return @route ? 1 : 0;
 }
 
+# Nennt die offene Teilabfrage einer laufenden Sitzung. Wer gespeicherte
+# Antworten einspielt, braucht sie: Eine Antwort gilt nur zu der Anfrage, die
+# gerade offen ist.
+sub pending {
+	my ($state, $prefix) = @_;
+	my $entry = ref($state) eq 'HASH' ? $state->{devices}{$prefix} : undef;
+	return undef if ref($entry) ne 'HASH' || ref($entry->{pending}) ne 'HASH';
+	return {
+		part => $entry->{pending}{part}, id => $entry->{pending}{id},
+		reply => $entry->{reply},
+	};
+}
+
 # Erzeugt ausschliesslich lesende RPC-Anfragen mit einer pro Versuch eindeutigen ID.
 sub _request {
 	my ($state, $entry, $part) = @_;
