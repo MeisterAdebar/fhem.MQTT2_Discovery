@@ -1,6 +1,15 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: 226c516f7aceff72feafb09cf65ad380d42a47736c20b4102bbb8411113b7994
+# Msg-SHA256: 3d7da73f03d23dcb61286966b3cd7014beb5ed16f55b6df0c0ea91fc5b84eb33
+- change: MQTT2_DISCOVERY: Nutzdaten eines Geraets ausgeben und wieder
+  einspielen
+  - get payloads gibt die Discovery-Nachrichten aus, aus denen ein verwaltetes
+    Geraet entstanden ist. Geheimnisse und Angaben zum Netz des Anwenders
+    werden ersetzt.
+  - set replayPayloads verarbeitet einen solchen Block, als waeren die
+    Nachrichten gerade eingetroffen.
+  - Auch die Teilantworten einer nativen Abfrage gehoeren zum Geraet und stehen
+    im Block.
 - change: MQTT2_DISCOVERY: Schluesselraum und Readingnamen
   - Statt je Schalter ein Attribut gibt es einen Schluesselraum mit vier
     Ebenen: Geraet, Familie, global und die Vorgabe im Code. Gesucht wird von

@@ -113,6 +113,18 @@ subtest 'Leistungsmessung, mehrere Relais und unbekannte Komponenten' => sub {
 	like(join(';', @{ $result->{warnings} }), qr/cover:0/, 'nicht unterstuetzter Cover wird sichtbar gemeldet');
 };
 
+subtest 'alle Teilantworten einer Abfrage gehoeren zum Geraet' => sub {
+	my ($hash) = setup('MQTT2_SERVER');
+	discover($hash, $id);
+	my $store = $hash->{helper}{payloads}{'Werkstatt_Switch_aabbccddeeff'};
+
+	# Nur die letzte Teilantwort erzeugt Entities; ohne die uebrigen liesse sich
+	# das Geraet aus dem Block nicht nachbauen.
+	is([sort map { m{/([a-z]+)/rpc\z} ? $1 : $_ } keys %{ $store || {} }],
+		[qw(config info status)], 'alle Teilantworten dieser Abfrage sind gespeichert');
+	ok(!%{ $hash->{helper}{pending_payloads} || {} }, 'die Zwischenablage ist danach leer');
+};
+
 subtest 'Fehlerhafte, veraltete und doppelte Antworten erzeugen keine Teilgeraete' => sub {
 	my $state = {};
 	my %common = (state => $state, now => 100);

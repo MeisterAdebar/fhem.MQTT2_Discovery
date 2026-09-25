@@ -330,15 +330,27 @@ sub MQTT2_DISCOVERY_Get {
 	MQTT2_DISCOVERY_log($hash, 4, 'get arguments=[' . join(', ', @arguments) . ']') if @arguments;
 
 	# Ohne Kommandonamen liefert FHEM die verfuegbare Get-Auswahl.
-	return 'Unknown argument ?, choose one of devices:noArg'
+	return 'Unknown argument ?, choose one of ' . MQTT2_DISCOVERY_get_list($hash)
 		if !defined $command;
+	return MQTT2_DISCOVERY_payloads($hash, $arguments[0])
+		if $command eq 'payloads' && @arguments == 1;
 
 	# devices akzeptiert bewusst keine Zusatzargumente und erzeugt keine Seiteneffekte.
 	return MQTT2_DISCOVERY_devices_html($hash)
 		if $command eq 'devices' && !@arguments;
 
 	# Auch fehlerhafte Aufrufe nennen die vollstaendige Get-Auswahl.
-	return "Unknown argument $command, choose one of devices:noArg";
+	return "Unknown argument $command, choose one of " . MQTT2_DISCOVERY_get_list($hash);
+}
+
+# Die verwalteten Geraete stehen als Auswahl hinter payloads.
+sub MQTT2_DISCOVERY_get_list {
+	my ($hash) = @_;
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+	my @targets = sort grep { defined($_) && !ref($_) && $defs{$_} } map {
+		ref($_) eq 'HASH' ? $_->{name} : undef
+	} values %{ $registry->{devices} || {} };
+	return 'devices:noArg payloads' . (@targets ? ':' . join(',', @targets) : '');
 }
 
 # Escaped dynamische Texte, bevor sie in die bewusst rohe FHEMWEB-HTML-Antwort gelangen.
@@ -639,7 +651,8 @@ sub MQTT2_DISCOVERY_set_list {
 	} values %{ $registry->{devices} || {} };
 	my $select = @targets ? 'selectReadings:' . join(',', @targets) : 'selectReadings';
 	my $device_key = @targets ? 'deviceKey:' . join(',', @targets) : 'deviceKey';
-	return "activate:noArg deactivate:noArg rebuildDevice $select $device_key rescan:noArg discoverShelly";
+	return "activate:noArg deactivate:noArg rebuildDevice $select $device_key"
+		. ' replayPayloads rescan:noArg discoverShelly';
 }
 # Bedient die Set-Kommandos eines verwalteten MQTT2_DEVICE, ohne dass dort ein
 # setList-Attribut noetig ist: bei "?" ergaenzt die Funktion die Befehle in der
@@ -763,6 +776,172 @@ sub MQTT2_DISCOVERY_parse_readings_wanted {
 	}
 
 	return 0;
+}
+
+# --- Nutzdaten zum Nachstellen ------------------------------------------------
+# Damit ein Helfer ein Geraet ohne die Hardware nachbauen kann, hebt das Modul
+# die Nachrichten auf, aus denen es entstanden ist. Sie liegen im Speicher, denn
+# in der Registry wuerden sie den Statefile aufblaehen; nach einem Neustart
+# fuellt die naechste Erkennung sie wieder.
+our $MQTT2_DISCOVERY_PAYLOAD_LIMIT = 32768;
+
+# Die eigenen Antworttopics tragen den Geraeteschluessel; daran haengen die
+# Teilantworten einer Abfrage zusammen. Nur die letzte von ihnen erzeugt
+# Entities, die uebrigen gehoeren aber genauso zum Bild.
+sub MQTT2_DISCOVERY_payload_session {
+	my ($topic) = @_;
+	return $1 if defined($topic)
+		&& $topic =~ m{\Amqtt2_discovery/[^/]+/shelly/([a-f0-9]{16})/};
+	return undef;
+}
+
+# Haelt eine Nachricht fest, deren Geraet noch nicht feststeht.
+sub MQTT2_DISCOVERY_buffer_payload {
+	my ($hash, $topic, $payload) = @_;
+	my $session = MQTT2_DISCOVERY_payload_session($topic);
+	return if !defined($session) || !defined($payload);
+	$hash->{helper}{pending_payloads}{$session}{$topic} = $payload;
+	return;
+}
+
+sub MQTT2_DISCOVERY_remember_payload {
+	my ($hash, $name) = @_;
+	my $message = $hash->{helper}{process_message};
+	return if ref($message) ne 'HASH' || !defined($name) || $name eq '';
+	return if !defined($message->{topic}) || !defined($message->{payload});
+	my $store = ($hash->{helper}{payloads}{$name} ||= {});
+
+	# Die uebrigen Teilantworten derselben Abfrage gehoeren zu diesem Geraet.
+	my $session = MQTT2_DISCOVERY_payload_session($message->{topic});
+
+	if (defined($session) && ref($hash->{helper}{pending_payloads}{$session}) eq 'HASH') {
+		my $pending = delete $hash->{helper}{pending_payloads}{$session};
+		@$store{ keys %$pending } = values %$pending;
+		delete $hash->{helper}{pending_payloads} if !keys %{ $hash->{helper}{pending_payloads} };
+	}
+
+	# Dieselbe Nachricht ersetzt ihre Vorgaengerin; der Platz ist begrenzt, damit
+	# ein geschwaetziges Geraet den Speicher nicht fuellt.
+	$store->{ $message->{topic} } = $message->{payload};
+	my $size = 0;
+	$size += length($_) + length($store->{$_}) for keys %$store;
+	return if $size <= $MQTT2_DISCOVERY_PAYLOAD_LIMIT;
+
+	for my $topic (sort { length($store->{$b}) <=> length($store->{$a}) } keys %$store) {
+		next if $topic eq $message->{topic};
+		$size -= length($topic) + length(delete $store->{$topic});
+		last if $size <= $MQTT2_DISCOVERY_PAYLOAD_LIMIT;
+	}
+
+	return;
+}
+
+# Schluesselnamen, hinter denen ein Geheimnis stehen kann. Die Adapter halten
+# zwar nur, was sie brauchen, aber die rohe Nachricht geht hier unveraendert
+# durch, und ein Shelly liefert auf Shelly.GetConfig auch sein WLAN-Passwort.
+our $MQTT2_DISCOVERY_SECRET_KEYS = qr/(?:pass|pwd|psk|secret|token|api_?key|auth|user)/i;
+
+# Ersetzt Geheimnisse durch einen Platzhalter, laesst die Nachricht sonst in
+# Ruhe. Was sich nicht als JSON lesen laesst, bleibt unveraendert; es ist dann
+# ein einfacher Wert wie true oder online.
+sub MQTT2_DISCOVERY_redact_payload {
+	my ($payload) = @_;
+	return $payload if !defined($payload) || $payload !~ /^\s*[\[{]/;
+	my $data = eval { JSON::PP->new->decode($payload) };
+	return $payload if !defined($data) || $@;
+	MQTT2_DISCOVERY_redact_value($data);
+	return eval { JSON::PP->new->canonical(1)->encode($data) } // $payload;
+}
+
+sub MQTT2_DISCOVERY_redact_value {
+	my ($value) = @_;
+
+	if (ref($value) eq 'HASH') {
+
+		for my $key (keys %$value) {
+
+			if ($key =~ $MQTT2_DISCOVERY_SECRET_KEYS && !ref($value->{$key})) {
+				$value->{$key} = 'xxx';
+				next;
+			}
+			MQTT2_DISCOVERY_redact_value($value->{$key});
+		}
+
+	} elsif (ref($value) eq 'ARRAY') {
+		MQTT2_DISCOVERY_redact_value($_) for @$value;
+	}
+
+	return;
+}
+
+# Stellt die Nachrichten eines Geraets als Textblock zum Einfuegen bereit.
+sub MQTT2_DISCOVERY_payloads {
+	my ($hash, $name) = @_;
+	my $registry = MQTT2_DISCOVERY_registry($hash);
+	my ($record) = grep {
+		ref($_) eq 'HASH' && ($_->{name} // '') eq ($name // '')
+	} values %{ $registry->{devices} || {} };
+	return "$name ist kein von dieser Instanz verwaltetes Geraet" if !$record;
+	my $store = $hash->{helper}{payloads}{$name};
+
+	# Nach einem Neustart ist der Speicher leer. Ein nativ abgefragter Adapter
+	# kann die Nachrichten selbst neu anfordern.
+	if (ref($store) ne 'HASH' || !%$store) {
+		my $error = ($record->{adapter} // '') eq 'shelly'
+			? MQTT2_DISCOVERY_discover_shelly($hash, $record->{cid}) : undef;
+		return 'Noch keine Nachrichten gespeichert; die Abfrage laeuft, bitte gleich erneut aufrufen.'
+			if ($record->{adapter} // '') eq 'shelly' && !$error;
+		return 'Noch keine Nachrichten gespeichert. Sie entstehen bei der naechsten Erkennung;'
+			. ' bei einem Adapter ohne Abfrage hilft nur, auf die naechste Ankuendigung zu warten.';
+	}
+	my $entities = scalar keys %{ $record->{entities} || {} };
+	my @lines = (
+		"# MQTT2_DISCOVERY $MQTT2_DISCOVERY_VERSION, Geraet $name, Adapter "
+			. ($record->{adapter} // 'unbekannt') . ", Entities $entities",
+		'# Geheimnisse sind durch xxx ersetzt. Einspielen mit:'
+			. " set <MQTT2_DISCOVERY> replayPayloads <datei>",
+	);
+	push @lines, "$_ " . MQTT2_DISCOVERY_redact_payload($store->{$_}) for sort keys %$store;
+	return join("\n", @lines);
+}
+
+# Spielt einen mit get payloads erzeugten Block wieder ein. Damit entsteht ein
+# Geraet ohne die zugehoerige Hardware, etwa um einer fremden Meldung aus dem
+# Forum nachzugehen.
+sub MQTT2_DISCOVERY_replay_payloads {
+	my ($hash, $file) = @_;
+	return 'Aufruf: set <name> replayPayloads <datei>' if !defined($file) || $file eq '';
+	return 'Der Dateiname darf nicht aus dem Verzeichnis herausfuehren' if $file =~ m{\.\.};
+	my @lines;
+	{
+		open my $input, '<', $file or return "Kann $file nicht lesen: $!";
+		@lines = <$input>;
+		close $input or return "Kann $file nicht schliessen: $!";
+	}
+	my @messages;
+
+	for my $line (@lines) {
+		chomp $line;
+		next if $line =~ /^\s*(?:#|$)/;
+		my ($topic, $payload) = split /\s+/, $line, 2;
+		next if !defined($topic) || !defined($payload) || $topic eq '';
+
+		# Das eigene Antworttopic traegt den Namen der Instanz, die gefragt hat.
+		# Beim Einspielen ist das diese hier.
+		$topic =~ s{^mqtt2_discovery/[^/]+/}{mqtt2_discovery/$hash->{NAME}/};
+		push @messages, [$topic, $payload];
+	}
+	return "In $file stehen keine Nachrichten" if !@messages;
+	my ($processed, $failed) = (0, 0);
+
+	for my $message (@messages) {
+		my $status = MQTT2_DISCOVERY_process($hash, 'replay', @$message);
+		$status eq 'error' ? $failed++ : $processed++;
+	}
+	my $result = "processed=$processed failed=$failed";
+	MQTT2_DISCOVERY_reading($hash, 'lastReplay', $result);
+	MQTT2_DISCOVERY_log($hash, 2, "replayPayloads aus $file: $result");
+	return $failed ? "Nicht alle Nachrichten konnten verarbeitet werden: $result" : undef;
 }
 
 # --- Schluessel ---------------------------------------------------------------
@@ -930,6 +1109,8 @@ sub MQTT2_DISCOVERY_Set {
 		if $command eq 'discoverShelly' && @arguments <= 1;
 	return MQTT2_DISCOVERY_select_readings($hash, @arguments) if $command eq 'selectReadings';
 	return MQTT2_DISCOVERY_device_key($hash, @arguments) if $command eq 'deviceKey';
+	return MQTT2_DISCOVERY_replay_payloads($hash, $arguments[0])
+		if $command eq 'replayPayloads' && @arguments == 1;
 	return "Unknown argument $command, choose one of " . MQTT2_DISCOVERY_set_list($hash);
 }
 
@@ -2066,6 +2247,8 @@ sub MQTT2_DISCOVERY_process_inner {
 			? (adapters => $hash->{helper}{format_adapters}) : ()),
 	);
 	$hash->{helper}{process_adapter} = $parsed->{adapter} if $parsed->{adapter};
+	$hash->{helper}{process_message} = { topic => $topic, payload => $payload };
+	MQTT2_DISCOVERY_buffer_payload($hash, $topic, $payload);
 
 	# Kein Adapter beansprucht das Topic; es muss fuer nachfolgende MQTT-Parser
 	# freigegeben werden und darf keine Discovery-Readings veraendern.
@@ -2576,6 +2759,7 @@ sub MQTT2_DISCOVERY_stage_mapping {
 	$record->{adapter} = $mapping->{adapter}
 		if defined($mapping->{adapter}) && $mapping->{adapter} ne '';
 	$record->{entities}{ $mapping->{entity_key} } = $mapping;
+	MQTT2_DISCOVERY_remember_payload($hash, $record->{name});
 	MQTT2_DISCOVERY_log($hash, 4, "staged target=$record->{name}; entity=$mapping->{entity_key}");
 	$$created_now_ref = $created_now if ref($created_now_ref) eq 'SCALAR';
 	return undef;
@@ -4197,6 +4381,15 @@ work, marks all managed targets offline and leaves this discovery device inactiv
 <a id="MQTT2_DISCOVERY-get"></a>
 <h4>Get</h4>
 <ul>
+<li><a id="MQTT2_DISCOVERY-get-payloads"></a><b>payloads &lt;device&gt;</b><br>
+Returns the discovery messages a managed device was built from, as a block ready
+to paste into a forum post. Values behind keys such as <code>pass</code>,
+<code>user</code> or <code>token</code> are replaced by <code>xxx</code>. The
+messages are kept in memory only, so after a restart they reappear with the next
+discovery; for a natively queried adapter the call starts that query itself.
+Someone helping can rebuild the device without the hardware, see
+<a href="#MQTT2_DISCOVERY-set-replayPayloads">replayPayloads</a>.
+</li><br>
 <li><a id="MQTT2_DISCOVERY-get-devices"></a><b>devices</b><br>
 Lists all currently existing <code>MQTT2_DEVICE</code> devices bound to the same
 IO device, split into devices managed by this discovery instance and unmanaged
@@ -4242,6 +4435,13 @@ the keys already set there and only then writes the device attribute
 An empty value takes a single key back, it then falls through to family and
 global level (see <a href="#MQTT2_DISCOVERY-attr-keys">keys</a>).<br>
 Example: <code>set &lt;name&gt; deviceKey Werkstatt sets=hook</code>
+</li><br>
+<li><a id="MQTT2_DISCOVERY-set-replayPayloads"></a><b>replayPayloads &lt;file&gt;</b><br>
+Reads a block produced by <a href="#MQTT2_DISCOVERY-get-payloads">payloads</a>
+from a file and processes its messages as if they had just arrived. The device is
+created without its hardware being present, which makes a foreign report
+reproducible. Comment lines starting with <code>#</code> are ignored.<br>
+Example: <code>set &lt;name&gt; replayPayloads ./log/aus-dem-forum.txt</code>
 </li><br>
 <li><a id="MQTT2_DISCOVERY-set-rescan"></a><b>rescan</b><br>
 Processes matching retained discovery messages from an <code>MQTT2_SERVER</code>
@@ -4396,6 +4596,16 @@ Discovery-Device bleibt als <code>inactive</code> definiert.</p>
 <a id="MQTT2_DISCOVERY-get"></a>
 <h4>Get</h4>
 <ul>
+<li><a id="MQTT2_DISCOVERY-get-payloads"></a><b>payloads &lt;device&gt;</b><br>
+Liefert die Discovery-Nachrichten, aus denen ein verwaltetes Geraet entstanden
+ist, als Block zum Einfuegen in einen Forumsbeitrag. Werte hinter Schluesseln wie
+<code>pass</code>, <code>user</code> oder <code>token</code> sind durch
+<code>xxx</code> ersetzt. Die Nachrichten liegen nur im Speicher; nach einem
+Neustart entstehen sie mit der naechsten Erkennung neu, bei einem nativ
+abgefragten Adapter stoesst der Aufruf die Abfrage selbst an. Ein Helfer kann das
+Geraet damit ohne die Hardware nachbauen, siehe
+<a href="#MQTT2_DISCOVERY-set-replayPayloads">replayPayloads</a>.
+</li><br>
 <li><a id="MQTT2_DISCOVERY-get-devices"></a><b>devices</b><br>
 Listet alle aktuell vorhandenen <code>MQTT2_DEVICE</code>-Devices am selben IODev,
 getrennt nach den von dieser Discovery-Instanz verwalteten und den nicht
@@ -4444,6 +4654,14 @@ Hand wird abgewiesen. Ein leerer Wert nimmt einen einzelnen Schluessel zurueck,
 er faellt dann auf Familien- und globale Ebene
 (siehe <a href="#MQTT2_DISCOVERY-attr-keys">keys</a>).<br>
 Beispiel: <code>set &lt;name&gt; deviceKey Werkstatt sets=hook</code>
+</li><br>
+<li><a id="MQTT2_DISCOVERY-set-replayPayloads"></a><b>replayPayloads &lt;datei&gt;</b><br>
+Liest einen mit <a href="#MQTT2_DISCOVERY-get-payloads">payloads</a> erzeugten
+Block aus einer Datei und verarbeitet seine Nachrichten, als waeren sie gerade
+eingetroffen. Das Geraet entsteht damit ohne die zugehoerige Hardware, eine
+fremde Meldung wird so nachstellbar. Zeilen mit <code>#</code> am Anfang werden
+uebergangen.<br>
+Beispiel: <code>set &lt;name&gt; replayPayloads ./log/aus-dem-forum.txt</code>
 </li><br>
 <li><a id="MQTT2_DISCOVERY-set-rescan"></a><b>rescan</b><br>
 Verarbeitet passende retained Discovery-Nachrichten aus dem lokalen Cache eines
