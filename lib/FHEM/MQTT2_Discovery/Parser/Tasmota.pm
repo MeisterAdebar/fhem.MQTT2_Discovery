@@ -138,13 +138,37 @@ sub _device_short_id {
 
 # Der Anwender vergibt je Kanal einen Namen (fn). Bei genau einem Schaltkanal
 # beschreibt er das ganze Geraet und eignet sich als Geraetename. Bei mehreren
-# Kanaelen gehoert er zum Kanal, nicht zum Geraet.
+# Kanaelen benennt der erste das Geraet erst beim Aufteilen; dort steht fest,
+# welcher Kanal das Geraet selbst ist.
+# Zaehlt die Kanaele eines Geraets: Schalter und Licht je Relayposition, ein
+# Rollladen je Paar. Ein Rollladen belegt zwei Positionen, ist aber ein Kanal.
+sub _channel_count {
+	my ($config) = @_;
+	my $relays = ref($config->{rl}) eq 'ARRAY' ? $config->{rl} : [];
+	my ($count, %consumed, @first) = (0);
+
+	for my $offset (0 .. $#$relays) {
+		my $type = $relays->[$offset];
+		next if !defined($type) || ref($type) || $type !~ /^\d+$/ || !$type;
+		next if $consumed{$offset};
+
+		if ($type == 3) {
+			next if $offset == $#$relays || ($relays->[$offset + 1] || 0) != 3;
+			$consumed{ $offset + 1 } = 1;
+		}
+		push @first, $offset;
+		$count++;
+	}
+
+	return ($count, $first[0]);
+}
+
 sub _device_friendly_name {
 	my ($config, $name) = @_;
-	my $relays = ref($config->{rl}) eq 'ARRAY' ? $config->{rl} : [];
-	my @active = grep { defined($_) && !ref($_) && $_ =~ /^\d+$/ && $_ } @$relays;
-	return undef if @active != 1;
-	my $friendly = ref($config->{fn}) eq 'ARRAY' ? _scalar_string($config->{fn}[0]) : undef;
+	my ($channels, $first) = _channel_count($config);
+	return undef if $channels != 1 || !defined($first);
+	my $friendly = ref($config->{fn}) eq 'ARRAY'
+		? _scalar_string($config->{fn}[$first]) : undef;
 	return undef if !defined($friendly) || lc($friendly) eq lc($name // '');
 	return $friendly;
 }
@@ -384,7 +408,9 @@ sub _actuator_entities {
 	my $set_options = ref($config->{so}) eq 'HASH' ? $config->{so} : {};
 	my (@entities, @warnings);
 	my $shutter = 0;
+	my %consumed_shutter;
 	my $numbered_power_names = _numbered_power_names($config, $relays);
+	my %channel_command;
 	my ($first_light) = grep { ($relays->[$_] || 0) == 2 } 0 .. $#$relays;
 	$first_light = 0 if !defined $first_light;
 
@@ -398,7 +424,12 @@ sub _actuator_entities {
 		# Relaytyp 3 markiert den Beginn eines moeglichen Zweierpaars fuer einen
 		# Shutter und wird nicht wie ein einzelner Schaltkanal behandelt.
 		if ($type == 3) {
-			next if $offset > 0 && ($relays->[$offset - 1] || 0) == 3;
+
+			# Nur die zweite Haelfte des eigenen Paars wird uebersprungen. Der
+			# Blick auf den Vorgaenger genuegt dafuer nicht: Bei vier
+			# aufeinanderfolgenden Haelften hat auch die dritte einen Vorgaenger
+			# vom Typ 3, und der zweite Rollladen entfiel ganz.
+			next if $consumed_shutter{$offset};
 
 			# Ein unvollstaendiges Paar kann weder Richtung noch Position sicher
 			# steuern und wird deshalb nur als Warnung dokumentiert.
@@ -406,11 +437,15 @@ sub _actuator_entities {
 				push @warnings, "Unvollstaendiges Tasmota-Shutterpaar an Relay $index";
 				next;
 			}
+			$consumed_shutter{ $offset + 1 } = 1;
 			++$shutter;
 			my $object_id = $shutter == 1 ? 'shutter' : "shutter_$shutter";
 			my $name = _scalar_string($friendly->[$offset]) || "Shutter $shutter";
 				my $entity = _entity_base(%args, component => 'cover', object_id => $object_id, name => $name);
-			$entity->{channel} = $shutter;
+			# Ein Kanal ist eine Position in rl - beim Rollladen die seiner ersten
+			# Haelfte. Mit der Rollladennummer waeren Lichtkanal 1 und Rollladen 1
+			# derselbe Kanal, und ein Geraet aus beidem wuerde nicht aufgeteilt.
+			$entity->{channel} = $index;
 			$entity->{channel_name} = _scalar_string($friendly->[$offset]);
 			$entity->{command_topic} = "$args{command_base}/Backlog";
 			$entity->{payload_open} = "ShutterOpen$shutter";
@@ -457,6 +492,7 @@ sub _actuator_entities {
 
 		# Der Kanal traegt spaeter ein eigenes Geraet, wenn es mehrere gibt.
 		$entity->{channel} = $index;
+		$channel_command{$index} = $command;
 		$entity->{channel_name} = _scalar_string($friendly->[$offset]);
 
 		# Das skalare Statustopic dieses Kanals gehoert zu ihm und nicht zu den
@@ -489,6 +525,45 @@ sub _actuator_entities {
 		_light_details($entity, $config, $offset, $first_light, $args{stat_base}, $args{command_base})
 			if $component eq 'light' && $type == 2;
 		push @entities, $entity;
+	}
+
+	# Bei mehreren Kanaelen liegt die geraeteweite Telemetrie beim Hauptgeraet.
+	# Sie nennt aber auch den Schaltzustand jedes Kanals; der liest ihn deshalb
+	# gezielt nach. Bei einem einzigen Kanal ist das Geraet der Kanal, dort kommt
+	# die Telemetrie ohnehin bei ihm an.
+	my %channel_seen = map { ($_->{channel} => 1) }
+		grep { defined($_->{channel}) } @entities;
+
+	if (keys(%channel_seen) > 1) {
+		my ($first_channel) = sort { $a <=> $b } keys %channel_seen;
+
+		for my $entity (@entities) {
+			next if !defined($entity->{channel});
+			my $key = $channel_command{ $entity->{channel} };
+			next if !defined($key);
+
+			# Ein Kanal liest seinen Zustand von seinem eigenen skalaren Topic und
+			# nicht aus dem Sammelpayload: Der beschreibt das ganze Geraet und
+			# nennt die Schluessel aller Kanaele. Die attrTemplates loesen es
+			# genauso - in tasmota_2channel_split hat das zweite Geraet genau eine
+			# Zeile, STATTOPIC/POWER2 auf state.
+			$entity->{state_topic} = "$args{stat_base}/$key";
+			delete $entity->{value_template};
+			$entity->{state_reading_name} = $key;
+			$entity->{raw_metadata}{state_reading_name} = $key;
+
+			# Der erste Kanal ist das Geraet selbst; bei ihm kommt die Telemetrie
+			# ohnehin als Sammelzeile an.
+			next if $entity->{channel} eq $first_channel;
+
+			# Ohne das offene Abflachen fehlt dem Kanal die periodische
+			# Telemetrie, die seinen Schaltzustand ebenfalls nennt. Er liest
+			# daraus genau seinen eigenen Schluessel nach.
+			push @{ $entity->{supplemental_signals} }, {
+				type => 'template', topic => "$args{telemetry_base}/STATE",
+				template => _template_path([$key]), name => $key,
+			};
+		}
 	}
 
 	my ($supplemental, $supplemental_warnings) = _supplemental_entities(%args);
@@ -714,7 +789,11 @@ sub _rebuild {
 	my ($sensors, $sensor_warnings) = _sensor_entities(%common, sensors => $args{entry}{sensors});
 	# Die geraeteweiten Zusatzsignale gehoeren an ein Entity ohne Kanal, sonst
 	# landen sie beim Aufteilen in einem beliebigen Kanalgeraet.
-	my ($profile_owner) = (@$sensors, @$actuators);
+	# Ohne Kanal gehoert ein Entity dem Geraet. Gibt es keines, ist der erste
+	# Kanal das Geraet selbst und traegt seine Telemetrie - genau wie bei einem
+	# einkanaligen Geraet.
+	my ($profile_owner) = grep { !defined($_->{channel}) } (@$sensors, @$actuators);
+	($profile_owner) = (@$sensors, @$actuators) if !$profile_owner;
 
 	# Ein einziges Entity transportiert die geraeteweiten Zusatzsignale; beim
 	# Zusammenfassen landet es trotzdem genau einmal am Zieldevice.

@@ -91,9 +91,17 @@ subtest 'Power-Kanalnamen folgen der Tasmota-Ausgabe bei stabilen Entity-IDs' =>
 
 	is([sort keys %multi_switch], [qw(power power2)],
 		'interne Entity-IDs bleiben unabhaengig von der MQTT-Nummerierung stabil');
-	is([$multi_switch{power}{value_template}, $multi_switch{power2}{value_template}],
-		['{{ value_json.POWER1 }}', '{{ value_json.POWER2 }}'],
-		'mehrere Power-Ausgaenge verwenden durchgehend nummerierte JSON-Schluessel');
+	# Ein aufgeteiltes Geraet liest den Zustand eines Kanals von dessen eigenem
+	# skalaren Topic. Der Sammelpayload beschreibt das ganze Geraet und gehoert
+	# darum dem Hauptgeraet; die attrTemplates loesen es genauso
+	# (tasmota_2channel_split: eine Zeile STATTOPIC/POWER2 auf state).
+	is([$multi_switch{power}{state_topic}, $multi_switch{power2}{state_topic}],
+		['stat/dual/POWER1', 'stat/dual/POWER2'],
+		'die Kanaele lesen ihr eigenes nummeriertes Statustopic');
+	is([map { $multi_switch{$_}{value_template} } qw(power power2)], [undef, undef],
+		'und brauchen dafuer kein Template');
+	is([map { $multi_switch{$_}{state_reading_name} } qw(power power2)], ['POWER1', 'POWER2'],
+		'der Wert steht allein im Payload und tragt den Namen des Kanals');
 	is([$multi_switch{power}{command_topic}, $multi_switch{power2}{command_topic}],
 		['cmnd/dual/POWER1', 'cmnd/dual/POWER2'],
 		'Commandtopics verwenden dieselbe Kanalnummerierung wie die Statuswerte');

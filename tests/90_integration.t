@@ -484,26 +484,48 @@ subtest 'native Tasmota-Klassen werden bis readingList und setList abgebildet' =
 	my $config = '{"ip":"192.0.2.12","dn":"All Classes","fn":["Color Light","Shutter",""],"hn":"all-classes","mac":"112233445566","md":"ESP32","ofln":"Offline","onln":"Online","state":["OFF","ON","TOGGLE","HOLD"],"sw":"15.4.0","t":"all_classes","ft":"%prefix%/%topic%/","tp":["cmnd","stat","tele"],"rl":[2,3,3],"swc":[5,13],"swn":["Door","Motion"],"btn":[1,0],"so":{"4":0,"11":0,"13":0,"30":0,"68":0,"73":1,"82":1,"114":1},"if":1,"cam":0,"ty":0,"lk":1,"lt_st":5,"sho":[0],"sht":[[0,90,10]],"ver":1}';
 	is(dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/112233445566/config', $config),
 		['MQTT2_DISCOVERY'], 'erweiterte Tasmota config wird konsumiert');
-	ok($main::defs{MQTT2_All_Classes_Fan_445566}, 'alle Klassen werden in einem MQTT2_DEVICE gruppiert');
-	my $reading_list = attr_value('MQTT2_All_Classes_Fan_445566', 'readingList');
-	my $set_list = attr_value('MQTT2_All_Classes_Fan_445566', 'setList');
+
+	# Licht und Rollladen sind zwei Kanaele - der Rollladen liegt auf Position 2
+	# von rl, nicht auf Rollladen 1. Daraus werden zwei Geraete: Das Licht ist das
+	# Geraet selbst und traegt Fan, Sensoren und Telemetrie, der Rollladen sein
+	# eigenes.
+	my $licht = 'MQTT2_All_Classes_Color_Light';
+	my $rollladen = 'MQTT2_All_Classes_Shutter';
+	ok($main::defs{$licht}, 'der erste Kanal ist das Geraet und tragt seinen Namen');
+	ok($main::defs{$rollladen}, 'der Rollladen bekommt ein eigenes Geraet');
+	my $reading_list = attr_value($licht, 'readingList');
+	my $set_list = attr_value($licht, 'setList');
 
 	like($set_list, qr{power_brightness:slider,0,1,100\s+cmnd/all_classes/Dimmer}, 'Dimmer wird schreibbar');
 	like($set_list, qr{power_colorTemp:slider,200,1,380\s+cmnd/all_classes/CT}, 'Farbtemperatur wird schreibbar');
 	like($set_list, qr{power_color\s+cmnd/all_classes/Color2}, 'RGB-Farbe wird schreibbar');
 	like($set_list, qr{power_effect:}, 'Lichteffekte werden schreibbar');
-	like($set_list, qr{fan_percentage:slider,0,1,3\s+cmnd/all_classes/FanSpeed}, 'iFan-Speed wird schreibbar');
-	like($set_list, qr{shutter_action:open,close,stop}, 'Shutter-Aktionen werden schreibbar');
-	like($set_list, qr{shutter_position:slider,0,1,100\s+cmnd/all_classes/ShutterPosition1}, 'Shutter-Position wird schreibbar');
-	like($set_list, qr{shutter_tilt:slider,0,1,90\s+cmnd/all_classes/ShutterTilt1}, 'Shutter-Tilt wird schreibbar');
 
+	# Der Fan hat keinen Kanal und gehoert damit dem Geraet.
+	like($set_list, qr{fan_percentage:slider,0,1,3\s+cmnd/all_classes/FanSpeed}, 'iFan-Speed wird schreibbar');
+
+	my $shutter_sets = attr_value($rollladen, 'setList');
+	like($shutter_sets, qr{shutter_action:open,close,stop}, 'Shutter-Aktionen werden schreibbar');
+	like($shutter_sets, qr{shutter_position:slider,0,1,100\s+cmnd/all_classes/ShutterPosition1},
+		'Shutter-Position wird schreibbar');
+	like($shutter_sets, qr{shutter_tilt:slider,0,1,90\s+cmnd/all_classes/ShutterTilt1},
+		'Shutter-Tilt wird schreibbar');
+	unlike($set_list, qr{shutter_}, 'das Geraet schaltet den Rollladen nicht mit');
+
+	# Beide lesen dasselbe RESULT, jedes aber nur seine eigenen Schluessel: Der
+	# Rollladen verbirgt die des Lichts, das Licht die des Rollladens und
+	# zusaetzlich POWER1, das es von seinem eigenen Topic liest.
 	my ($result_line) = grep { m{^stat/all_classes/RESULT:} } split /\n/, $reading_list;
-	is($result_line, q!stat/all_classes/RESULT:.* { !
-		. $json_readings{result} . q! }!,
-		'alle JSON-Zustaende aus RESULT teilen sich die Autocreate-Auswertung');
+	like($result_line, qr/"POWER1" => "", "Shutter1_Direction" => ""/,
+		'das Geraet verbirgt den Rollladen und sein eigenes skalares POWER1');
+	unlike($result_line, qr/"Dimmer" => ""/, 'seine eigenen Lichtschluessel bleiben');
+	my ($shutter_line) = grep { m{^stat/all_classes/RESULT:} } split /\n/, attr_value($rollladen, 'readingList');
+	like($shutter_line, qr/"Dimmer" => ""/, 'der Rollladen verbirgt die Schluessel des Lichts');
+	unlike($shutter_line, qr/"Shutter1_Position" => ""/, 'seine eigenen bleiben');
 	is(scalar(() = $reading_list =~ m{stat/all_classes/RESULT}g), 1,
 		'RESULT wird trotz vieler Tasmota-Komponenten nur einmal ausgewertet');
-	my %semantic = map { $_->{id} => $_ } @{ $main::defs{MQTT2_All_Classes_Fan_445566}{SEMANTIC_METADATA}{entities} };
+
+	my %semantic = map { $_->{id} => $_ } @{ $main::defs{$licht}{SEMANTIC_METADATA}{entities} };
 	is($semantic{power}{capabilities}{power}{read}, 'POWER1',
 		'Lichtstatus liest bei mehreren Ausgaengen das nummerierte Rohreading');
 	is($semantic{power}{capabilities}{power}{write}, 'POWER1',
@@ -512,10 +534,12 @@ subtest 'native Tasmota-Klassen werden bis readingList und setList abgebildet' =
 		'Helligkeit liest das rohe Dimmer-Reading');
 	ok(!exists($semantic{switch_1}),
 		'unklassifizierter physischer Eingang bleibt als Reading ausserhalb der SemanticUI');
-	is($semantic{shutter}{capabilities}{position}{read}, 'Shutter1_Position',
-		'Shutter liest die abgeflachte Tasmota-Position');
 	is($semantic{fan}{capabilities}{percentage}{read}, 'FanSpeed',
 		'Fan liest das rohe FanSpeed-Reading');
+	my %shutter_semantic = map { $_->{id} => $_ }
+		@{ $main::defs{$rollladen}{SEMANTIC_METADATA}{entities} };
+	is($shutter_semantic{shutter}{capabilities}{position}{read}, 'Shutter1_Position',
+		'Shutter liest die abgeflachte Tasmota-Position');
 	is(reading_value('discovery', 'discoveredEntities'), 7, 'alle sieben Entities sind registriert');
 };
 
@@ -526,11 +550,12 @@ subtest 'SemanticUI filtert mehrkanalige Tasmota-Messwerte konservativ' => sub {
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/A1B2C3D4E5F6/config', $config);
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/A1B2C3D4E5F6/sensors', $sensors);
 
-	# Zwei Kanaele ergeben zwei Geraete; die Messwerte bleiben beim Hauptgeraet.
+	# Zwei Kanaele ergeben zwei Geraete. Der erste Kanal ist das Geraet selbst,
+	# die Messwerte bleiben bei ihm.
+	ok(!$main::defs{MQTT2_Meter_Switch_D4E5F6}, 'es entsteht kein technisches Hauptgeraet');
 	my %semantic = map { $_->{id} => $_ }
-		@{ $main::defs{MQTT2_Meter_Switch_D4E5F6}{SEMANTIC_METADATA}{entities} };
-	my %kanal1 = map { $_->{id} => $_ }
 		@{ $main::defs{MQTT2_Meter_Channel_1}{SEMANTIC_METADATA}{entities} };
+	my %kanal1 = %semantic;
 	my %kanal2 = map { $_->{id} => $_ }
 		@{ $main::defs{MQTT2_Meter_Channel_2}{SEMANTIC_METADATA}{entities} };
 	is($kanal1{power}{capabilities}{power}{read}, 'POWER1',
@@ -559,17 +584,23 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/AABBCCCF9A44/config', $config);
 	dispatch_message('mqtt', 'tasmota', 'tasmota/discovery/AABBCCCF9A44/sensors', $sensors);
 
-	# Zwei Kanaele ergeben drei Geraete: Die geraeteweite Telemetrie bleibt beim
-	# Hauptgeraet, jeder Kanal bekommt sein eigenes mit Zustand und Befehl.
-	my $haupt = 'MQTT2_SchwimmbadEntfeuchter_Switch_CF9A44';
+	# Zwei Kanaele ergeben zwei Geraete: Der erste Kanal ist das Geraet selbst und
+	# traegt dessen Telemetrie, der zweite bekommt sein eigenes daneben.
+	my $haupt = 'MQTT2_SchwimmbadEntfeuchter_Entfeuchter';
 	my $reading_list = attr_value($haupt, 'readingList');
+	# Ein Sammelpayload nennt den Schaltzustand aller Kanaele. Jeder Kanal liest
+	# ihn von seinem eigenen Topic, deshalb verschwinden alle Kanalschluessel aus
+	# den Sammelzeilen - auch der des Geraets selbst, sonst stuende er roh neben
+	# dessen state. Die attrTemplates loesen es mit jsonMap POWER1:0 POWER2:0.
+	my $ohne_kanaele = sub { $_[0] =~ s/\)\z/,{"POWER1" => "", "POWER2" => ""})/r };
 	my @expected = (
-		q!tele/tasmota_CF9A44/STATE:.* { ! . $json_readings{state} . q! }!,
-		q!tele/tasmota_CF9A44/SENSOR:.* { ! . $json_readings{sensor} . q! }!,
-		q!tele/tasmota_CF9A44/INFO(?:1|2|3):.* { $EVENT =~ m,^..Info(?:1|2|3)..(.+).$, ?  MQTT2_DISCOVERY_jsonReadings($NAME,'info',$1) : !
-			. $json_readings{info} . q! }!,
-		q!tele/tasmota_CF9A44/UPTIME:.* { ! . $json_readings{uptime} . q! }!,
-		q!stat/tasmota_CF9A44/RESULT:.* { ! . $json_readings{result} . q! }!,
+		q!tele/tasmota_CF9A44/STATE:.* { ! . $ohne_kanaele->($json_readings{state}) . q! }!,
+		q!tele/tasmota_CF9A44/SENSOR:.* { ! . $ohne_kanaele->($json_readings{sensor}) . q! }!,
+		q!tele/tasmota_CF9A44/INFO(?:1|2|3):.* { $EVENT =~ m,^..Info(?:1|2|3)..(.+).$, ?  !
+			. $ohne_kanaele->(q!MQTT2_DISCOVERY_jsonReadings($NAME,'info',$1)!) . q! : !
+			. $ohne_kanaele->($json_readings{info}) . q! }!,
+		q!tele/tasmota_CF9A44/UPTIME:.* { ! . $ohne_kanaele->($json_readings{uptime}) . q! }!,
+		q!stat/tasmota_CF9A44/RESULT:.* { ! . $ohne_kanaele->($json_readings{result}) . q! }!,
 	);
 	for my $line (@expected) {
 		is(scalar(grep { $_ eq $line } split /\n/, $reading_list), 1,
@@ -582,7 +613,8 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 	like($reading_list,
 		qr{^tele/tasmota_CF9A44/LWT:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
 		'und die speist die Availability-Auswertung');
-	is(attr_value($haupt, 'setList'), undef, 'das Hauptgeraet schaltet nichts');
+	is(attr_value($haupt, 'setList'), 'POWER1:ON,OFF cmnd/tasmota_CF9A44/POWER1',
+		'das Geraet schaltet seinen eigenen Kanal');
 
 	for my $kanal (1, 2) {
 		my $name = "MQTT2_SchwimmbadEntfeuchter_" . ($kanal == 1 ? 'Entfeuchter' : 'Luefter');
@@ -593,6 +625,16 @@ subtest 'Tasmota-Zweikanalgeraet erhaelt die vollstaendige Standard-readingList'
 			"POWER$kanal:ON,OFF cmnd/tasmota_CF9A44/POWER$kanal",
 			"Kanal $kanal schaltet genau seinen Ausgang");
 	}
+
+	# Nur das Geraet selbst fuehrt die Sammelzeilen. Der zweite Kanal liest sein
+	# Topic und aus der periodischen Telemetrie gezielt seinen Schluessel - so
+	# wie es die attrTemplates loesen, dort ohne den Nachzug aus der Telemetrie.
+	my $zweiter = attr_value('MQTT2_SchwimmbadEntfeuchter_Luefter', 'readingList');
+	unlike($zweiter, qr{/(?:RESULT|SENSOR|UPTIME|INFO)},
+		'der zweite Kanal bekommt keine Sammelzeile des Geraets');
+	unlike($zweiter, qr/POWER1/, 'und kennt den Schluessel des ersten nicht');
+	like($zweiter, qr{^tele/tasmota_CF9A44/STATE:\.\* \{ MQTT2_DISCOVERY_runtimeRef}m,
+		'liest seinen Zustand aber auch aus der Telemetrie');
 };
 
 subtest 'Tasmota-Power-readings folgen allgemein der rl-Kanalposition' => sub {

@@ -84,9 +84,11 @@ subtest 'ein Kanalname ersetzt Art und Kennung' => sub {
 	is(tasmota_name(), 'Tasmota_Wasser', 'aus dem Kanalnamen wird Tasmota_Wasser');
 	is(tasmota_name(dn => 'Keller'), 'Keller_Wasser', 'mit eigenem Geraetenamen Keller_Wasser');
 
-	# Bei mehreren Kanaelen beschreibt der Kanalname nicht mehr das Geraet.
+	# Bei mehreren Kanaelen gehoert der Name dem Kanal. Welcher Kanal das Geraet
+	# selbst ist, steht erst beim Aufteilen fest; bis dahin bleibt es bei Art und
+	# Kennung. Die Namen der aufgeteilten Geraete pruefen die Kanaltests.
 	is(tasmota_name(rl => [1, 1], fn => ['Wasser', 'Licht']), 'Tasmota_Switch_005301',
-		'mehrere Kanaele fallen auf Art und Kennung zurueck');
+		'mehrere Kanaele fallen im Mapping auf Art und Kennung zurueck');
 };
 
 subtest 'Shelly ohne eigenen Namen traegt Hersteller, Art und Kennung' => sub {

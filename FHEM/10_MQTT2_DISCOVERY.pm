@@ -513,7 +513,85 @@ sub devices_html {
 
 # Die abgewaehlten Readings liegen bewusst neben den Geraetedatensaetzen: Wird ein
 # MQTT2_DEVICE geloescht, verwirft die Registry seinen Datensatz und legt ihn bei
-# der naechsten Erkennung neu an; die Auswahl soll das ueberleben.
+
+# Was ein Kanal aus einem Sammelpayload liest, und was er von einem eigenen
+# skalaren Topic liest. Beides wird unterschiedlich behandelt, deshalb getrennt.
+# Nur Kanaele zaehlen; ein Sensor ohne Kanal gehoert dem Geraet.
+sub channel_keys {
+	my ($record) = @_;
+	my (%collective, %scalar);
+
+	for my $mapping (values %{ $record->{entities} || {} }) {
+		next if ref($mapping) ne 'HASH' || !defined($mapping->{channel});
+
+		for my $line (@{ $mapping->{reading_lines} || [] }) {
+			next if ref($line) ne 'HASH';
+			my $key = $line->{json_key};
+			$collective{$key} = 1 if defined($key) && !ref($key) && $key ne '';
+			my ($name, $topic) = ($line->{name}, $line->{topic});
+			next if !defined($name) || ref($name) || $name eq ''
+				|| !defined($topic) || ref($topic);
+
+			# Steht der Name als letztes Segment im Topic, liest der Kanal dort
+			# einen einzelnen Wert - und genau unter diesem Schluessel nennt ihn
+			# der Sammelpayload noch einmal.
+			$scalar{$name} = 1 if $topic =~ m{(?:\A|/)\Q$name\E\z};
+		}
+
+	}
+
+	return (\%collective, \%scalar);
+}
+
+# Welche Schluessel aus den Sammelzeilen eines Datensatzes verschwinden.
+# Zweierlei gehoert nicht hinein: was ein Kanal von seinem eigenen Topic liest -
+# es stuende sonst roh neben seinem state, so wie es die attrTemplates mit
+# jsonMap POWER1:0 wegwerfen -, und was einem anderen Kanal gehoert, denn der
+# Sammelpayload beschreibt das ganze Geraet. Was dieser Datensatz selbst aus dem
+# Sammelpayload liest, bleibt.
+sub channel_json_keys {
+	my ($hash, $record, $registry) = @_;
+
+	# Beim Anwenden eines Stapels ist der sichtbare Registry-Stand noch der alte;
+	# die Geschwister stehen in der Kopie, auf der gerade gearbeitet wird.
+	$registry = registry($hash) if ref($registry) ne 'HASH';
+	my $devices = $registry->{devices} || {};
+	my $name = $record->{name};
+	return {} if !defined($name) || $name eq '';
+	my ($identity) = grep {
+		ref($devices->{$_}) eq 'HASH' && ($devices->{$_}{name} // '') eq $name
+	} sort keys %$devices;
+	return {} if !defined($identity);
+	my $base = $identity;
+	$base =~ s/\|ch[^|]*\z//;
+	my @siblings = grep { $_ eq $base || index($_, "$base|ch") == 0 } sort keys %$devices;
+
+	# Ohne Kanalgeschwister ist nichts aufgeteilt, und der Sammelpayload gehoert
+	# dem einen Geraet ganz.
+	return {} if !grep { /\|ch/ } @siblings;
+	my ($own_collective) = channel_keys($record);
+	my %hidden;
+
+	for my $sibling (@siblings) {
+		my ($collective, $scalar) = channel_keys($devices->{$sibling});
+		$hidden{$_} = 1 for keys %$scalar;
+		next if $sibling eq $identity;
+		$hidden{$_} = 1 for keys %$collective;
+	}
+
+	delete @hidden{ keys %$own_collective };
+	return \%hidden;
+}
+
+# Ein Sammelpayload beschreibt das ganze Geraet und nennt damit die Schluessel
+# aller Kanaele. In den Sammelzeilen eines aufgeteilten Geraets haben sie nichts
+# zu suchen: Jeder Kanal liest seinen Zustand von seinem eigenen Topic, und roh
+# stuende er ein zweites Mal daneben. Die attrTemplates loesen es genauso, dort
+# mit jsonMap POWER1:0 POWER2:0 am Kanalgeraet.
+
+# Die im Dialog abgewaehlten Readings eines Geraets. Sie liegen in der Registry
+# und nicht am Geraet: Ein von Hand geloeschtes Device legt die naechste
+# Erkennung neu an, die Auswahl soll das ueberleben.
 sub ignored_entities {
 	my ($hash, $record) = @_;
 	return () if ref($record) ne 'HASH' || !defined($record->{name});
@@ -2954,12 +3032,24 @@ sub process_inner {
 	# Ein Geraet mit mehreren Kanaelen wird in ein Geraet je Kanal aufgeteilt.
 	# Das steht erst fest, wenn alle Entities einer Nachricht bekannt sind; sie
 	# kommen gemeinsam an, deshalb genuegt ein Blick vor der Schleife.
-	my %channels;
-	$channels{ $_->{entity}{channel} } = 1 for grep {
+	my (%channels, %channel_names);
+
+	for my $event (grep {
 		ref($_) eq 'HASH' && ($_->{operation} // '') eq 'upsert'
 			&& ref($_->{entity}) eq 'HASH' && defined($_->{entity}{channel})
-	} @{ $parsed->{events} || [] };
+	} @{ $parsed->{events} || [] }) {
+		my $number = $event->{entity}{channel};
+		$channels{$number} = 1;
+		my $channel_name = $event->{entity}{channel_name};
+		$channel_names{$number} = $channel_name
+			if defined($channel_name) && !ref($channel_name) && $channel_name ne '';
+	}
 	my $split_channels = keys(%channels) > 1 ? 1 : 0;
+	my ($first_channel) = sort { $a <=> $b } keys %channels;
+
+	# Der erste Kanal ist das Geraet. Sein Name gilt deshalb als Geraetename,
+	# auf dem die weiteren Kanaele aufbauen.
+	my $first_channel_name = defined($first_channel) ? $channel_names{$first_channel} : undef;
 
 	for my $event (@{ $parsed->{events} || [] }) {
 		my $operation = $event->{operation} || 'upsert';
@@ -3041,7 +3131,7 @@ sub process_inner {
 		my $staged_identity = $mapping->{identity};
 		my $error = stage_mapping(
 			$hash, $registry, $mapping, $cid, \$created_now, $split_channels,
-			\$staged_identity,
+			\$staged_identity, $first_channel, $first_channel_name,
 		);
 
 		# Ein Staging-Fehler kann bereits ein neues Device angelegt haben; solche
@@ -3066,7 +3156,7 @@ sub process_inner {
 		# neue Attribute erhaelt und Device-Discovery atomar sichtbar wird.
 		for my $identity (sort keys %pending_identities) {
 			my $record = $registry->{devices}{$identity};
-			my $error = apply_device_lines($hash, $record);
+			my $error = apply_device_lines($hash, $record, { registry => $registry });
 
 			# Scheitert ein Zieldevice, gehoeren alle in dieser Nachricht neu erzeugten
 			# Devices zum fehlgeschlagenen Apply und werden gemeinsam bereinigt.
@@ -3363,11 +3453,31 @@ sub existing_cid_target {
 # Ordnet ein Mapping einem bestehenden oder neu angelegten Registry-Zieldevice zu.
 sub stage_mapping {
 	my ($hash, $registry, $mapping, $cid, $created_now_ref, $split_channels,
-		$staged_identity_ref) = @_;
+		$staged_identity_ref, $first_channel, $first_channel_name) = @_;
 
-	# Beim Aufteilen bekommt jeder Kanal einen eigenen Datensatz und damit ein
-	# eigenes Geraet; geraeteweite Werte bleiben beim Hauptgeraet.
+	# Ein Geraet mit mehreren Kanaelen wird in ein Geraet je Kanal aufgeteilt,
+	# nicht in ein technisches Hauptgeraet und dazu die Kanaele: Ein Kanal ein
+	# Geraet, zwei Kanaele zwei Geraete, n Kanaele n Geraete. Der niedrigste
+	# Kanal ist das Geraet selbst und traegt dessen Telemetrie; so machen es auch
+	# die attrTemplates, deren zweites Geraet nur den zweiten Kanal fuehrt.
 	my $channel = $split_channels ? $mapping->{channel} : undef;
+	my $is_first = defined($channel) && defined($first_channel) && $channel eq $first_channel;
+	undef $channel if $is_first;
+
+	# Traegt dieser erste Kanal einen eigenen Namen, benennt er damit auch das
+	# Geraet - genauso wie bei einem einkanaligen Geraet. Die Identitaet bleibt
+	# die des Geraets, nur der Name kommt vom Kanal.
+	$mapping = channel_mapping($mapping, $first_channel)
+		if $is_first && defined($mapping->{channel_name}) && $mapping->{channel_name} ne '';
+
+	# Ein weiterer Kanal haengt seinen Namen an den des Geraets. Benennt der
+	# erste Kanal das Geraet, ist das sein Name und nicht mehr der aus Art und
+	# Kennung.
+	if (defined($channel) && defined($first_channel_name)
+			&& defined($mapping->{device_base}) && $mapping->{device_base} ne '') {
+		$mapping = { %$mapping,
+			proposed_name => "$mapping->{device_base}_$first_channel_name" };
+	}
 	my $identity = $mapping->{identity} . (defined($channel) ? "|ch$channel" : '');
 	$mapping = channel_mapping($mapping, $channel) if defined($channel);
 	$$staged_identity_ref = $identity if ref($staged_identity_ref) eq 'SCALAR';
@@ -4112,7 +4222,13 @@ sub apply_device_lines {
 		ignored_entities($hash, $record),
 		grep { $_ ne '' } split(/\s*,\s*/, key($hash, $record, 'hide')),
 	);
-	if (%ignored_entities) {
+
+	# Die Kanalschluessel verschwinden nur aus den Sammelzeilen, nicht als
+	# Eintrag: Das eigene skalare Topic tragt denselben Namen und ist die Quelle
+	# des Zustands.
+	my %hidden_json = (%ignored_entities,
+		%{ channel_json_keys($hash, $record, $options->{registry}) });
+	if (%hidden_json) {
 
 		# Ohne abgeschaltetes Autocreate haengt MQTT2_DEVICE die abgewaehlten Topics
 		# beim naechsten Eintreffen selbst wieder an; das gilt auch nach einer Neuanlage.
@@ -4213,7 +4329,7 @@ sub apply_device_lines {
 	# Abgewaehlt ist der sichtbare Name. Ein eigenes jsonMap am Zielgeraet kann
 	# ihn jederzeit aendern, deshalb wird zusaetzlich beim Auswerten gefiltert;
 	# hier faellt nur weg, was ohne Umbenennung schon am Schluessel erkennbar ist.
-	local $MQTT2_Discovery::Mapper::Renderer::HIDDEN_JSON_KEYS = \%ignored_entities;
+	local $MQTT2_Discovery::Mapper::Renderer::HIDDEN_JSON_KEYS = \%hidden_json;
 	@reading_entries = @{ MQTT2_Discovery::Mapper::render_entries(
 		$prepared_readings, $render_device_topic, $reserved_readings, \%runtime_references,
 	) };
@@ -4337,7 +4453,7 @@ sub apply_device_lines {
 	$record->{runtime_refs} = { %runtime_references };
 	$defs{$name}{helper}{mqtt2_discovery_runtime_refs} = $record->{runtime_refs};
 	$defs{$name}{helper}{mqtt2_discovery_availability_reading} = $availability_reading;
-	$defs{$name}{helper}{mqtt2_discovery_hidden_readings} = { %ignored_entities };
+	$defs{$name}{helper}{mqtt2_discovery_hidden_readings} = { %hidden_json };
 	$defs{$name}{helper}{mqtt2_discovery_json_map} = {
 		%{ ref($defs{$name}{JSONMAP}) eq 'HASH' ? $defs{$name}{JSONMAP} : {} }
 	};

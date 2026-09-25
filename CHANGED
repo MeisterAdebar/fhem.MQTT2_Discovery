@@ -1,6 +1,51 @@
 # MQTT2_DISCOVERY changes, newest entries first.
 # Generated from commit messages by tools/update_changed.pl.
-# Msg-SHA256: df410a8376aa92b8cc22f872ff8c8e5347260f8eb887d5bea2ad49ebaaa0b3cd
+# Msg-SHA256: aa4455e99148f1c34e52ad0d8959b948041b2702fd66f8182a8ec1458e5d59ed
+- change: MQTT2_DISCOVERY: Ein Kanal ein Geraet, zwei Kanaele zwei Geraete
+  - Ein mehrkanaliges Geraet wird in ein Geraet je Kanal aufgeteilt, nicht in
+    ein technisches Hauptgeraet und dazu die Kanaele. Der erste belegte Kanal
+    ist das Geraet selbst: Er behaelt dessen Namen und traegt dessen
+    Telemetrie, jeder weitere bekommt ein eigenes Geraet daneben. So loesen es
+    auch die attrTemplates, deren tasmota_2channel_split genau ein zweites
+    Geraet anlegt.
+  - Traegt dieser erste Kanal einen eigenen Namen, benennt er damit das Geraet,
+    und die weiteren haengen ihren Namen daran. Aus fn=["Wasser"] und rl=[1,1]
+    werden Tasmota_Wasser und Tasmota_Wasser_2. Ein leerer Steckplatz davor
+    verschiebt weder Nummer noch Namen.
+  - Ein Kanal ist eine Position in rl, beim Rollladen die seiner ersten
+    Haelfte. Vorher zaehlte ein Rollladen nach seiner eigenen Nummer: Ein
+    Lichtkanal 1 und ein Rollladen 1 waren damit derselbe Kanal, und ein Geraet
+    aus beidem wurde nicht aufgeteilt.
+  - Vier Rollladenhaelften sind zwei Rollladen. Die Paarbildung sah nur auf den
+    Vorgaenger, dadurch galt die dritte Haelfte als zweite eines Paars und der
+    zweite Rollladen entfiel ganz.
+  - Ein Rollladen belegt zwei Relaispositionen, ist aber ein Kanal. Die
+    Pruefung, ob ein Geraet nur einen Kanal hat, zaehlt deshalb Kanaele und
+    nicht Positionen; ein einzelner Rollladen tragt damit wieder seinen Namen.
+    Sie nimmt ausserdem den Namen der ersten belegten Position, nicht den der
+    ersten ueberhaupt.
+  - Ein Kanal liest seinen Zustand von seinem eigenen skalaren Topic statt aus
+    dem Sammelpayload. Der beschreibt das ganze Geraet; ein Kanal bekaeme
+    daraus die Schluessel der anderen als eigene Readings. In der Vorlage hat
+    das zweite Geraet deshalb genau eine Zeile, STATTOPIC/POWER2 auf state.
+  - Aus den Sammelzeilen verschwindet zweierlei: was ein Kanal von seinem
+    eigenen Topic liest - es stuende sonst roh neben seinem state, so wie die
+    Vorlage es mit jsonMap POWER1:0 wegwirft - und was einem anderen Kanal
+    gehoert. Was ein Datensatz selbst aus dem Sammelpayload liest, bleibt: Der
+    Rollladen behaelt seine Shutter1-Felder, das Licht seine Dimmer- und
+    Farbfelder.
+  - Ein weiterer Kanal liest seinen Schluessel zusaetzlich gezielt aus der
+    periodischen Telemetrie. Damit zieht sein Zustand auch ohne eine Aenderung
+    am Geraet nach; die Vorlage kennt das nicht und bleibt bis zum naechsten
+    Schalten stehen.
+  - Die geraeteweiten Zusatzsignale gehoeren an ein Entity ohne Kanal, sonst an
+    den ersten. Vorher nahm der Code schlicht das erste Entity: Ein Geraet ohne
+    Sensoren legte damit seine ganze Telemetrie samt fremder POWER-Schluessel
+    in einen beliebigen Kanal.
+  - Die Tests deckten den Fall nicht ab: Der vorhandene Zweikanaltest schickt
+    eine Sensornachricht mit und benennt beide Kanaele. Neu sind mehrere
+    Kanaele ohne Sensoren mit genau einem benannten Kanal sowie Rollladen neben
+    Schaltkanal, ein Rollladen allein und zwei Rollladen.
 - change: MQTT2_DISCOVERY: Doku beschreibt den Stand dieser Fassung
   - Die Einleitung sagt, was mit den Vorgaben am Zielgeraet entsteht: weder
     readingList noch setList, beides ist ueber den Schluesselraum aber zu

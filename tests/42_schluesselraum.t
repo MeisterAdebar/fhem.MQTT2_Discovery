@@ -297,17 +297,16 @@ subtest 'mehrere Kanaele werden in eigene Geraete aufgeteilt' => sub {
 	my @alle = sort grep { ($main::defs{$_}{TYPE} // '') eq 'MQTT2_DEVICE' } keys %main::defs;
 	$zweiter_kanal = 0;
 
-	# Drei Geraete: das Hauptgeraet mit WLAN, Laufzeit und Erreichbarkeit, dazu
-	# je Kanal eines.
-	is(scalar(@alle), 3, 'zwei Kanaele ergeben ein Haupt- und zwei Kanalgeraete');
-	ok($main::defs{$target}, 'das Hauptgeraet behaelt seinen Namen');
+	# Zwei Geraete: Der erste Kanal ist das Geraet selbst und behaelt Namen,
+	# WLAN, Laufzeit und Erreichbarkeit; der zweite bekommt ein eigenes daneben.
+	is(scalar(@alle), 2, 'zwei Kanaele ergeben zwei Geraete');
+	ok($main::defs{$target}, 'der erste Kanal behaelt den Namen des Geraets');
 	my @geraete = grep { $_ ne $target } @alle;
-	like($geraete[0], qr/\Q$target\E_1\z/, 'das erste Kanalgeraet traegt seine Nummer');
-	like($geraete[1], qr/\Q$target\E_2\z/, 'das zweite ebenso');
+	like($geraete[0], qr/\Q$target\E_2\z/, 'der zweite tragt seine Nummer');
 
 	# Jeder Kanal hat sein eigenes Geraet und damit seinen eigenen Namensraum;
 	# die Temperatur heisst in beiden schlicht temperature.
-	for my $geraet (@geraete) {
+	for my $geraet (@alle) {
 		my ($record) = grep {
 			ref($_) eq 'HASH' && ($_->{name} // '') eq $geraet
 		} values %{ FHEM::MQTT2_DISCOVERY::registry($hash)->{devices} || {} };
